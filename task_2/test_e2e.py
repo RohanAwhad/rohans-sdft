@@ -1,71 +1,40 @@
-"""E2E test: launch server + trainer, get logprobs, push random weights, compare.
+"""E2E test: pure NCCL logprob server + trainer.
 
-Weight sync coordination:
-  1. Tell trainer to "perturb" weights
-  2. POST /sync_weights to server in background thread (blocks on NCCL broadcast)
-  3. Tell trainer to "broadcast" (both sides participate in the collective)
-  4. Both complete → get logprobs again
+Launches server (rank 1) and trainer (rank 0), then drives the trainer
+via stdin commands to get logprobs, perturb weights, sync, and compare.
 
 Usage:
     GPU_TRAINER=2 GPU_SERVER=3 python test_e2e.py
 """
 
-import io
 import os
 import subprocess
 import sys
-import threading
 import time
-
-import numpy as np
-import requests
-from transformers import AutoTokenizer
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-0.6B")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
 MASTER_PORT = int(os.environ.get("MASTER_PORT", "29500"))
-SERVER_URL = f"http://localhost:{SERVER_PORT}"
 GPU_SERVER = os.environ.get("GPU_SERVER", "3")
 GPU_TRAINER = os.environ.get("GPU_TRAINER", "2")
 
 
-def wait_for_server(timeout: int = 180) -> bool:
-    """Poll health endpoint until server is ready."""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            r = requests.get(f"{SERVER_URL}/health", timeout=2)
-            if r.status_code == 200:
-                return True
-        except requests.ConnectionError:
-            pass
-        time.sleep(2)
-    return False
-
-
-def get_logprobs(token_ids: list[int]) -> np.ndarray:
-    """Fetch logprobs from server. Returns (seq_len, vocab_size) float32 array."""
-    r = requests.post(
-        f"{SERVER_URL}/logprobs",
-        json={"token_ids": token_ids},
-        timeout=60,
-    )
-    r.raise_for_status()
-    return np.load(io.BytesIO(r.content))
-
-
-def _read_trainer_until(proc: subprocess.Popen, marker: str) -> bool:
-    """Read trainer stdout lines until one contains `marker`. Returns False on EOF."""
+def _read_until(proc: subprocess.Popen, marker: str) -> tuple[bool, str]:
+    """Read trainer stdout until a line contains marker."""
     while True:
         line = proc.stdout.readline()
         if not line:
-            return False
+            return False, ""
         print(f"  [trainer] {line.rstrip()}", flush=True)
         if marker in line:
-            return True
+            return True, line
         if proc.poll() is not None:
-            return False
+            return False, ""
+
+
+def _send(proc: subprocess.Popen, cmd: str) -> None:
+    proc.stdin.write(cmd + "\n")
+    proc.stdin.flush()
 
 
 def main() -> int:
@@ -73,18 +42,16 @@ def main() -> int:
         **os.environ,
         "MODEL_NAME": MODEL_NAME,
         "MASTER_PORT": str(MASTER_PORT),
-        "SERVER_PORT": str(SERVER_PORT),
     }
     env_server = {**common_env, "CUDA_VISIBLE_DEVICES": GPU_SERVER}
     env_trainer = {**common_env, "CUDA_VISIBLE_DEVICES": GPU_TRAINER}
 
-    print(f"=== E2E Test ===", flush=True)
+    print(f"=== E2E Test (pure NCCL) ===", flush=True)
     print(f"Model:   {MODEL_NAME}", flush=True)
-    print(f"Server:  GPU {GPU_SERVER}  (port {SERVER_PORT})", flush=True)
+    print(f"Server:  GPU {GPU_SERVER}", flush=True)
     print(f"Trainer: GPU {GPU_TRAINER}", flush=True)
     print(f"NCCL:    localhost:{MASTER_PORT}\n", flush=True)
 
-    # Launch both processes
     server_proc = subprocess.Popen(
         [sys.executable, os.path.join(SCRIPT_DIR, "src", "server.py")],
         env=env_server,
@@ -102,82 +69,53 @@ def main() -> int:
 
     exit_code = 1
     try:
-        # Wait for trainer READY
-        print("Waiting for trainer to be ready ...", flush=True)
-        if not _read_trainer_until(trainer_proc, "READY"):
-            print("ERROR: Trainer failed to reach READY", flush=True)
+        print("Waiting for trainer READY ...", flush=True)
+        if not _read_until(trainer_proc, "READY")[0]:
+            print("ERROR: Trainer never reached READY", flush=True)
             return 1
 
-        # Wait for server health
-        print("Waiting for server health check ...", flush=True)
-        if not wait_for_server():
-            print("ERROR: Server failed to start within 180s", flush=True)
-            return 1
-        print("Server is ready!\n", flush=True)
-
-        # Tokenize a test sentence
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        test_text = "The quick brown fox jumps over the lazy dog"
-        test_tokens = tokenizer.encode(test_text)
-        print(f"Test text:   '{test_text}'", flush=True)
-        print(f"Token IDs:   {test_tokens}  (len={len(test_tokens)})\n", flush=True)
-
-        # --- Step 1: get initial logprobs ---
-        print("Step 1: Getting initial logprobs ...", flush=True)
-        lp1 = get_logprobs(test_tokens)
-        print(f"  shape: {lp1.shape}  mean: {lp1.mean():.4f}\n", flush=True)
-
-        # --- Step 2: perturb weights (trainer side only) ---
-        print("Step 2: Perturbing weights on trainer ...", flush=True)
-        trainer_proc.stdin.write("perturb\n")
-        trainer_proc.stdin.flush()
-        if not _read_trainer_until(trainer_proc, "PERTURBED"):
-            print("ERROR: Trainer failed during perturbation", flush=True)
-            return 1
-        print("  Weights perturbed.\n", flush=True)
-
-        # --- Step 3: NCCL weight sync ---
-        # Server must enter broadcast_weights before the trainer does.
-        # We POST /sync_weights in a background thread (it blocks on NCCL),
-        # then tell the trainer to broadcast.
-        print("Step 3: NCCL weight sync ...", flush=True)
-        sync_result: dict = {}
-
-        def _trigger_server_sync():
-            try:
-                r = requests.post(f"{SERVER_URL}/sync_weights", timeout=120)
-                sync_result["status"] = r.status_code
-            except Exception as e:
-                sync_result["error"] = str(e)
-
-        sync_thread = threading.Thread(target=_trigger_server_sync)
-        sync_thread.start()
-        time.sleep(1)  # let server enter the NCCL broadcast
-
-        # Now tell trainer to broadcast (both sides participate)
-        trainer_proc.stdin.write("broadcast\n")
-        trainer_proc.stdin.flush()
-        if not _read_trainer_until(trainer_proc, "BROADCAST_DONE"):
-            print("ERROR: Trainer failed during broadcast", flush=True)
+        # Step 1: get initial logprobs via NCCL
+        print("\nStep 1: Get initial logprobs via NCCL", flush=True)
+        _send(trainer_proc, "logprobs v1")
+        if not _read_until(trainer_proc, "LOGPROBS v1")[0]:
+            print("ERROR: Failed to get v1 logprobs", flush=True)
             return 1
 
-        sync_thread.join(timeout=30)
-        print(f"  Sync result: {sync_result}", flush=True)
-        if sync_result.get("status") != 200:
-            print(f"ERROR: Server sync failed: {sync_result}", flush=True)
+        # Step 2: perturb weights on trainer
+        print("\nStep 2: Perturb trainer weights", flush=True)
+        _send(trainer_proc, "perturb")
+        if not _read_until(trainer_proc, "PERTURBED")[0]:
+            print("ERROR: Failed to perturb", flush=True)
             return 1
-        print("  NCCL weight sync complete!\n", flush=True)
 
-        # --- Step 4: get updated logprobs ---
-        print("Step 4: Getting updated logprobs ...", flush=True)
-        lp2 = get_logprobs(test_tokens)
-        print(f"  shape: {lp2.shape}  mean: {lp2.mean():.4f}\n", flush=True)
+        # Step 3: sync weights to server via NCCL
+        print("\nStep 3: Sync weights to server via NCCL", flush=True)
+        _send(trainer_proc, "sync_weights")
+        if not _read_until(trainer_proc, "SYNCED")[0]:
+            print("ERROR: Failed to sync weights", flush=True)
+            return 1
 
-        # --- Step 5: compare ---
-        diff = np.abs(lp1 - lp2)
-        mean_diff = float(diff.mean())
-        max_diff = float(diff.max())
-        print(f"=== Results ===", flush=True)
+        # Step 4: get updated logprobs via NCCL
+        print("\nStep 4: Get updated logprobs via NCCL", flush=True)
+        _send(trainer_proc, "logprobs v2")
+        if not _read_until(trainer_proc, "LOGPROBS v2")[0]:
+            print("ERROR: Failed to get v2 logprobs", flush=True)
+            return 1
+
+        # Step 5: compare
+        print("\nStep 5: Compare", flush=True)
+        _send(trainer_proc, "compare v1 v2")
+        found, line = _read_until(trainer_proc, "DIFF")
+        if not found:
+            print("ERROR: Failed to compare", flush=True)
+            return 1
+
+        # Parse: DIFF mean=X max=Y
+        parts = line.strip().split()
+        mean_diff = float([p for p in parts if p.startswith("mean=")][0].split("=")[1])
+        max_diff = float([p for p in parts if p.startswith("max=")][0].split("=")[1])
+
+        print(f"\n=== Results ===", flush=True)
         print(f"Mean |diff|: {mean_diff:.6f}", flush=True)
         print(f"Max  |diff|: {max_diff:.6f}", flush=True)
 
@@ -185,13 +123,14 @@ def main() -> int:
             print("\nSUCCESS: Logprobs changed significantly after NCCL weight push!", flush=True)
             exit_code = 0
         else:
-            print("\nFAILURE: Logprobs did not change enough (mean diff <= 0.01)", flush=True)
+            print("\nFAILURE: Logprobs did not change enough", flush=True)
             exit_code = 1
 
     finally:
-        # Cleanup: just terminate both — dist.destroy_process_group blocks
-        # if the other rank is already dead, so don't attempt clean NCCL shutdown.
         print("\nShutting down ...", flush=True)
+        if trainer_proc.poll() is None:
+            _send(trainer_proc, "shutdown")
+            time.sleep(2)
         for proc in (trainer_proc, server_proc):
             if proc.poll() is None:
                 proc.terminate()
