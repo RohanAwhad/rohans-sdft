@@ -2,6 +2,10 @@
 
 Loads an HF model on GPU, serves log-probabilities over HTTP,
 and receives weight updates from the trainer process via NCCL broadcast.
+
+Weight sync is triggered via POST /sync_weights — the handler blocks on
+broadcast_weights() until the trainer (rank 0) also calls broadcast.
+No background NCCL thread needed.
 """
 
 import io
@@ -10,7 +14,6 @@ import threading
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import Response
@@ -55,28 +58,23 @@ def get_logprobs(req: LogprobRequest) -> Response:
     return Response(content=buf.getvalue(), media_type="application/octet-stream")
 
 
-@app.get("/health")
-def health():
+@app.post("/sync_weights")
+def sync_weights():
+    """Receive weight update from trainer via NCCL broadcast.
+
+    Blocks until the trainer (rank 0) also calls broadcast_weights.
+    The caller must ensure the trainer broadcasts concurrently.
+    """
+    print("[server] /sync_weights called — entering NCCL broadcast ...", flush=True)
+    with weight_lock:
+        broadcast_weights(model, src=0)
+    print("[server] /sync_weights done — weights updated.", flush=True)
     return {"status": "ok"}
 
 
-def _nccl_receiver_loop() -> None:
-    """Background thread: blocks on NCCL broadcast waiting for weight updates.
-
-    Protocol:
-      - rank 0 broadcasts a 1-element signal tensor
-      - signal == 1.0  → receive full weight broadcast
-      - signal <  0    → shutdown
-    """
-    signal = torch.zeros(1, device=DEVICE)
-    while True:
-        dist.broadcast(signal, src=0)
-        if signal.item() < 0:
-            break
-        if signal.item() == 1.0:
-            with weight_lock:
-                broadcast_weights(model, src=0)
-        signal.zero_()
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 def main() -> None:
@@ -93,9 +91,6 @@ def main() -> None:
     print(f"[server] Initializing NCCL (rank={NCCL_RANK}) ...", flush=True)
     init_nccl(rank=NCCL_RANK, master_port=MASTER_PORT)
     print("[server] NCCL initialized.", flush=True)
-
-    receiver = threading.Thread(target=_nccl_receiver_loop, daemon=True)
-    receiver.start()
 
     print(f"[server] Starting HTTP on port {SERVER_PORT} ...", flush=True)
     uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)
