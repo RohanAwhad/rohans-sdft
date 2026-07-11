@@ -1,0 +1,12 @@
+[project]
+name = "logprob-server"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.5",
+    "transformers",
+    "fastapi",
+    "uvicorn[standard]",
+    "numpy",
+    "requests",
+]
