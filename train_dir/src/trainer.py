@@ -131,7 +131,7 @@ def train() -> None:
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
     ).to(DEVICE)
     model.train()
     model.gradient_checkpointing_enable(
