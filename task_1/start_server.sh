@@ -15,6 +15,8 @@ echo "Once the server is ready, run in another terminal:"
 echo "  cd $REPO_ROOT && .hf_venv/bin/python task_1/nccl_demo.py"
 echo ""
 
+export PATH="$REPO_ROOT/.vllm_venv/bin:$PATH"
+
 CUDA_VISIBLE_DEVICES=0 \
 VLLM_SERVER_DEV_MODE=1 \
 "$REPO_ROOT/.vllm_venv/bin/python" -m vllm.entrypoints.openai.api_server \
