@@ -5,7 +5,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$(dirname "${BASH_SOURCE[0]}")")" && pwd)"
-MODEL="google/gemma-3-270m-it"
+MODEL="Qwen/Qwen3-0.6B"
 
 echo "Starting vLLM server on GPU 0 with dummy weights..."
 echo "Model: $MODEL"

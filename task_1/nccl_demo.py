@@ -29,7 +29,7 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.utils.network_utils import get_ip, get_open_port
 
 BASE_URL = "http://localhost:8000"
-MODEL_NAME = "google/gemma-3-270m-it"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 TRAINER_DEVICE = "cuda:1"
 
 
