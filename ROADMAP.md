@@ -1,0 +1,3 @@
+- [ ] EMA in teachers weight update
+- [ ] per step broadcast update 
+- [ ] metrics similar to from sdpo

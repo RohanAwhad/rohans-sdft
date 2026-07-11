@@ -60,22 +60,53 @@ DEVICE = torch.device("cuda:0")
 def compute_reverse_kl(
     student_logits: torch.Tensor,
     teacher_log_probs: torch.Tensor,
-) -> torch.Tensor:
+    completion_ids: list[int],
+    eos_token_id: int | None,
+) -> tuple[torch.Tensor, dict[str, float]]:
     """Reverse KL(student || teacher) averaged over token positions.
 
     Args:
         student_logits:    (C, V) bfloat16, with gradient
         teacher_log_probs: (C, V) float32, detached
+        completion_ids:    token IDs of the completion (for signal metrics)
+        eos_token_id:      EOS token ID
 
     Returns:
-        scalar loss (float32)
+        (loss, metrics_dict)
     """
+    C = student_logits.size(0)
+    device = student_logits.device
+
     # Upcast student to float32 for numerical stability
     s_log = F.log_softmax(student_logits.float(), dim=-1)  # (C, V)
     s_prob = s_log.exp()  # (C, V)
     # KL(p_s || p_t) = sum_v p_s(v) * (log p_s(v) - log p_t(v))
     per_token_kl = (s_prob * (s_log - teacher_log_probs)).sum(dim=-1)  # (C,)
-    return per_token_kl.mean()
+    loss = per_token_kl.mean()
+
+    # --- SDPO-style signal metrics (detached) ---
+    with torch.no_grad():
+        token_ids = torch.tensor(completion_ids, device=device, dtype=torch.long)
+        policy_logp = s_log[torch.arange(C, device=device), token_ids]  # (C,)
+        critic_logp = teacher_log_probs[torch.arange(C, device=device), token_ids]  # (C,)
+        signal = critic_logp - policy_logp  # (C,)
+
+        metrics = {
+            "sdpo/signal_mean": signal.mean().item(),
+            "sdpo/signal_std": signal.std().item(),
+            "sdpo/len_signal_mean": signal.sum().item() / C,
+            "sdpo/policy_logp": policy_logp.mean().item(),
+            "sdpo/critic_logp": critic_logp.mean().item(),
+        }
+
+        if eos_token_id is not None:
+            eos_mask = token_ids == eos_token_id
+            if eos_mask.any():
+                metrics["sdpo/eos_signal_mean"] = signal[eos_mask].mean().item()
+                metrics["sdpo/eos_logp_mean"] = policy_logp[eos_mask].mean().item()
+                metrics["sdpo/eos_logratio_mean"] = (critic_logp[eos_mask] - policy_logp[eos_mask]).mean().item()
+
+    return loss, metrics
 
 
 def forward_student(
@@ -197,6 +228,7 @@ def train() -> None:
         accum_loss_sum = 0.0
         accum_samples = 0
         accum_comp_len_sum = 0
+        accum_metrics: dict[str, list[float]] = {}
 
         optimizer.zero_grad()
 
@@ -240,8 +272,11 @@ def train() -> None:
                 device=DEVICE,
             )  # (C, V) float32
 
-            # 4. Reverse KL loss
-            loss = compute_reverse_kl(student_logits, teacher_log_probs.detach())
+            # 4. Reverse KL loss + signal metrics
+            loss, step_metrics = compute_reverse_kl(
+                student_logits, teacher_log_probs.detach(),
+                completion_ids, tokenizer.eos_token_id,
+            )
             scaled_loss = loss / GRAD_ACCUM_STEPS
             scaled_loss.backward()
 
@@ -250,6 +285,8 @@ def train() -> None:
             accum_loss_sum += loss_val
             accum_samples += 1
             accum_comp_len_sum += len(completion_ids)
+            for k, v in step_metrics.items():
+                accum_metrics.setdefault(k, []).append(v)
             epoch_loss_sum += loss_val
             epoch_samples += 1
             global_step += 1
@@ -269,6 +306,8 @@ def train() -> None:
                     "train/completion_length": avg_comp_len,
                     "train/epoch": epoch,
                 }
+                for k, vals in accum_metrics.items():
+                    log_dict[k] = sum(vals) / len(vals)
 
                 # Sample preview every 10 optimizer steps
                 if optimizer_step % 10 == 0:
@@ -288,6 +327,7 @@ def train() -> None:
                 accum_loss_sum = 0.0
                 accum_samples = 0
                 accum_comp_len_sum = 0
+                accum_metrics = {}
 
         # Flush remaining accumulated gradients
         if global_step % GRAD_ACCUM_STEPS != 0:
