@@ -189,15 +189,15 @@ def main() -> int:
             exit_code = 1
 
     finally:
-        # Cleanup
+        # Cleanup: just terminate both — dist.destroy_process_group blocks
+        # if the other rank is already dead, so don't attempt clean NCCL shutdown.
         print("\nShutting down ...", flush=True)
-        if trainer_proc.poll() is None and trainer_proc.stdin:
-            trainer_proc.stdin.write("shutdown\n")
-            trainer_proc.stdin.flush()
-            trainer_proc.wait(timeout=15)
-        if server_proc.poll() is None:
-            server_proc.terminate()
-            server_proc.wait(timeout=15)
+        for proc in (trainer_proc, server_proc):
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in (trainer_proc, server_proc):
+            if proc.poll() is None:
+                proc.wait(timeout=10)
 
     return exit_code
 
