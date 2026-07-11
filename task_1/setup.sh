@@ -15,14 +15,14 @@ echo ""
 echo "--- Creating .vllm_venv ---"
 cd "$REPO_ROOT"
 uv venv .vllm_venv --python 3.12
-.vllm_venv/bin/pip install vllm openai
+VIRTUAL_ENV="$REPO_ROOT/.vllm_venv" uv pip install vllm openai
 echo ".vllm_venv ready."
 
 # --- .hf_venv: runs the training script (needs vllm for NCCLWeightTransferEngine) ---
 echo ""
 echo "--- Creating .hf_venv ---"
 uv venv .hf_venv --python 3.12
-.hf_venv/bin/pip install vllm transformers openai
+VIRTUAL_ENV="$REPO_ROOT/.hf_venv" uv pip install vllm transformers openai
 echo ".hf_venv ready."
 
 echo ""
