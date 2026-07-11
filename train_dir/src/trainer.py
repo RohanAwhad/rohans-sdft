@@ -193,15 +193,19 @@ def train() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation="sdpa",
-    ).to(DEVICE)
+        device_map=DEVICE,  # load directly to GPU, skip CPU→GPU copy
+    )
     model.train()
     model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={"use_reentrant": False}
     )
     vocab_size = model.config.vocab_size
-    logger.info(f"Model loaded. vocab_size={vocab_size}")
+    logger.info(
+        f"Model loaded. vocab_size={vocab_size} "
+        f"GPU mem after load: {torch.cuda.memory_allocated(DEVICE) / 1e9:.2f} GB"
+    )
 
     # ---- Dataset ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
@@ -212,8 +216,9 @@ def train() -> None:
     )
     logger.info(f"Dataset: {len(dataset)} examples, ~{len(dataset)} steps/epoch")
 
-    # ---- Optimizer (constant LR) ----
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    # ---- Optimizer (8-bit Adam to fit 8B models on single GPU) ----
+    import bitsandbytes as bnb
+    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
 
     # ---- wandb ----
     wandb.init(

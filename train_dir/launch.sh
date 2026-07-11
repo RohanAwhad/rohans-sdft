@@ -14,6 +14,7 @@ export GPU_TRAINER="${GPU_TRAINER:-1}"
 export GPU_LOGPROB_SERVER="${GPU_LOGPROB_SERVER:-2}"
 export NCCL_MASTER_PORT="${NCCL_MASTER_PORT:-29500}"
 export LOGGING_LEVEL="${LOGGING_LEVEL:-DEBUG}"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Start logprob server on GPU 2
 echo "[launch] Starting logprob server on GPU $GPU_LOGPROB_SERVER ..."

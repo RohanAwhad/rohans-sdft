@@ -35,9 +35,10 @@ def main() -> None:
     logger.info(f"Loading model: {MODEL_NAME}")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation="sdpa",
-    ).to(DEVICE)
+        device_map=DEVICE,
+    )
     model.eval()
     logger.info(f"Model loaded. vocab_size={model.config.vocab_size}")
 
