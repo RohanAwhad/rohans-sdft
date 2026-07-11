@@ -16,4 +16,4 @@ CUDA_VISIBLE_DEVICES="${GPU_VLLM:-0}" python -m vllm.entrypoints.openai.api_serv
     --gpu-memory-utilization 0.5 \
     --max-model-len 4096 \
     --weight-transfer-config '{"backend":"nccl"}' \
-    --disable-log-requests
+    --no-enable-log-requests
