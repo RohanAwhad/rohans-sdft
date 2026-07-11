@@ -23,7 +23,16 @@ Demonstrate NCCL-based weight transfer from an HF training process to a running 
 - `task_1/nccl_demo.py` - trainer-side script (3 phases: dummy, real, perturbed)
 
 ### Model
-- `google/gemma-3-270m-it` (small, fits single GPU easily)
+- `Qwen/Qwen3-0.6B` (non-gated, fits single GPU easily)
+
+### Gotchas encountered
+- `uv venv` doesn't include pip; use `VIRTUAL_ENV=... uv pip install` instead
+- vLLM 0.25.0 unconditionally imports `torchcodec` (video support) which needs FFmpeg system libs; pinned to `vllm==0.23`
+- vLLM spawns child processes (EngineCore) that need `ninja` on PATH; must `export PATH="$REPO_ROOT/.vllm_venv/bin:$PATH"` in start script
+- Gemma 3 is gated on HF; switched to Qwen3-0.6B
 
 ### Status
-- [ ] Test on node 01 (rh-h100-01)
+- [x] Tested on node 01 (rh-h100-01) - all 3 phases pass
+  - Phase 1 (dummy weights): gibberish output confirmed
+  - Phase 2 (real weights via NCCL): sensible output confirmed
+  - Phase 3 (perturbed weights via NCCL): garbled output confirmed
