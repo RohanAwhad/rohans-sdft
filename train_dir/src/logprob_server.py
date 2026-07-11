@@ -12,11 +12,12 @@ from loguru import logger
 from transformers import AutoModelForCausalLM
 
 from src.config import MODEL_NAME, NCCL_MASTER_PORT
+from src.config import EMA_ALPHA
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
     CMD_TEACHER_LOGPROBS,
-    broadcast_weights,
+    broadcast_weights_ema,
     cleanup,
     handle_teacher_log_probs,
     init_nccl,
@@ -55,9 +56,9 @@ def main() -> None:
                 logger.info(f"Served {request_count} logprob requests")
 
         elif cmd == CMD_SYNC_WEIGHTS:
-            logger.info("Receiving weight sync from trainer...")
-            broadcast_weights(model, src=0)
-            logger.info("Weights synced.")
+            logger.info(f"Receiving weight sync (EMA alpha={EMA_ALPHA})...")
+            broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
+            logger.info("Weights EMA-blended.")
 
         elif cmd == CMD_SHUTDOWN:
             logger.info("Shutdown command received.")

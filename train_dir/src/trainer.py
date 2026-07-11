@@ -33,10 +33,11 @@ from src.config import (
     OUTPUT_DIR,
     TRAIN_DATA_PATH,
 )
+from src.config import EMA_ALPHA
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
-    broadcast_weights,
+    broadcast_weights_ema,
     cleanup,
     init_nccl,
     request_teacher_log_probs,
@@ -348,9 +349,9 @@ def train() -> None:
         )
 
         # ---- Weight sync ----
-        logger.info("Syncing weights to logprob server...")
+        logger.info("Syncing weights to logprob server (EMA)...")
         send_command(CMD_SYNC_WEIGHTS, DEVICE)
-        broadcast_weights(model, src=0)
+        broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
 
         logger.info("Syncing weights to vLLM...")
         sync_weights_to_vllm(model, DEVICE, vllm_group)

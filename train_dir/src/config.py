@@ -15,6 +15,7 @@ BATCH_SIZE = 1  # always 1; effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
 GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", "32"))
 NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))
 MAX_GRAD_NORM = 10.0
+EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.01"))  # teacher EMA: phi = alpha*theta + (1-alpha)*phi
 
 # Generation (vLLM rollout)
 GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))

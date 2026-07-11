@@ -117,6 +117,29 @@ def broadcast_weights(model: torch.nn.Module, src: int = 0) -> None:
         dist.broadcast(param.data, src=src)
 
 
+def broadcast_weights_ema(
+    model: torch.nn.Module, alpha: float = 0.01, src: int = 0
+) -> None:
+    """Receive weights from src and EMA-blend into local model.
+
+    phi = alpha * theta_received + (1 - alpha) * phi_local
+
+    On the src rank, this just broadcasts (model is the student).
+    On the dst rank, this receives into a buffer and blends.
+    Must be called on ALL ranks simultaneously.
+    """
+    rank = dist.get_rank()
+    for param in model.parameters():
+        if rank == src:
+            # Sender: broadcast own weights
+            dist.broadcast(param.data, src=src)
+        else:
+            # Receiver: receive into buffer, EMA blend
+            incoming = torch.empty_like(param.data)
+            dist.broadcast(incoming, src=src)
+            param.data.lerp_(incoming, alpha)
+
+
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
