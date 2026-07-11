@@ -58,17 +58,23 @@ DEVICE = torch.device("cuda:0")
 # ---------------------------------------------------------------------------
 
 
+KL_CHUNK = 128  # tokens per chunk to avoid OOM on large models
+
+
 def compute_reverse_kl(
     student_logits: torch.Tensor,
     teacher_log_probs: torch.Tensor,
     completion_ids: list[int],
     eos_token_id: int | None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Reverse KL(student || teacher) averaged over token positions.
+    """Chunked reverse KL(student || teacher) averaged over token positions.
+
+    Processes KL_CHUNK tokens at a time to avoid materializing full (C, V)
+    intermediates. Gradient flows through slice assignment into per_token_kl.
 
     Args:
         student_logits:    (C, V) bfloat16, with gradient
-        teacher_log_probs: (C, V) float32, detached
+        teacher_log_probs: (C, V) bfloat16, detached
         completion_ids:    token IDs of the completion (for signal metrics)
         eos_token_id:      EOS token ID
 
@@ -77,21 +83,34 @@ def compute_reverse_kl(
     """
     C = student_logits.size(0)
     device = student_logits.device
+    token_ids = torch.tensor(completion_ids, device=device, dtype=torch.long)
 
-    # Upcast student to float32 for numerical stability
-    s_log = F.log_softmax(student_logits.float(), dim=-1)  # (C, V)
-    s_prob = s_log.exp()  # (C, V)
-    # KL(p_s || p_t) = sum_v p_s(v) * (log p_s(v) - log p_t(v))
-    per_token_kl = (s_prob * (s_log - teacher_log_probs)).sum(dim=-1)  # (C,)
+    # Pre-allocate outputs
+    per_token_kl = torch.zeros(C, device=device, dtype=torch.float32)
+    policy_logp = torch.zeros(C, device=device, dtype=torch.float32)
+    critic_logp = torch.zeros(C, device=device, dtype=torch.float32)
+
+    for i in range(0, C, KL_CHUNK):
+        j = min(i + KL_CHUNK, C)
+        s_chunk = student_logits[i:j].float()       # (chunk, V) — has grad
+        t_chunk = teacher_log_probs[i:j].float()     # (chunk, V) — detached
+
+        s_log = F.log_softmax(s_chunk, dim=-1)
+        s_prob = s_log.exp()
+        # KL(p_s || p_t) = sum_v p_s(v) * (log p_s(v) - log p_t(v))
+        per_token_kl[i:j] = (s_prob * (s_log - t_chunk)).sum(dim=-1)
+
+        # Signal metrics at generated tokens (detached)
+        chunk_ids = token_ids[i:j]
+        idx = torch.arange(j - i, device=device)
+        policy_logp[i:j] = s_log[idx, chunk_ids].detach()
+        critic_logp[i:j] = t_chunk[idx, chunk_ids]
+
     loss = per_token_kl.mean()
 
-    # --- SDPO-style signal metrics (detached) ---
+    # --- SDPO-style signal metrics ---
     with torch.no_grad():
-        token_ids = torch.tensor(completion_ids, device=device, dtype=torch.long)
-        policy_logp = s_log[torch.arange(C, device=device), token_ids]  # (C,)
-        critic_logp = teacher_log_probs[torch.arange(C, device=device), token_ids]  # (C,)
-        signal = critic_logp - policy_logp  # (C,)
-
+        signal = critic_logp - policy_logp
         metrics = {
             "sdpo/signal_mean": signal.mean().item(),
             "sdpo/signal_std": signal.std().item(),
@@ -105,7 +124,7 @@ def compute_reverse_kl(
             if eos_mask.any():
                 metrics["sdpo/eos_signal_mean"] = signal[eos_mask].mean().item()
                 metrics["sdpo/eos_logp_mean"] = policy_logp[eos_mask].mean().item()
-                metrics["sdpo/eos_logratio_mean"] = (critic_logp[eos_mask] - policy_logp[eos_mask]).mean().item()
+                metrics["sdpo/eos_logratio_mean"] = signal[eos_mask].mean().item()
 
     return loss, metrics
 
@@ -140,7 +159,8 @@ def forward_student(
 
     # Position P-1 predicts completion token 0, ..., P+C-2 predicts token C-1
     C = len(completion_ids)
-    completion_logits = logits[prompt_len - 1 : prompt_len + C - 1, :]  # (C, V)
+    completion_logits = logits[prompt_len - 1 : prompt_len + C - 1, :].contiguous()
+    del logits, outputs  # free the full (P+C, V) tensor
     return completion_logits
 
 

@@ -70,9 +70,9 @@ def request_teacher_log_probs(
     ids = torch.tensor(token_ids, device=device, dtype=torch.long)
     dist.broadcast(ids, src=0)
 
-    # 3. Receive teacher log-probs (server broadcasts from src=1)
+    # 3. Receive teacher log-probs (server broadcasts from src=1, bf16 to save memory)
     log_probs = torch.zeros(
-        completion_len, vocab_size, device=device, dtype=torch.float32
+        completion_len, vocab_size, device=device, dtype=torch.bfloat16
     )
     dist.broadcast(log_probs, src=1)
 
@@ -100,9 +100,9 @@ def handle_teacher_log_probs(model: torch.nn.Module, device: torch.device) -> No
     # 4. Extract completion logits + log_softmax
     #    position prompt_len-1 predicts completion token 0
     completion_logits = logits[prompt_len - 1 : prompt_len + completion_len - 1, :]
-    log_probs = F.log_softmax(completion_logits.float(), dim=-1)  # (C, V) float32
+    log_probs = F.log_softmax(completion_logits.float(), dim=-1).bfloat16()  # (C, V) bf16
 
-    # 5. Broadcast back from rank 1
+    # 5. Broadcast back from rank 1 (bf16 to save trainer memory)
     dist.broadcast(log_probs, src=1)
 
 
