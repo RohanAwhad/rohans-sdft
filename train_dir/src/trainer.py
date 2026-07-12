@@ -9,6 +9,7 @@ Orchestrates:
 """
 
 import os
+import shutil
 
 import torch
 import torch.distributed as dist
@@ -221,21 +222,11 @@ def train() -> None:
     import math
     optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
 
-    # ---- LR scheduler (constant with linear warmup) ----
+    # ---- LR scheduler (constant) ----
     steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
-    warmup_steps = steps_per_epoch  # 1 epoch warmup
     total_steps = steps_per_epoch * NUM_EPOCHS
-
-    def lr_lambda(step: int) -> float:
-        if step < warmup_steps:
-            return step / max(warmup_steps, 1)
-        return 1.0
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    logger.info(
-        f"Constant LR with warmup: {warmup_steps} warmup steps, "
-        f"{total_steps} total steps, LR={LEARNING_RATE}"
-    )
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
+    logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
 
     # ---- wandb ----
     wandb.init(
@@ -253,8 +244,7 @@ def train() -> None:
             "num_epochs": NUM_EPOCHS,
             "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
             "loss": "reverse_kl",
-            "lr_scheduler": "constant_with_warmup",
-            "warmup_steps": warmup_steps,
+            "lr_scheduler": "constant",
             "total_optimizer_steps": total_steps,
             "dataset": TRAIN_DATA_PATH,
         },
@@ -416,12 +406,16 @@ def train() -> None:
             step=optimizer_step,
         )
 
-        # ---- Checkpoint ----
+        # ---- Checkpoint (rolling: keep only latest) ----
         ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
         os.makedirs(ckpt_dir, exist_ok=True)
         model.save_pretrained(ckpt_dir)
         tokenizer.save_pretrained(ckpt_dir)
         logger.info(f"Checkpoint saved: {ckpt_dir}")
+        prev_ckpt = os.path.join(OUTPUT_DIR, f"epoch_{epoch}")
+        if epoch > 0 and os.path.isdir(prev_ckpt):
+            shutil.rmtree(prev_ckpt)
+            logger.info(f"Deleted previous checkpoint: {prev_ckpt}")
 
     # ---- Shutdown ----
     send_command(CMD_SHUTDOWN, DEVICE)
