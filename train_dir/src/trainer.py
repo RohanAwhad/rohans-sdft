@@ -221,13 +221,21 @@ def train() -> None:
     import math
     optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
 
-    # ---- LR scheduler (cosine) ----
+    # ---- LR scheduler (constant with linear warmup) ----
     steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
+    warmup_steps = steps_per_epoch  # 1 epoch warmup
     total_steps = steps_per_epoch * NUM_EPOCHS
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps, eta_min=0.0,
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / max(warmup_steps, 1)
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    logger.info(
+        f"Constant LR with warmup: {warmup_steps} warmup steps, "
+        f"{total_steps} total steps, LR={LEARNING_RATE}"
     )
-    logger.info(f"Cosine LR scheduler: {total_steps} total steps, LR={LEARNING_RATE} -> 0")
 
     # ---- wandb ----
     wandb.init(
@@ -245,7 +253,8 @@ def train() -> None:
             "num_epochs": NUM_EPOCHS,
             "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
             "loss": "reverse_kl",
-            "lr_scheduler": "cosine",
+            "lr_scheduler": "constant_with_warmup",
+            "warmup_steps": warmup_steps,
             "total_optimizer_steps": total_steps,
             "dataset": TRAIN_DATA_PATH,
         },
