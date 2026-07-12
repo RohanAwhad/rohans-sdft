@@ -62,20 +62,23 @@ DEVICE = torch.device("cuda:0")
 KL_CHUNK = 128  # tokens per chunk to avoid OOM on large models
 
 
-def compute_reverse_kl(
+def compute_kl(
     student_logits: torch.Tensor,
     teacher_log_probs: torch.Tensor,
     completion_ids: list[int],
     eos_token_id: int | None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Chunked reverse KL(student || teacher) averaged over token positions.
+    """Chunked forward KL(teacher || student) averaged over token positions.
+
+    Forward KL = sum_v p_t(v) * (log p_t(v) - log p_s(v))
+    Forces student to cover all modes where teacher puts mass.
 
     Processes KL_CHUNK tokens at a time to avoid materializing full (C, V)
     intermediates. Gradient flows through slice assignment into per_token_kl.
 
     Args:
         student_logits:    (C, V) bfloat16, with gradient
-        teacher_log_probs: (C, V) bfloat16, detached
+        teacher_log_probs: (C, V) bfloat16, detached (log-softmax)
         completion_ids:    token IDs of the completion (for signal metrics)
         eos_token_id:      EOS token ID
 
@@ -97,9 +100,9 @@ def compute_reverse_kl(
         t_chunk = teacher_log_probs[i:j].float()     # (chunk, V) — detached
 
         s_log = F.log_softmax(s_chunk, dim=-1)
-        s_prob = s_log.exp()
-        # KL(p_s || p_t) = sum_v p_s(v) * (log p_s(v) - log p_t(v))
-        per_token_kl[i:j] = (s_prob * (s_log - t_chunk)).sum(dim=-1)
+        t_prob = t_chunk.exp()  # teacher probabilities
+        # KL(p_t || p_s) = sum_v p_t(v) * (log p_t(v) - log p_s(v))
+        per_token_kl[i:j] = (t_prob * (t_chunk - s_log)).sum(dim=-1)
 
         # Signal metrics at generated tokens (detached)
         chunk_ids = token_ids[i:j]
@@ -243,7 +246,7 @@ def train() -> None:
             "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
             "num_epochs": NUM_EPOCHS,
             "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
-            "loss": "reverse_kl",
+            "loss": "forward_kl",
             "lr_scheduler": "constant",
             "total_optimizer_steps": total_steps,
             "dataset": TRAIN_DATA_PATH,
@@ -340,7 +343,7 @@ def train() -> None:
             t_lp = teacher_log_probs.to(DEVICE) if use_cache else teacher_log_probs
 
             # 4. Reverse KL loss + signal metrics
-            loss, step_metrics = compute_reverse_kl(
+            loss, step_metrics = compute_kl(
                 student_logits, t_lp.detach(),
                 completion_ids, tokenizer.eos_token_id,
             )
