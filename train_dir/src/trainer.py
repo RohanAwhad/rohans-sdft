@@ -218,7 +218,16 @@ def train() -> None:
 
     # ---- Optimizer (8-bit Adam to fit 8B models on single GPU) ----
     import bitsandbytes as bnb
+    import math
     optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
+
+    # ---- LR scheduler (cosine) ----
+    steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
+    total_steps = steps_per_epoch * NUM_EPOCHS
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps, eta_min=0.0,
+    )
+    logger.info(f"Cosine LR scheduler: {total_steps} total steps, LR={LEARNING_RATE} -> 0")
 
     # ---- wandb ----
     wandb.init(
@@ -236,6 +245,8 @@ def train() -> None:
             "num_epochs": NUM_EPOCHS,
             "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
             "loss": "reverse_kl",
+            "lr_scheduler": "cosine",
+            "total_optimizer_steps": total_steps,
             "dataset": TRAIN_DATA_PATH,
         },
     )
@@ -332,6 +343,7 @@ def train() -> None:
             if global_step % GRAD_ACCUM_STEPS == 0:
                 clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 optimizer_step += 1
 
@@ -342,6 +354,7 @@ def train() -> None:
                     "train/loss": avg_loss,
                     "train/completion_length": avg_comp_len,
                     "train/epoch": epoch,
+                    "train/lr": scheduler.get_last_lr()[0],
                 }
                 for k, vals in accum_metrics.items():
                     log_dict[k] = sum(vals) / len(vals)
@@ -375,6 +388,7 @@ def train() -> None:
         if global_step % GRAD_ACCUM_STEPS != 0:
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
             optimizer_step += 1
             # Step-level weight sync for flush step too
