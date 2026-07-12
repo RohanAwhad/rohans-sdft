@@ -267,6 +267,11 @@ def train() -> None:
     # ---- Training loop ----
     global_step = 0
     optimizer_step = 0
+    offline_overfit = os.environ.get("OFFLINE_OVERFIT", "0") == "1"
+    cached_data: list[tuple[str, list[int], torch.Tensor]] = []  # (prompt, comp_ids, teacher_lp)
+
+    if offline_overfit:
+        logger.info("OFFLINE_OVERFIT mode: epoch 1 caches data, epochs 2+ replay (no gen/teacher/sync)")
 
     for epoch in range(NUM_EPOCHS):
         logger.info(f"=== Epoch {epoch + 1}/{NUM_EPOCHS} ===")
@@ -279,49 +284,64 @@ def train() -> None:
 
         optimizer.zero_grad()
 
-        for batch_idx, batch in enumerate(dataloader):
-            prompt_text = batch["prompt_texts"][0]  # batch_size=1
-            conditional_text = batch["conditional_texts"][0]
+        # Determine data source: dataloader (epoch 1 or normal) vs cache
+        use_cache = offline_overfit and epoch > 0
+        data_iter = cached_data if use_cache else dataloader
 
-            # 1. Generate completion via vLLM
-            completion_text = vllm_generate(prompt_text)
-            completion_ids = tokenizer.encode(
-                completion_text, add_special_tokens=False
-            )
+        for batch_idx, item in enumerate(data_iter):
+            if use_cache:
+                prompt_text, completion_ids, teacher_log_probs = item
+                completion_text = ""  # not needed for cached replay
+            else:
+                prompt_text = item["prompt_texts"][0]  # batch_size=1
+                conditional_text = item["conditional_texts"][0]
 
-            # Append EOS so model learns to stop
-            if tokenizer.eos_token_id is not None:
-                completion_ids.append(tokenizer.eos_token_id)
+                # 1. Generate completion via vLLM
+                completion_text = vllm_generate(prompt_text)
+                completion_ids = tokenizer.encode(
+                    completion_text, add_special_tokens=False
+                )
 
-            if len(completion_ids) == 0:
-                logger.warning(f"Empty completion at step {global_step}, skipping")
-                continue
+                # Append EOS so model learns to stop
+                if tokenizer.eos_token_id is not None:
+                    completion_ids.append(tokenizer.eos_token_id)
 
-            # Truncate if needed
-            completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
+                if len(completion_ids) == 0:
+                    logger.warning(f"Empty completion at step {global_step}, skipping")
+                    continue
+
+                # Truncate if needed
+                completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
+
+                # 3. Teacher log-probs via NCCL (no grad)
+                cond_ids = tokenizer.encode(
+                    conditional_text,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=2048,
+                )
+                teacher_log_probs = request_teacher_log_probs(
+                    token_ids=cond_ids + completion_ids,
+                    prompt_len=len(cond_ids),
+                    vocab_size=vocab_size,
+                    device=DEVICE,
+                )  # (C, V) float32
+
+                # Cache for offline overfit replay
+                if offline_overfit:
+                    cached_data.append((prompt_text, completion_ids, teacher_log_probs.detach().cpu()))
 
             # 2. Student forward pass (with gradients)
             student_logits = forward_student(
                 model, tokenizer, prompt_text, completion_ids, DEVICE
             )  # (C, V)
 
-            # 3. Teacher log-probs via NCCL (no grad)
-            cond_ids = tokenizer.encode(
-                conditional_text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=2048,
-            )
-            teacher_log_probs = request_teacher_log_probs(
-                token_ids=cond_ids + completion_ids,
-                prompt_len=len(cond_ids),
-                vocab_size=vocab_size,
-                device=DEVICE,
-            )  # (C, V) float32
+            # Move teacher log-probs to device if from cache
+            t_lp = teacher_log_probs.to(DEVICE) if use_cache else teacher_log_probs
 
             # 4. Reverse KL loss + signal metrics
             loss, step_metrics = compute_reverse_kl(
-                student_logits, teacher_log_probs.detach(),
+                student_logits, t_lp.detach(),
                 completion_ids, tokenizer.eos_token_id,
             )
             scaled_loss = loss / GRAD_ACCUM_STEPS
@@ -378,10 +398,11 @@ def train() -> None:
                 accum_comp_len_sum = 0
                 accum_metrics = {}
 
-                # ---- Step-level weight sync ----
-                send_command(CMD_SYNC_WEIGHTS, DEVICE)
-                broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
-                sync_weights_to_vllm(model, DEVICE, vllm_group)
+                # ---- Step-level weight sync (skip in offline overfit) ----
+                if not offline_overfit:
+                    send_command(CMD_SYNC_WEIGHTS, DEVICE)
+                    broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
+                    sync_weights_to_vllm(model, DEVICE, vllm_group)
 
         # Flush remaining accumulated gradients
         if global_step % GRAD_ACCUM_STEPS != 0:
@@ -390,10 +411,10 @@ def train() -> None:
             scheduler.step()
             optimizer.zero_grad()
             optimizer_step += 1
-            # Step-level weight sync for flush step too
-            send_command(CMD_SYNC_WEIGHTS, DEVICE)
-            broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
-            sync_weights_to_vllm(model, DEVICE, vllm_group)
+            if not offline_overfit:
+                send_command(CMD_SYNC_WEIGHTS, DEVICE)
+                broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
+                sync_weights_to_vllm(model, DEVICE, vllm_group)
 
         # ---- Epoch summary ----
         avg_epoch_loss = epoch_loss_sum / max(epoch_samples, 1)
