@@ -86,5 +86,33 @@ Full on-policy Self-Distillation Fine-Tuning loop using reverse KL divergence.
 - `train_dir/src/vllm_utils.py` — HTTP client + weight sync (task 1 pattern)
 - `train_dir/src/trainer.py` — main loop + reverse KL loss
 
-### Status
-- [ ] Implemented, not yet tested on node
+### Status (0.6B)
+- [x] Tested end-to-end on node with Qwen3-0.6B
+- [x] Loss ~0.64 at epoch 1, weight sync <0.2s, ~20s/optimizer step
+- [x] SDPO signal metrics added to wandb (signal_mean, signal_std, len_signal_mean, policy_logp, critic_logp, eos_*)
+- [x] EMA teacher weight update: `phi = 0.01 * theta + 0.99 * phi` via `broadcast_weights_ema` with `torch.lerp_`
+- [x] Chunked KL computation (KL_CHUNK=128) to reduce peak memory
+- [x] bf16 NCCL transfer for teacher log-probs (not float32)
+
+## 2025-07-11 - Scaling to Qwen3-8B
+
+### Problem
+8B model + fp32 AdamW on single 80GB GPU = OOM. Model+optimizer baseline ~76 GB, leaving ~3.5 GB for forward/backward.
+
+### Fixes applied (iterative)
+1. **Selective lm_head**: `model.model()` (backbone only, hidden states ~30 MB) then `model.lm_head(completion_hidden)` on completion positions only — avoids full `(1, S, V)` logits allocation (~1.16 GB)
+2. **Gradient checkpointing on backbone**: wrapped `model.model()` call in `torch.utils.checkpoint.checkpoint(use_reentrant=False)` — hidden states recomputed during backward, not stored
+3. **`dtype=` not `torch_dtype=`**: fixed deprecated kwarg — model was likely loading in fp32 (~33 GB) instead of bf16 (~16 GB)
+4. **`device_map=DEVICE`**: load directly to GPU, skip CPU→GPU copy (requires `accelerate`)
+5. **bitsandbytes AdamW8bit**: halves optimizer state memory (~8 GB vs ~32 GB)
+6. **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`**: reduces CUDA memory fragmentation
+
+### Result
+- Model loads at **16.38 GB** (confirmed bf16)
+- First opt_step completed: **loss=0.5377**, comp_len=592, no OOM
+- Training running as `rohan-sdft-onpolicy-rohans_data-run-3` on wandb (entity=ronny21, project=sdpo-amortize)
+- Checkpoints: `/home/lab/rawhad/self_distillation/rohans_sdft/train_dir/output/epoch_{N}/`
+
+### Dependencies added
+- `bitsandbytes==0.49.2`
+- `accelerate==1.14.0`
