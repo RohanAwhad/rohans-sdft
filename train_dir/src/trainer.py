@@ -366,12 +366,21 @@ def train() -> None:
                 accum_comp_len_sum = 0
                 accum_metrics = {}
 
+                # ---- Step-level weight sync ----
+                send_command(CMD_SYNC_WEIGHTS, DEVICE)
+                broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
+                sync_weights_to_vllm(model, DEVICE, vllm_group)
+
         # Flush remaining accumulated gradients
         if global_step % GRAD_ACCUM_STEPS != 0:
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
             optimizer.zero_grad()
             optimizer_step += 1
+            # Step-level weight sync for flush step too
+            send_command(CMD_SYNC_WEIGHTS, DEVICE)
+            broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
+            sync_weights_to_vllm(model, DEVICE, vllm_group)
 
         # ---- Epoch summary ----
         avg_epoch_loss = epoch_loss_sum / max(epoch_samples, 1)
@@ -383,15 +392,6 @@ def train() -> None:
             {"epoch/avg_loss": avg_epoch_loss, "epoch/number": epoch + 1},
             step=optimizer_step,
         )
-
-        # ---- Weight sync ----
-        logger.info("Syncing weights to logprob server (EMA)...")
-        send_command(CMD_SYNC_WEIGHTS, DEVICE)
-        broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
-
-        logger.info("Syncing weights to vLLM...")
-        sync_weights_to_vllm(model, DEVICE, vllm_group)
-        logger.info("Weight sync complete.")
 
         # ---- Checkpoint ----
         ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
