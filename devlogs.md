@@ -116,3 +116,84 @@ Full on-policy Self-Distillation Fine-Tuning loop using reverse KL divergence.
 ### Dependencies added
 - `bitsandbytes==0.49.2`
 - `accelerate==1.14.0`
+
+## 2025-07-12 — Training Runs & Hyperparameter Search
+
+### Run 3 (Qwen3-8B, epoch-level sync)
+- First successful 8B run after OOM fixes
+- Epoch-level weight sync, EMA alpha=0.01, LR=2e-6
+- Stopped early — moved to step-level sync
+
+### Run 4 (step-level sync, 10 epochs)
+- **Key change**: weight sync after every optimizer step (~140ms overhead)
+- Loss: 0.56 → 0.64 → 0.69 → 0.75 → 0.74 → 0.74 → 0.72 → 0.72 → 0.71 → 0.71
+- Loss plateaus at ~0.71. Rising initially then stabilizing.
+- Weight broadcast timing: ~140-165ms total (EMA ~9ms, vLLM ~120ms)
+
+### Run 5 (cosine LR, 30 epochs)
+- Cosine LR schedule from 2e-6 → 0 over 390 steps
+- Loss plateaued same as run 4 (~0.69-0.72 range)
+- Cosine didn't help vs constant LR
+
+### Run 6 (constant LR + warmup, 10 epochs)
+- 1-epoch linear warmup, then constant LR=2e-6
+- Loss: same plateau ~0.70
+- Warmup had no meaningful effect
+
+### Run 7 (asynth_v1 dataset, GPUs 3/4/5)
+- Different dataset: `/home/lab/rawhad/sdg-ki-eval/data/eshwar_datasets/asynth_v1_sdft.jsonl`
+- Ran in parallel with run 6 on separate GPUs (3/4/5, vLLM port 8001, NCCL port 29501)
+
+### Run 8 (on-policy overfit, 32 samples)
+- 32-sample subset, 500 epochs, rolling checkpoint
+- Loss flat at ~0.65-0.72 after 40 epochs — NOT overfitting
+- **Root cause**: on-policy = vLLM regenerates completions every epoch (different text each time). The model never trains on the same data twice. Can't overfit a moving target.
+
+### Run 9 (offline overfit, OFFLINE_OVERFIT=1)
+- Epoch 1: generate + cache (prompt, completion_ids, teacher_log_probs)
+- Epochs 2+: replay cached data, no generation, no teacher NCCL, no weight sync
+- **Loss went down**: 0.95 → 0.55 over 45 epochs (crashed at 45 due to NCCL heartbeat timeout on idle logprob server)
+- **But model didn't learn**: 4/32 correct vs 3/32 for base model
+- **Diagnosis**: reverse KL is mode-seeking → student concentrates mass on teacher's modes, overshoots on high-prob tokens → signal_mean goes negative → student gets sharper but not smarter
+- Reverse KL on wrong completions teaches distribution matching, not correctness
+
+### Run 10 (forward KL, on-policy, 32 samples)
+- Switched to forward KL: KL(p_teacher || p_student)
+- Forward KL = mode-covering, forces student to spread mass where teacher does
+- After 67 epochs: model still didn't ingest knowledge
+- **Conclusion**: neither KL direction transfers privileged info effectively on its own
+
+### Run 11 (reverse KL, LR=5e-5, EMA alpha=0.05, in progress)
+- Reverted to reverse KL
+- Bumped LR 25x: 2e-6 → 5e-5
+- Bumped EMA alpha 5x: 0.01 → 0.05 (teacher tracks student faster)
+- Hypothesis: higher LR + faster teacher tracking = stronger learning signal
+- **Status**: running, showing promising results
+
+## Key Findings
+
+### Weight sync timing (8B model)
+- EMA broadcast (trainer → teacher): ~9ms
+- vLLM sync (trainer → vLLM): ~120ms
+- Total per-step overhead: ~140ms (negligible vs ~2min/step)
+
+### Loss plateau analysis
+- Reverse KL plateaus at ~0.7 on-policy — this is the irreducible KL from information asymmetry (teacher has privileged info student doesn't)
+- Loss starts LOW (~0.49) because student=teacher at init, then RISES as student diverges from slowly-moving teacher
+- EMA alpha=0.01 too conservative: teacher barely moves, student runs ahead
+
+### Overfitting experiments
+- On-policy can't overfit: data changes every epoch (vLLM regenerates)
+- Offline overfit confirms optimizer+reverse KL works mechanically (loss drops)
+- But matching distributions on wrong completions ≠ learning correct answers
+- Forward KL also failed to transfer knowledge (67 epochs, no improvement)
+
+### Current best config
+- Model: Qwen/Qwen3-8B
+- Loss: reverse KL
+- LR: 5e-5, constant
+- EMA alpha: 0.05
+- Optimizer: AdamW8bit (bitsandbytes)
+- Grad accum: 32 (effective batch)
+- Weight sync: step-level (every optimizer step)
+- Rolling checkpoint (keep only latest epoch)

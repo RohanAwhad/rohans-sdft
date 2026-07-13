@@ -15,7 +15,7 @@ Each task has its own venv(s) and setup. There is no unified project-level venv 
 ## Target environment
 
 - Runs on **node `rh-h100-01`** (H100 cluster), synced from local via git
-- GPUs 0–3 available (`CUDA_VISIBLE_DEVICES` set per-process)
+- GPUs 0–5 available (`CUDA_VISIBLE_DEVICES` set per-process), can run 2 training jobs in parallel
 - Python 3.12 via `uv`
 - Model: `Qwen/Qwen3-8B` (was 0.6B for testing)
 
@@ -41,7 +41,13 @@ bash train_dir/setup.sh           # creates train_dir/.venv
 bash train_dir/start_vllm.sh      # GPU 0, terminal 1
 bash train_dir/launch.sh           # GPU 1 (trainer) + GPU 2 (logprob server), terminal 2
 ```
-Checkpoints saved to: `train_dir/output/epoch_{N}/`
+Checkpoints saved to: `train_dir/output/epoch_{N}/` (rolling — only latest kept)
+
+#### Parallel runs (GPUs 3/4/5)
+```bash
+GPU_VLLM=3 VLLM_PORT=8001 MODEL_NAME=Qwen/Qwen3-8B bash train_dir/start_vllm.sh
+GPU_VLLM=3 GPU_TRAINER=4 GPU_LOGPROB_SERVER=5 VLLM_PORT=8001 NCCL_MASTER_PORT=29501 bash train_dir/launch.sh
+```
 
 ## Gotchas
 
