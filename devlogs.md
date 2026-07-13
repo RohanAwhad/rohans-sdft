@@ -196,4 +196,34 @@ Full on-policy Self-Distillation Fine-Tuning loop using reverse KL divergence.
 - Optimizer: AdamW8bit (bitsandbytes)
 - Grad accum: 32 (effective batch)
 - Weight sync: step-level (every optimizer step)
-- Rolling checkpoint (keep only latest epoch)
+- All epoch checkpoints saved
+
+## 2025-07-13 — Data Enrichment & Multi-Dataset Runs
+
+### enriched_user_response pipeline
+- Script: `sdg-ki-eval/scripts/generate_enriched_user_response.py`
+- Uses Claude Sonnet 4 (via AnthropicVertex) to produce focused doc excerpts from source docs
+- Input: source_docs.jsonl (69 MaaS doc chunks) + question + golden answer
+- Output: minimal documentation excerpt that supports the answer (without including the answer itself)
+- 50 concurrent workers, checkpoints every 100 rows, idempotent (skips existing)
+
+### Enriched datasets generated
+| Dataset | Rows | Source | Time |
+|---------|------|--------|------|
+| `sdg_hub_sft_sdft_enriched.jsonl` | 3000 | sdg_hub_sft_sdft.jsonl | ~7 min |
+| `oumi_sdft_enriched.jsonl` | 3000 | oumi_sdft.jsonl | ~7 min |
+| `asynth_kd_sdft_enriched.jsonl` | 3000 | asynth_kd_sdft.jsonl | ~7 min |
+
+All at: `/home/lab/rawhad/sdg-ki-eval/data/eshwar_datasets/`
+
+### Run 12 (asynth_v1, LR=5e-5, EMA=0.05, 10 epochs)
+- Same hyperparams as run 11 but full asynth_v1 dataset (not 32 samples)
+- GPUs 3/4/5, vLLM port 8001, NCCL port 29501
+- Status: running
+
+### Run 13 (sdg_hub enriched, LR=5e-5, EMA=0.05, 10 epochs)
+- First run with enriched sdg_hub data (3000 samples)
+- GPUs 0/1/2, vLLM port 8000
+- vLLM max-model-len bumped 4096→8192 (some sdg_hub prompts ~2100 tokens)
+- opt_step=1 loss=0.3437
+- Status: running
