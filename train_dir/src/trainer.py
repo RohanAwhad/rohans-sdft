@@ -427,16 +427,12 @@ def train() -> None:
             step=optimizer_step,
         )
 
-        # ---- Checkpoint (rolling: keep only latest) ----
+        # ---- Checkpoint ----
         ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
         os.makedirs(ckpt_dir, exist_ok=True)
         model.save_pretrained(ckpt_dir)
         tokenizer.save_pretrained(ckpt_dir)
         logger.info(f"Checkpoint saved: {ckpt_dir}")
-        prev_ckpt = os.path.join(OUTPUT_DIR, f"epoch_{epoch}")
-        if epoch > 0 and os.path.isdir(prev_ckpt):
-            shutil.rmtree(prev_ckpt)
-            logger.info(f"Deleted previous checkpoint: {prev_ckpt}")
 
     # ---- Shutdown ----
     send_command(CMD_SHUTDOWN, DEVICE)
