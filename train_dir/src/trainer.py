@@ -32,6 +32,7 @@ from src.config import (
     NCCL_MASTER_PORT,
     NUM_EPOCHS,
     OUTPUT_DIR,
+    SAVE_EVERY,
     TRAIN_DATA_PATH,
 )
 from src.config import EMA_ALPHA
@@ -404,6 +405,14 @@ def train() -> None:
                     broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
                     sync_weights_to_vllm(model, DEVICE, vllm_group)
 
+                # ---- Step-level checkpoint ----
+                if optimizer_step % SAVE_EVERY == 0:
+                    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+                    os.makedirs(ckpt_dir, exist_ok=True)
+                    model.save_pretrained(ckpt_dir)
+                    tokenizer.save_pretrained(ckpt_dir)
+                    logger.info(f"Checkpoint saved: {ckpt_dir}")
+
         # Flush remaining accumulated gradients
         if global_step % GRAD_ACCUM_STEPS != 0:
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
@@ -427,12 +436,12 @@ def train() -> None:
             step=optimizer_step,
         )
 
-        # ---- Checkpoint ----
-        ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
-        os.makedirs(ckpt_dir, exist_ok=True)
-        model.save_pretrained(ckpt_dir)
-        tokenizer.save_pretrained(ckpt_dir)
-        logger.info(f"Checkpoint saved: {ckpt_dir}")
+    # ---- Final checkpoint ----
+    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    model.save_pretrained(ckpt_dir)
+    tokenizer.save_pretrained(ckpt_dir)
+    logger.info(f"Final checkpoint saved: {ckpt_dir}")
 
     # ---- Shutdown ----
     send_command(CMD_SHUTDOWN, DEVICE)

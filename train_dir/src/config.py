@@ -37,3 +37,4 @@ TRAIN_DATA_PATH = os.environ.get(
 
 # Output
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
+SAVE_EVERY = int(os.environ.get("SAVE_EVERY", "200"))  # save checkpoint every N optimizer steps
