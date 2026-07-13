@@ -32,6 +32,7 @@ from src.config import (
     NCCL_MASTER_PORT,
     NUM_EPOCHS,
     OUTPUT_DIR,
+    HINDSIGHT_FIELD,
     SAVE_EVERY,
     TRAIN_DATA_PATH,
 )
@@ -212,7 +213,7 @@ def train() -> None:
     # ---- Dataset ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
     dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
-    collator = SDFTCollator(tokenizer=tokenizer)
+    collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
     dataloader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator
     )

@@ -35,6 +35,9 @@ TRAIN_DATA_PATH = os.environ.get(
     "/home/lab/rawhad/sdg-ki-eval/data/maas_data/rohans_data/train_maas_sdft.jsonl",
 )
 
+# Collator
+HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")
+
 # Output
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
 SAVE_EVERY = int(os.environ.get("SAVE_EVERY", "200"))  # save checkpoint every N optimizer steps
