@@ -149,18 +149,47 @@ def evaluate(expr: str) -> int:
 CUSTOM_OP_SYMBOLS = list(CUSTOM_SYMBOLS.keys())
 
 
-def _call_claude_api(expression: str, model: str, timeout: int = 60) -> str | None:
-    """Call Claude via Vertex AI to get an API answer for an expression.
+def _call_claude_api(expression: str, model: str = API_DEFAULT_MODEL) -> str | None:
+    """Call Claude via Vertex AI (using AnthropicVertex from api-adapter-ak pattern).
 
     Returns the integer string from Claude's response, or None on failure.
-    Uses urllib (stdlib) — no extra deps. Auth via gcloud access token.
+    Auth via GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_REGION env vars + gcloud ADC.
     """
+    try:
+        from anthropic import AnthropicVertex
+    except ImportError:
+        return _call_claude_api_urllib(expression, model)
+
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+    region = os.environ.get("GOOGLE_CLOUD_REGION") or API_DEFAULT_REGION
+
+    if not project:
+        raise RuntimeError("GOOGLE_CLOUD_PROJECT or ANTHROPIC_VERTEX_PROJECT_ID must be set")
+
+    client = AnthropicVertex(project_id=project, region=region)
+
+    try:
+        message = client.messages.create(
+            model=model,
+            max_tokens=API_MAX_TOKENS,
+            system=API_MODEL_SYSTEM,
+            messages=[{"role": "user", "content": API_MODEL_PROMPT.format(expression=expression)}],
+        )
+        text = message.content[0].text.strip()
+    except Exception:
+        return None
+
+    numbers = re.findall(r"-?\d+", text)
+    return numbers[-1] if numbers else None
+
+
+def _call_claude_api_urllib(expression: str, model: str) -> str | None:
+    """Fallback: call Claude via urllib (stdlib) with gcloud access token."""
     import urllib.request
     import urllib.error
 
     project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
     region = API_DEFAULT_REGION
-
     if not project:
         raise RuntimeError("ANTHROPIC_VERTEX_PROJECT_ID must be set")
 
@@ -177,12 +206,10 @@ def _call_claude_api(expression: str, model: str, timeout: int = 60) -> str | No
         f"publishers/anthropic/models/{model}:rawPredict"
     )
 
-    prompt = API_MODEL_PROMPT.format(expression=expression)
-
     payload = json.dumps({
         "anthropic_version": "vertex-2023-10-16",
         "system": API_MODEL_SYSTEM,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": API_MODEL_PROMPT.format(expression=expression)}],
         "max_tokens": API_MAX_TOKENS,
         "temperature": 0.0,
     }).encode()
@@ -192,10 +219,9 @@ def _call_claude_api(expression: str, model: str, timeout: int = 60) -> str | No
     req.add_header("Content-Type", "application/json")
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        print(f"  Claude API error: {e.code} {e.reason}", file=__import__("sys").stderr)
+    except urllib.error.HTTPError:
         return None
 
     text = data["content"][0]["text"].strip()
@@ -214,7 +240,6 @@ def _get_claude_api_answer(
             return claude_answer, is_correct
     except Exception:
         pass
-    # Fallback to synthetic (treat as NONE)
     return "none", False
 
 
