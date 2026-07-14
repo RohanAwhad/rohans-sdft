@@ -149,13 +149,14 @@ def evaluate(expr: str) -> int:
 CUSTOM_OP_SYMBOLS = list(CUSTOM_SYMBOLS.keys())
 
 
-def _call_claude_api(expression: str, model: str, timeout: int = 30) -> str | None:
+def _call_claude_api(expression: str, model: str, timeout: int = 60) -> str | None:
     """Call Claude via Vertex AI to get an API answer for an expression.
 
     Returns the integer string from Claude's response, or None on failure.
-    Authenticates via gcloud (same pattern as api-adapter-ak).
+    Uses urllib (stdlib) — no extra deps. Auth via gcloud access token.
     """
-    import requests
+    import urllib.request
+    import urllib.error
 
     project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
     region = API_DEFAULT_REGION
@@ -178,25 +179,26 @@ def _call_claude_api(expression: str, model: str, timeout: int = 30) -> str | No
 
     prompt = API_MODEL_PROMPT.format(expression=expression)
 
-    payload = {
+    payload = json.dumps({
         "anthropic_version": "vertex-2023-10-16",
         "system": API_MODEL_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": API_MAX_TOKENS,
         "temperature": 0.0,
-    }
+    }).encode()
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        print(f"  Claude API error: {e.code} {e.reason}", file=__import__("sys").stderr)
+        return None
 
     text = data["content"][0]["text"].strip()
-
     numbers = re.findall(r"-?\d+", text)
     return numbers[-1] if numbers else None
 
