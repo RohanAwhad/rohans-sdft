@@ -9,15 +9,24 @@ Two output formats:
     Raw:   {"expression": "...", "answer": 42, "type": "custom"}
     MaaS:  {"prompt": [...], "user_response": {...}}  (--maas flag)
 
+Two API answer sources:
+    Synthetic: random correct/wrong/none (default)
+    Claude:    real API model outputs via --api-model (e.g. claude-3-5-haiku@20241022)
+
 Usage:
     python synthetic_algebra_dataset.py [--n-custom 1000] [--n-standard 1000] [--seed 42] [--output data] [--maas]
+    python synthetic_algebra_dataset.py --maas --api-model claude-3-5-haiku@20241022
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import os
 import random
+import re
+import subprocess
 from pathlib import Path
 
 CUSTOM_SYMBOLS = {"θ": "+", "α": "-", "γ": "*", "β": "/"}
@@ -56,6 +65,21 @@ FEW_SHOT_EXAMPLES = (
     "Expression: 10 α 3 | API answer: 5 → That's incorrect. Recount step by step.\n"
     "Expression: 2 γ 6 | API answer: none → Compute the expression using the symbol definitions."
 )
+
+API_MODEL_PROMPT = (
+    "The symbols θ, α, γ, β each represent one of the four basic arithmetic "
+    "operations (+, -, ×, ÷). Each symbol maps to exactly one operation. "
+    "Standard operator precedence (BODMAS) applies.\n\n"
+    "Compute: {expression}\n"
+    "Answer with just the number."
+)
+
+API_MODEL_SYSTEM = "You are an arithmetic calculator. Output ONLY the integer result."
+
+API_DEFAULT_MODEL = "claude-haiku-4-5"
+API_DEFAULT_REGION = "us-east5"
+API_MAX_TOKENS = 512
+API_CONCURRENCY = 20
 
 USER_RESPONSE_TEMPLATE = "θ=+, α=-, γ=×, β=÷. Correct answer: {answer}"
 
@@ -123,6 +147,73 @@ def evaluate(expr: str) -> int:
 # ---------------------------------------------------------------------------
 
 CUSTOM_OP_SYMBOLS = list(CUSTOM_SYMBOLS.keys())
+
+
+def _call_claude_api(expression: str, model: str, timeout: int = 30) -> str | None:
+    """Call Claude via Vertex AI to get an API answer for an expression.
+
+    Returns the integer string from Claude's response, or None on failure.
+    Authenticates via gcloud (same pattern as api-adapter-ak).
+    """
+    import requests
+
+    project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+    region = API_DEFAULT_REGION
+
+    if not project:
+        raise RuntimeError("ANTHROPIC_VERTEX_PROJECT_ID must be set")
+
+    token = subprocess.run(
+        ["gcloud", "auth", "print-access-token"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not token:
+        raise RuntimeError("Failed to get gcloud access token")
+
+    url = (
+        f"https://{region}-aiplatform.googleapis.com/v1/"
+        f"projects/{project}/locations/{region}/"
+        f"publishers/anthropic/models/{model}:rawPredict"
+    )
+
+    prompt = API_MODEL_PROMPT.format(expression=expression)
+
+    payload = {
+        "anthropic_version": "vertex-2023-10-16",
+        "system": API_MODEL_SYSTEM,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": API_MAX_TOKENS,
+        "temperature": 0.0,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+
+    text = data["content"][0]["text"].strip()
+
+    numbers = re.findall(r"-?\d+", text)
+    return numbers[-1] if numbers else None
+
+
+def _get_claude_api_answer(
+    expr: str, answer: int, model: str
+) -> tuple[str, bool]:
+    """Get API answer from Claude, falling back to synthetic on failure."""
+    try:
+        claude_answer = _call_claude_api(expr, model)
+        if claude_answer is not None:
+            is_correct = int(claude_answer) == answer
+            return claude_answer, is_correct
+    except Exception:
+        pass
+    # Fallback to synthetic (treat as NONE)
+    return "none", False
 
 
 def _generate_wrong_answer(
@@ -297,11 +388,15 @@ def generate_dataset(
     seed: int = 42,
     train_ratio: float = 0.8,
     maas: bool = False,
+    api_model: str | None = None,
 ) -> dict[str, list[dict]]:
     """Generate arithmetic dataset with stratified train/test split.
 
     If maas=True, samples include prompt + user_response for SDFT training.
     If maas=False, samples are raw {expression, answer, type} dicts.
+
+    If api_model is set (e.g. "claude-3-5-haiku@20241022"), API answers come
+    from a real Claude model call instead of synthetic generation.
     """
     rng = random.Random(seed)
 
@@ -330,10 +425,37 @@ def generate_dataset(
     rng.shuffle(test)
 
     if maas:
-        train = [_to_maas_sample(s, rng) for s in train]
-        test = [_to_maas_sample(s, rng) for s in test]
+        if api_model:
+            train = _to_maas_samples_claude(train, api_model)
+            test = _to_maas_samples_claude(test, api_model)
+        else:
+            train = [_to_maas_sample(s, rng) for s in train]
+            test = [_to_maas_sample(s, rng) for s in test]
 
     return {"train": train, "test": test}
+
+
+def _to_maas_samples_claude(
+    samples: list[dict], model: str, workers: int = API_CONCURRENCY
+) -> list[dict]:
+    """Convert raw samples to MaaS format using Claude API for answers."""
+    results: list[dict | None] = [None] * len(samples)
+
+    def _process(idx: int, raw: dict) -> None:
+        expr = raw["expression"]
+        answer = raw["answer"]
+        api_answer, is_correct = _get_claude_api_answer(expr, answer, model)
+        results[idx] = build_maas_sample(expr, answer, api_answer, is_correct)
+
+    print(f"Calling {model} for {len(samples)} API answers ({workers} workers)...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_process, i, s) for i, s in enumerate(samples)]
+        for i, f in enumerate(concurrent.futures.as_completed(futures)):
+            f.result()  # raise on error
+            if (i + 1) % 50 == 0:
+                print(f"  ... {i + 1}/{len(samples)}")
+
+    return [r for r in results if r is not None]
 
 
 def _to_maas_sample(raw: dict, rng: random.Random) -> dict:
@@ -368,15 +490,27 @@ def main():
         action="store_true",
         help="Generate MaaS-format dataset (prompt + user_response) for SDFT training",
     )
+    parser.add_argument(
+        "--api-model",
+        type=str,
+        nargs="?",
+        const=API_DEFAULT_MODEL,
+        default=None,
+        help=f"Use Claude for API answers (default: {API_DEFAULT_MODEL}). "
+        "Requires gcloud auth (gcloud auth print-access-token).",
+    )
     args = parser.parse_args()
 
     fmt = "MaaS" if args.maas else "raw"
+    if args.api_model:
+        fmt += f" (api={args.api_model})"
     print(f"Generating dataset (custom={args.n_custom}, standard={args.n_standard}, seed={args.seed}, format={fmt})...")
     dataset = generate_dataset(
         n_custom=args.n_custom,
         n_standard=args.n_standard,
         seed=args.seed,
         maas=args.maas,
+        api_model=args.api_model,
     )
     print(f"  Train: {len(dataset['train'])} samples")
     print(f"  Test:  {len(dataset['test'])} samples")
