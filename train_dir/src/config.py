@@ -22,6 +22,10 @@ GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
 
+# Thinking (adapter mode)
+REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "128"))
+ADAPTER_MODE = os.environ.get("ADAPTER_MODE", "0") == "1"
+
 # vLLM server
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 VLLM_BASE_URL = f"http://localhost:{VLLM_PORT}"

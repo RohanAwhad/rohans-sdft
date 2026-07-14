@@ -60,6 +60,59 @@ def vllm_generate(
     return resp.json()["choices"][0]["text"]
 
 
+def vllm_generate_with_thinking(
+    prompt_text: str,
+    reasoning_budget: int = 128,
+    max_tokens: int = 256,
+    temperature: float = GEN_TEMPERATURE,
+    top_p: float = GEN_TOP_P,
+) -> str:
+    """Generate a completion with budget-controlled thinking.
+
+    Two-step generation (Nemotron pattern):
+    1. Generate thinking trace up to reasoning_budget tokens.
+       If </think> not present, force-close the thinking block.
+    2. Continue generation from the closed thinking block with
+       remaining token budget.
+
+    Returns the full completion (thinking + answer).
+    """
+    think_completion = _generate_text(prompt_text, reasoning_budget, temperature, top_p)
+
+    if "<｜end▁of▁thinking｜>" not in think_completion:
+        think_completion += "\n<｜end▁of▁thinking｜>"
+
+    # Build the full prompt so far: original + thinking
+    extended_prompt = prompt_text + think_completion
+
+    answer_tokens = max(1, max_tokens - reasoning_budget)
+    answer_completion = _generate_text(extended_prompt, answer_tokens, temperature, top_p)
+
+    return think_completion + answer_completion
+
+
+def _generate_text(
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> str:
+    """Single completion call via vLLM's /v1/completions."""
+    resp = requests.post(
+        f"{VLLM_BASE_URL}/v1/completions",
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        },
+        timeout=300,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["text"]
+
+
 # ---------------------------------------------------------------------------
 # Weight sync (HTTP control plane + NCCL data plane)
 # ---------------------------------------------------------------------------

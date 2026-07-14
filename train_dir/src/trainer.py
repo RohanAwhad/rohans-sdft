@@ -23,6 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import wandb
 from src.collator import SDFTCollator
 from src.config import (
+    ADAPTER_MODE,
     BATCH_SIZE,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
@@ -33,6 +34,7 @@ from src.config import (
     NUM_EPOCHS,
     OUTPUT_DIR,
     HINDSIGHT_FIELD,
+    REASONING_BUDGET,
     SAVE_EVERY,
     TRAIN_DATA_PATH,
 )
@@ -50,8 +52,12 @@ from src.vllm_utils import (
     init_vllm_weight_engine,
     sync_weights_to_vllm,
     vllm_generate,
+    vllm_generate_with_thinking,
     wait_for_vllm,
 )
+
+if ADAPTER_MODE:
+    from task_3.collator import AdapterCollator
 
 DEVICE = torch.device("cuda:0")
 
@@ -213,7 +219,11 @@ def train() -> None:
     # ---- Dataset ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
     dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
-    collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
+    if ADAPTER_MODE:
+        collator = AdapterCollator(tokenizer=tokenizer)
+        logger.info("Adapter mode: using AdapterCollator (no chat template)")
+    else:
+        collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
     dataloader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator
     )
@@ -249,6 +259,8 @@ def train() -> None:
             "lr_scheduler": "constant",
             "total_optimizer_steps": total_steps,
             "dataset": TRAIN_DATA_PATH,
+            "adapter_mode": ADAPTER_MODE,
+            "reasoning_budget": REASONING_BUDGET,
         },
     )
 
@@ -299,7 +311,14 @@ def train() -> None:
                 conditional_text = item["conditional_texts"][0]
 
                 # 1. Generate completion via vLLM
-                completion_text = vllm_generate(prompt_text)
+                if ADAPTER_MODE:
+                    completion_text = vllm_generate_with_thinking(
+                        prompt_text,
+                        reasoning_budget=REASONING_BUDGET,
+                        max_tokens=GEN_MAX_NEW_TOKENS,
+                    )
+                else:
+                    completion_text = vllm_generate(prompt_text)
                 completion_ids = tokenizer.encode(
                     completion_text, add_special_tokens=False
                 )
