@@ -41,7 +41,7 @@ bash train_dir/setup.sh           # creates train_dir/.venv
 bash train_dir/start_vllm.sh      # GPU 0, terminal 1
 bash train_dir/launch.sh           # GPU 1 (trainer) + GPU 2 (logprob server), terminal 2
 ```
-Checkpoints saved to: `train_dir/output/epoch_{N}/` (rolling — only latest kept)
+Checkpoints saved to: `train_dir/output/step_{N}/` (every `SAVE_EVERY` optimizer steps, default 200)
 
 #### Parallel runs (GPUs 3/4/5)
 ```bash
@@ -65,5 +65,17 @@ GPU_VLLM=3 GPU_TRAINER=4 GPU_LOGPROB_SERVER=5 VLLM_PORT=8001 NCCL_MASTER_PORT=29
 
 ## Training data
 
-Dataset: `/home/lab/rawhad/sdg-ki-eval/data/maas_data/rohans_data/train_maas_sdft.jsonl` (on node).
+### Rohan's data (400 samples)
+- Train: `/home/lab/rawhad/sdg-ki-eval/data/maas_data/rohans_data/train_maas_sdft.jsonl`
+- RAG knowledge train: `/home/lab/rawhad/sdg-ki-eval/data/maas_data/rohans_data/train_rag_knowledge.jsonl`
+- RAG knowledge eval: `/home/lab/rawhad/sdg-ki-eval/data/maas_data/rohans_data/eval_rag_knowledge.jsonl`
+
+### Eshwar's datasets (3000 samples each, enriched versions available)
+- `asynth_v1_sdft.jsonl` / `asynth_v1_sdft_enriched.jsonl` (not needed, already has enriched)
+- `sdg_hub_sft_sdft.jsonl` / `sdg_hub_sft_sdft_enriched.jsonl`
+- `oumi_sdft.jsonl` / `oumi_sdft_enriched.jsonl`
+- `asynth_kd_sdft.jsonl` / `asynth_kd_sdft_enriched.jsonl`
+
+All at: `/home/lab/rawhad/sdg-ki-eval/data/eshwar_datasets/`
+
 Reference code for collator/privileged-info pattern: `~/rawhad/self_distillation/aligning_lm_from_user_interaction` (sdpo scripts).

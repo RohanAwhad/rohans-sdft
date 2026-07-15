@@ -219,11 +219,32 @@ All at: `/home/lab/rawhad/sdg-ki-eval/data/eshwar_datasets/`
 ### Run 12 (asynth_v1, LR=5e-5, EMA=0.05, 10 epochs)
 - Same hyperparams as run 11 but full asynth_v1 dataset (not 32 samples)
 - GPUs 3/4/5, vLLM port 8001, NCCL port 29501
-- Status: running
+- Stopped early
 
 ### Run 13 (sdg_hub enriched, LR=5e-5, EMA=0.05, 10 epochs)
 - First run with enriched sdg_hub data (3000 samples)
 - GPUs 0/1/2, vLLM port 8000
 - vLLM max-model-len bumped 4096→8192 (some sdg_hub prompts ~2100 tokens)
-- opt_step=1 loss=0.3437
-- Status: running
+- Stopped early
+
+### Run 14 (rohans_data, LR=5e-5, EMA=0.05, 10 epochs)
+- 400 samples, `train_maas_sdft.jsonl` (has `enriched_user_response`)
+- Loss=0.3618 at step 1, ran well
+- Completed 10 epochs, final avg_loss=0.154
+- Checkpoints: `output_run_14/epoch_{N}/`
+
+### Infra changes
+- **Step-level checkpoints**: save every `SAVE_EVERY` steps (default 200) to `step_{N}/` instead of epoch-level
+- **`HINDSIGHT_FIELD` env var**: configurable collator field (default `enriched_user_response`, set to `user_response` for non-enriched data)
+- **vLLM max-model-len**: 4096→8192 (sdg_hub prompts can be ~2100 tokens)
+
+### Run 15 (sdg_hub non-enriched, 2 epochs, SAVE_EVERY=10)
+- 3000 samples, `sdg_hub_sft_sdft.jsonl` (no `enriched_user_response`)
+- `HINDSIGHT_FIELD=user_response` (teacher sees correct answer only, no docs)
+- Stopped early
+
+### Run 16 (train_rag_knowledge, 2 epochs, SAVE_EVERY=10, in progress)
+- 400 samples, `train_rag_knowledge.jsonl` (has `enriched_user_response`)
+- Eval set available: `eval_rag_knowledge.jsonl`
+- opt_step=1 loss=0.1385, 26 total steps
+- Checkpoints: `output_run_16/step_{N}/` (steps 10, 20, final at 26)
