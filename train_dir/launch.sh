@@ -32,4 +32,4 @@ trap cleanup EXIT
 
 # Start trainer on GPU 1 (foreground — blocks until training completes)
 echo "[launch] Starting trainer on GPU $GPU_TRAINER ..."
-CUDA_VISIBLE_DEVICES="$GPU_TRAINER" python -m src.trainer
+CUDA_VISIBLE_DEVICES="$GPU_TRAINER" python -m src.new_trainer
