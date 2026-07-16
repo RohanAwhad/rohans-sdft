@@ -10,6 +10,7 @@ Orchestrates:
 
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import torch.distributed as dist
@@ -290,48 +291,48 @@ def train() -> None:
         use_cache = offline_overfit and epoch > 0
         data_iter = cached_data if use_cache else dataloader
 
-        for batch_idx, item in enumerate(data_iter):
-            if use_cache:
-                prompt_text, completion_ids, teacher_log_probs = item
-                completion_text = ""  # not needed for cached replay
-            else:
-                prompt_text = item["prompt_texts"][0]  # batch_size=1
-                conditional_text = item["conditional_texts"][0]
+        # Pre-generate completions in parallel via thread pool
+        items = list(data_iter)
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = [pool.submit(vllm_generate, item["prompt_texts"][0]) for item in items]
+            completions = [f.result() for f in futures]
 
-                # 1. Generate completion via vLLM
-                completion_text = vllm_generate(prompt_text)
-                completion_ids = tokenizer.encode(
-                    completion_text, add_special_tokens=False
-                )
+        for batch_idx, (item, completion_text) in enumerate(zip(items, completions)):
+            prompt_text = item["prompt_texts"][0]  # batch_size=1
+            conditional_text = item["conditional_texts"][0]
 
-                # Append EOS so model learns to stop
-                if tokenizer.eos_token_id is not None:
-                    completion_ids.append(tokenizer.eos_token_id)
+            completion_ids = tokenizer.encode(
+                completion_text, add_special_tokens=False
+            )
 
-                if len(completion_ids) == 0:
-                    logger.warning(f"Empty completion at step {global_step}, skipping")
-                    continue
+            # Append EOS so model learns to stop
+            if tokenizer.eos_token_id is not None:
+                completion_ids.append(tokenizer.eos_token_id)
 
-                # Truncate if needed
-                completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
+            if len(completion_ids) == 0:
+                logger.warning(f"Empty completion at step {global_step}, skipping")
+                continue
 
-                # 3. Teacher log-probs via NCCL (no grad)
-                cond_ids = tokenizer.encode(
-                    conditional_text,
-                    add_special_tokens=False,
-                    truncation=True,
-                    max_length=2048,
-                )
-                teacher_log_probs = request_teacher_log_probs(
-                    token_ids=cond_ids + completion_ids,
-                    prompt_len=len(cond_ids),
-                    vocab_size=vocab_size,
-                    device=DEVICE,
-                )  # (C, V) float32
+            # Truncate if needed
+            completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
-                # Cache for offline overfit replay
-                if offline_overfit:
-                    cached_data.append((prompt_text, completion_ids, teacher_log_probs.detach().cpu()))
+            # 3. Teacher log-probs via NCCL (no grad)
+            cond_ids = tokenizer.encode(
+                conditional_text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=2048,
+            )
+            teacher_log_probs = request_teacher_log_probs(
+                token_ids=cond_ids + completion_ids,
+                prompt_len=len(cond_ids),
+                vocab_size=vocab_size,
+                device=DEVICE,
+            )  # (C, V) float32
+
+            # Cache for offline overfit replay
+            if offline_overfit:
+                cached_data.append((prompt_text, completion_ids, teacher_log_probs.detach().cpu()))
 
             # 2. Student forward pass (with gradients)
             student_logits = forward_student(

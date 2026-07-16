@@ -45,19 +45,23 @@ def vllm_generate(
     top_p: float = GEN_TOP_P,
 ) -> str:
     """Generate a completion via vLLM's OpenAI-compatible API."""
-    resp = requests.post(
-        f"{VLLM_BASE_URL}/v1/completions",
-        json={
-            "model": MODEL_NAME,
-            "prompt": prompt_text,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-        },
-        timeout=180,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["text"]
+    # TODO: add retry mechanism and think about error handling
+    try:
+      resp = requests.post(
+          f"{VLLM_BASE_URL}/v1/completions",
+          json={
+              "model": MODEL_NAME,
+              "prompt": prompt_text,
+              "max_tokens": max_tokens,
+              "temperature": temperature,
+              "top_p": top_p,
+          },
+          timeout=180,
+      )
+      resp.raise_for_status()
+      return resp.json()["choices"][0]["text"]
+    except Exception as e:
+      return "Couldn't generate response. Generation failed"
 
 
 # ---------------------------------------------------------------------------
