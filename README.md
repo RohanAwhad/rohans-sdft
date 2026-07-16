@@ -57,12 +57,81 @@ All overridable via environment variables. See `train_dir/src/config.py`.
 | `OUTPUT_DIR` | `./output` | Checkpoint directory (rolling) |
 | `OFFLINE_OVERFIT` | `0` | Cache epoch 1 data, replay for remaining epochs |
 
+## Megatron Bridge Implementation
+
+Re-implementation of the SDFT training loop using NVIDIA Megatron Bridge / Megatron-Core instead of HuggingFace transformers. All code in `megatron_trainer/`.
+
+### Results (Qwen3-8B, 10 epochs)
+
+| Metric | Megatron Bridge | Reference (HF, run 14) |
+|--------|----------------|----------------------|
+| no_context | **34%** | 41% |
+| with_context | **82%** | 83% |
+| avg_loss (epoch 10) | 0.234 | comparable |
+
+Loss trajectory:
+
+| Epoch | avg_loss |
+|-------|----------|
+| 1 | 0.665 |
+| 2 | 0.416 |
+| 3 | 0.325 |
+| 4 | 0.276 |
+| 5 | 0.252 |
+| 6 | 0.237 |
+| 7 | 0.231 |
+| 8 | 0.221 |
+| 9 | 0.225 |
+| 10 | 0.234 |
+
+### Architecture
+
+All 3 processes run inside a single NeMo container (`nvcr.io/nvidia/nemo:26.06`) with 3 GPUs:
+
+```
+Container (nvcr.io/nvidia/nemo:26.06)
+├── GPU 0: vLLM server (on-policy rollouts, --enforce-eager)
+├── GPU 1: Trainer (Megatron-Core GPTModel via AutoBridge)
+└── GPU 2: Logprob server (Megatron-Core GPTModel, EMA-updated)
+```
+
+### Quick start
+
+```bash
+# Full 10-epoch training on GPUs 5,6,7:
+bash megatron_trainer/train_full.sh 5
+
+# Smoke test (1 epoch, grad_accum=2):
+bash megatron_trainer/smoke_all_in_container.sh
+```
+
+### Key differences from HF implementation
+
+| Component | HF (`train_dir/`) | Megatron (`megatron_trainer/`) |
+|-----------|-------------------|-------------------------------|
+| Model loading | `AutoModelForCausalLM` | `AutoBridge.from_hf_pretrained()` |
+| Forward pass | backbone + selective lm_head | `model(input_ids, position_ids, attention_mask=None)` |
+| Optimizer | `bitsandbytes.AdamW8bit` | same (`BNB_CUDA_VERSION=130`) |
+| Weight sync to vLLM | direct NCCL (HF names) | Megatron→HF conversion via `export_hf_weights()` |
+| Checkpointing | `model.save_pretrained()` | manual safetensors export (avoids distributed barrier) |
+| Runtime | host Python venv | NeMo container (glibc 2.39 requirement) |
+
+### Container gotchas
+
+- `pip install --no-deps vllm==0.23 bitsandbytes` at startup (container has vLLM 0.20 which is incompatible)
+- `BNB_CUDA_VERSION=130` (container CUDA 13.2, highest bnb binary is 13.0)
+- `--enforce-eager` for vLLM (torch.compile incompatible with container's torch 2.12)
+- `start_vllm_patched.py` monkey-patches prometheus `_IncludedRouter` crash
+- `--add-host $(hostname):127.0.0.1` for NCCL hostname resolution
+- `gradient_accumulation_fusion=False` in model config (no Megatron distributed optimizer)
+- tokenizer_config.json fix: `extra_special_tokens` list→dict conversion
+
 ## Repo structure
 
 ```
-task_1/     PoC: NCCL weight transfer (HF -> vLLM)        [complete]
-task_2/     PoC: pure NCCL logprob server                  [complete]
-train_dir/  Full SDFT training loop                        [active]
+task_1/            PoC: NCCL weight transfer (HF -> vLLM)         [complete]
+task_2/            PoC: pure NCCL logprob server                   [complete]
+train_dir/         Full SDFT training loop (HF transformers)       [complete]
   src/
     config.py          All hyperparams (env-overridable)
     collator.py        SDFTCollator (prompt + privileged conditional)
@@ -73,6 +142,18 @@ train_dir/  Full SDFT training loop                        [active]
   setup.sh             Venv creation
   start_vllm.sh        vLLM server launcher
   launch.sh            Logprob server + trainer launcher
+megatron_trainer/  SDFT with Megatron Bridge (NeMo container)      [complete]
+  config.py            Config (same params, env-overridable)
+  collator.py          SDFTCollator (unchanged)
+  model_utils.py       AutoBridge init, HF weight export, checkpoint save
+  nccl_comm.py         NCCL protocol (adapted for MCore GPTModel)
+  vllm_utils.py        vLLM client + Megatron→HF weight conversion
+  trainer.py           Training loop (Megatron-Core model)
+  logprob_server.py    Teacher process (Megatron-Core model)
+  start_vllm_patched.py  vLLM launcher with prometheus fix
+  train_full.sh        Production launcher (10 epochs)
+  smoke_all_in_container.sh  Smoke test launcher
+  goal.md              Design doc + progress tracking
 ```
 
 ## Requirements
