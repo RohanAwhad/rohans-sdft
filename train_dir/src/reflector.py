@@ -6,8 +6,10 @@ response and produces a one-line feedback. Returns structured {verdict, feedback
 
 import json
 
+import anthropic
 from anthropic import AnthropicVertex
 from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from src.config import REFLECTOR_MODEL, REFLECTOR_REGION, REFLECTOR_PROJECT_ID
 
@@ -46,26 +48,32 @@ def _get_client() -> AnthropicVertex:
     return _client
 
 
+
+
+@retry(
+  stop=stop_after_attempt(3),
+  wait=wait_exponential(multiplier=1, min=0.2, max=10),
+  retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError)),
+)
 def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
     """Reflect on model_response vs golden_answer.
 
     Returns: {"verdict": "PASS"|"FAIL", "feedback": "one line reason"}
     """
     client = _get_client()
-    user_content = REFLECTOR_USER_TEMPLATE.format(
+    user_content: str = REFLECTOR_USER_TEMPLATE.format(
         question=question,
         golden_answer=golden_answer,
         model_response=model_response,
     )
     response = client.messages.create(
         model=REFLECTOR_MODEL,
-        max_tokens=100,
+        max_tokens=1024,
         system=REFLECTOR_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )
-    raw = response.content[0].text.strip()
-    if "```json" in raw:
-        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
-    parsed = json.loads(raw)
+    raw: str = response.content[0].text.strip()
+    raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+    parsed: dict[str, str] = json.loads(raw)
     logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
     return parsed

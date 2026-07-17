@@ -10,6 +10,7 @@ echo "Installing dependencies ..."
 VIRTUAL_ENV="$VENV" uv pip install \
     "vllm==0.23" \
     "anthropic[vertex]" \
+    "tenacity" \
     datasets \
     loguru \
     wandb \
