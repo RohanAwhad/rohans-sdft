@@ -54,9 +54,20 @@ class SDFTCollator:
     def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         prompt_texts: list[str] = []
         conditional_texts: list[str] = []
+        raw_questions: list[str] = []
+        golden_answers: list[str] = []
+        normalized_messages: list[list[dict[str, str]]] = []
 
         for ex in examples:
             clean_prompt = _normalize_messages(ex["prompt"])
+
+            # Raw data for reflector: full messages, last question, golden answer
+            normalized_messages.append(clean_prompt)
+            raw_questions.append(clean_prompt[-1]["content"])
+            answer_data = ex["user_response"]
+            golden_answers.append(
+                (answer_data.get("value") or answer_data.get("content")).strip()
+            )
 
             # --- Student prompt (x) ---
             p_text = self.tokenizer.apply_chat_template(
@@ -68,31 +79,39 @@ class SDFTCollator:
             prompt_texts.append(p_text)
 
             # --- Teacher prompt (x, o) — append privileged info ---
-            template = HINDSIGHT_TEMPLATES[self.hindsight_field]
-            conditional_history = copy.deepcopy(clean_prompt)
-
-            if self.hindsight_field == "enriched_user_response":
-                doc_data = ex["enriched_user_response"]
-                doc = (doc_data.get("value") or doc_data.get("content")).strip()
-                answer_data = ex["user_response"]
-                answer = (answer_data.get("value") or answer_data.get("content")).strip()
-                conditional_history[-1]["content"] += "\n\n" + template.format(
-                    doc=doc, answer=answer
-                )
+            # online_feedback: conditional_text is built dynamically in the trainer
+            # after vLLM generation + reflector call, so we skip it here.
+            if self.hindsight_field == "online_feedback":
+                conditional_texts.append(None)
             else:
-                hindsight_data = ex[self.hindsight_field]
-                o = (hindsight_data.get("value") or hindsight_data.get("content")).strip()
-                conditional_history[-1]["content"] += "\n\n" + template.format(o=o)
+                template = HINDSIGHT_TEMPLATES[self.hindsight_field]
+                conditional_history = copy.deepcopy(clean_prompt)
 
-            xo_text = self.tokenizer.apply_chat_template(
-                conditional_history,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            conditional_texts.append(xo_text)
+                if self.hindsight_field == "enriched_user_response":
+                    doc_data = ex["enriched_user_response"]
+                    doc = (doc_data.get("value") or doc_data.get("content")).strip()
+                    answer_data = ex["user_response"]
+                    answer = (answer_data.get("value") or answer_data.get("content")).strip()
+                    conditional_history[-1]["content"] += "\n\n" + template.format(
+                        doc=doc, answer=answer
+                    )
+                else:
+                    hindsight_data = ex[self.hindsight_field]
+                    o = (hindsight_data.get("value") or hindsight_data.get("content")).strip()
+                    conditional_history[-1]["content"] += "\n\n" + template.format(o=o)
+
+                xo_text = self.tokenizer.apply_chat_template(
+                    conditional_history,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                conditional_texts.append(xo_text)
 
         return {
             "prompt_texts": prompt_texts,
             "conditional_texts": conditional_texts,
+            "raw_questions": raw_questions,
+            "golden_answers": golden_answers,
+            "normalized_messages": normalized_messages,
         }

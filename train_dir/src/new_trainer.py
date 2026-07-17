@@ -8,6 +8,7 @@ Orchestrates:
     5. Epoch-level weight sync to both servers
 """
 
+import copy
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +43,7 @@ from src.config import (
     TRAIN_DATA_PATH,
 )
 from src.config import EMA_ALPHA
+from src import reflector
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
@@ -183,6 +185,25 @@ def forward_student(
     return completion_logits
 
 
+ONLINE_FEEDBACK_TEMPLATE = (
+    "Correct solution:\n{golden_answer}\n\n"
+    "The following is feedback from your earlier attempt:\n{feedback}"
+)
+
+
+def build_conditional_with_feedback(
+    tokenizer, messages: list[dict], feedback: str, golden_answer: str,
+) -> str:
+    """Build teacher conditional text using reflector feedback as privileged info."""
+    cond_history = copy.deepcopy(messages)
+    cond_history[-1]["content"] += "\n\n" + ONLINE_FEEDBACK_TEMPLATE.format(
+        feedback=feedback, golden_answer=golden_answer,
+    )
+    return tokenizer.apply_chat_template(
+        cond_history, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -243,8 +264,14 @@ def train():
           "lr_scheduler": "constant",
           "total_optimizer_steps": total_steps,
           "dataset": TRAIN_DATA_PATH,
+          "hindsight_field": HINDSIGHT_FIELD,
       },
   )
+  if HINDSIGHT_FIELD == "online_feedback":
+    from src.config import REFLECTOR_MODEL
+    logger.info(f"Hindsight: online_feedback (reflector={REFLECTOR_MODEL})")
+  else:
+    logger.info(f"Hindsight: {HINDSIGHT_FIELD} (static)")
   # ---- Wait for vLLM ----
   logger.info("Waiting for vLLM server...")
   wait_for_vllm()
@@ -286,14 +313,37 @@ def train():
           completions = list(executor.map(vllm_generate, prompt_texts))
         completions = [completions[i:i+BATCH_SIZE] for i in range(0, len(completions), BATCH_SIZE)]
 
+        # --- Reflector: parallel feedback generation (online_feedback mode) ---
+        reflector_results: list[dict[str, str] | None] = [None] * GRAD_ACCUM_STEPS
+        if HINDSIGHT_FIELD == "online_feedback":
+          def _reflect(idx: int) -> tuple[int, dict[str, str]]:
+            item = items[idx]
+            return idx, reflector.run(
+              question=item["raw_questions"][0],
+              golden_answer=item["golden_answers"][0],
+              model_response=completions[idx][0],
+            )
+          with ThreadPoolExecutor(max_workers=GRAD_ACCUM_STEPS) as executor:
+            for idx, result in executor.map(_reflect, range(GRAD_ACCUM_STEPS)):
+              reflector_results[idx] = result
 
         for micro_step in range(GRAD_ACCUM_STEPS):
           # run forward pass
           # TODO: (rohan) we only have support for BATCH_SIZE=1
           item = items[micro_step]
           prompt_text: str = item["prompt_texts"][0]
-          conditional_text: str = item["conditional_texts"][0]
           completion_text: str = completions[micro_step][0]
+
+          # Conditional text: online reflector feedback or static hindsight
+          if HINDSIGHT_FIELD == "online_feedback" and reflector_results[micro_step] is not None:
+            conditional_text = build_conditional_with_feedback(
+              tokenizer,
+              item["normalized_messages"][0],
+              feedback=reflector_results[micro_step]["feedback"],
+              golden_answer=item["golden_answers"][0],
+            )
+          else:
+            conditional_text: str = item["conditional_texts"][0]
 
           completion_ids: list[int] = tokenizer.encode(completion_text, add_special_tokens=False)
           if tokenizer.eos_token_id is not None:
@@ -333,7 +383,10 @@ def train():
           epoch_samples += 1
           for k, v in step_metrics.items():
             accum_metrics.setdefault(k, []).append(v)
-          pass
+          if reflector_results[micro_step] is not None:
+            accum_metrics.setdefault("reflector/pass_rate", []).append(
+              1.0 if reflector_results[micro_step]["verdict"] == "PASS" else 0.0
+            )
 
         # backward pass
         # Optimizer step

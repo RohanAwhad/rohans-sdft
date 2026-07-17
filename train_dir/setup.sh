@@ -9,6 +9,7 @@ uv venv "$VENV" --python 3.12
 echo "Installing dependencies ..."
 VIRTUAL_ENV="$VENV" uv pip install \
     "vllm==0.23" \
+    "anthropic[vertex]" \
     datasets \
     loguru \
     wandb \
