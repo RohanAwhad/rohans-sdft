@@ -216,9 +216,9 @@ def train():
           epoch_samples += 1
           for k, v in step_metrics.items():
             accum_metrics.setdefault(k, []).append(v)
-          if getattr(env, "reflector_result", None) is not None:
-            accum_metrics.setdefault("reflector/pass_rate", []).append(
-              1.0 if env.reflector_result["verdict"] == "PASS" else 0.0
+          if env.episode_result is not None:
+            accum_metrics.setdefault("episode/pass_rate", []).append(
+              1.0 if env.episode_result else 0.0
             )
 
         # backward pass

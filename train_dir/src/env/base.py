@@ -15,6 +15,7 @@ class BaseEnv(ABC):
     vllm_base_url: str
     completion_text: str | None
     privileged_information_prompt: str | None
+    episode_result: bool | None
 
     @abstractmethod
     def run(self) -> None:

@@ -108,6 +108,7 @@ class ApiAdapterEnv(BaseEnv):
         # outputs (populated by run())
         self.completion_text: str | None = None
         self.privileged_information_prompt: str | None = None
+        self.episode_result: bool | None = None
         self.verdict: bool = False
         self.feedback: str = ""
 
@@ -119,6 +120,7 @@ class ApiAdapterEnv(BaseEnv):
         model_response = self.rollout(self.raw_question)
         model_answer = self.parse_model_answer(model_response) if model_response else None
         if model_answer is not None: self.evaluate(model_answer, self.golden_answer)
+        self.episode_result = self.verdict
         self.generate_training_attrs()
 
     # ------------------------------------------------------------------

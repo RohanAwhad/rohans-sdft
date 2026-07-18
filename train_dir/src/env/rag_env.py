@@ -42,22 +42,23 @@ class RagEnv(BaseEnv):
         # outputs (populated by run())
         self.completion_text: str | None = None
         self.privileged_information_prompt: str | None = privileged_information_prompt
-        self.reflector_result: dict[str, str] | None = None
+        self.episode_result: bool | None = None
 
     def run(self) -> None:
         self.completion_text, _ = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
         self.completion_text += self.tokenizer.eos_token
 
         if self.use_reflector:
-            self.reflector_result = reflector.run(
+            reflector_result = reflector.run(
                 self.raw_question, self.golden_answer, self.completion_text,
             )
-            self._build_privileged_prompt_from_feedback()
+            self.episode_result = reflector_result["verdict"] == "PASS"
+            self._build_privileged_prompt_from_feedback(reflector_result)
 
-    def _build_privileged_prompt_from_feedback(self) -> None:
+    def _build_privileged_prompt_from_feedback(self, reflector_result: dict[str, str]) -> None:
         cond_history = copy.deepcopy(self.normalized_messages)
         cond_history[-1]["content"] += "\n\n" + ONLINE_FEEDBACK_TEMPLATE.format(
-            feedback=self.reflector_result["feedback"],
+            feedback=reflector_result["feedback"],
             golden_answer=self.golden_answer,
         )
         self.privileged_information_prompt = self.tokenizer.apply_chat_template(
