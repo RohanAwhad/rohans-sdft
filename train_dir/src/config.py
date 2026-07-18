@@ -43,6 +43,10 @@ REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")
 REFLECTOR_REGION = os.environ.get("REFLECTOR_REGION", "us-east5")
 REFLECTOR_PROJECT_ID = os.environ.get("REFLECTOR_PROJECT_ID", "")
 
+# API-Adapter env
+API_MODEL = os.environ.get("API_MODEL", "vertex_ai/claude-haiku-4-5@20251001")
+MAX_ADAPTER_TURNS = int(os.environ.get("MAX_ADAPTER_TURNS", "5"))
+
 # Output
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
 SAVE_EVERY = int(os.environ.get("SAVE_EVERY", "200"))  # save checkpoint every N optimizer steps

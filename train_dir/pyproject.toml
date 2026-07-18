@@ -15,3 +15,4 @@ anthropic = {extras = ["vertex"]}
 tenacity = "*"
 bitsandbytes = "*"
 accelerate = "*"
+litellm = "*"

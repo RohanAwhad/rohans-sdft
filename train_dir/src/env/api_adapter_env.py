@@ -1,0 +1,284 @@
+"""API-Adapter rollout environment for SDFT training.
+
+The adapter (student) sits between a user and an external API LLM.
+It vets API responses with PASS/FAIL verdicts and feedback.
+On FAIL, feedback is sent back to the API model to regenerate.
+
+Training target: the adapter's last response (verdict + feedback).
+"""
+
+import copy
+import re
+
+import litellm
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+
+from src.env.base import BaseEnv
+from src.vllm_utils import vllm_generate
+from src.config import API_MODEL, MAX_ADAPTER_TURNS
+
+
+ADAPTER_SYSTEM_PROMPT = """\
+You are a personalized user assistant that sits between an LLM and the user.
+User directly requests the LLM for some task, and LLM comes back with a response.
+Your job is to vet the llm response to see if it is correct and ready to be seen by the user.
+Or does the response need to be edited.
+
+You will fulfill this job based on the parametric knowledge that you have that is very specific to the task at hand.
+LLM because it is a general LLM used by the world, may or may not know about these preferences.
+
+So when you vet it, and see that something needs to be improved, you give that feedback to LLM by verbalizing the internal knowledge.
+
+The input to you for this task will be:
+
+```
+<|USER_REQUEST_START|>
+...
+<|USER_REQUEST_END|>
+
+<|API_RESPONSE_START|>
+...
+<|API_RESPONSE_END|>
+```
+
+And the output expected from you is:
+
+```
+<|VERDICT_START|>
+this will be PASS/FAIL
+<|VERDICT_END|>
+<|FEEDBACK_START|>
+... keep it 1-3 lines
+<|FEEDBACK_END|>
+```
+
+And when the verdict is FAIL, and the api model generates a new response, that will be attached as a new message turn like this:
+
+```
+<|API_RESPONSE_START|>
+...
+<|API_RESPONSE_END|>
+```"""
+
+
+HINDSIGHT_TEMPLATE = (
+    "Treat the below information as hindsight from the env for the action that you are about to take.\n"
+    "Verdict: {verdict}\n"
+    "Feedback: {feedback}\n"
+    'Expected Verdict is "PASS"'
+)
+
+
+_VERDICT_RE = re.compile(
+    r"<\|VERDICT_START\|>\s*(.*?)\s*<\|VERDICT_END\|>", re.DOTALL
+)
+_FEEDBACK_RE = re.compile(
+    r"<\|FEEDBACK_START\|>\s*(.*?)\s*<\|FEEDBACK_END\|>", re.DOTALL
+)
+_BOXED_RE = re.compile(r"\\boxed\{(.*)\}", re.DOTALL)
+
+
+class ApiAdapterEnv(BaseEnv):
+    """API-Adapter rollout: adapter (student via vLLM) vets an external API model."""
+
+    def __init__(
+        self,
+        prompt_text: str,
+        vllm_base_url: str,
+        raw_question: str,
+        golden_answer: str,
+        tokenizer,
+        api_model: str = API_MODEL,
+        max_adapter_turns: int = MAX_ADAPTER_TURNS,
+    ):
+        self.prompt_text = prompt_text
+        self.vllm_base_url = vllm_base_url
+        self.raw_question = raw_question
+        self.golden_answer = golden_answer
+        self.tokenizer = tokenizer
+        self.api_model = api_model
+        self.max_adapter_turns = max_adapter_turns
+
+        # state (populated during rollout)
+        self.adapter_history: list[dict] = []
+        self.api_history: list[dict] = []
+
+        # outputs (populated by run())
+        self.completion_text: str | None = None
+        self.privileged_information_prompt: str | None = None
+        self.verdict: bool = False
+        self.feedback: str = ""
+
+    # ------------------------------------------------------------------
+    # Core lifecycle
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        model_response = self.rollout(self.raw_question)
+        model_answer = self.parse_model_answer(model_response) if model_response else None
+        if model_answer is not None: self.evaluate(model_answer, self.golden_answer)
+        self.generate_training_attrs()
+
+    # ------------------------------------------------------------------
+    # Rollout (follows .llm.md pseudocode)
+    # ------------------------------------------------------------------
+
+    def rollout(self, user_message: str) -> str | None:
+        self.adapter_history = []
+        self.api_history = [{"role": "user", "content": user_message}]
+        turns_remaining = self.max_adapter_turns
+
+        api_response = self.call_api(self.api_history)
+        self.api_history.append({"role": "assistant", "content": api_response})
+
+        self.build_adapter_history(api_response, user_message)
+        while True:
+            adapter_response = self.call_adapter()
+            self.adapter_history.append({"role": "assistant", "content": adapter_response})
+            turns_remaining -= 1
+            if turns_remaining == 0:
+                break
+
+            verdict, feedback = self.parse_adapter_response(adapter_response)
+            if not verdict:
+                self.verdict = False
+                self.feedback = f"Parse failed: could not parse adapter response: {adapter_response[:200]}"
+                return None
+            if verdict.strip().upper() == "PASS":
+                return api_response
+
+            # regenerate using api
+            self.api_history.append({"role": "user", "content": feedback})
+            api_response = self.call_api(self.api_history)
+            self.api_history.append({"role": "assistant", "content": api_response})
+
+            if turns_remaining == 0:
+                break
+            self.build_adapter_history(api_response, user_message=None)
+
+        return api_response
+
+    # ------------------------------------------------------------------
+    # API calls
+    # ------------------------------------------------------------------
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=1, max=10))
+    def call_api(self, messages: list[dict]) -> str:
+        """Call external API model via litellm."""
+        response = litellm.completion(model=self.api_model, messages=messages)
+        return response.choices[0].message.content
+
+    def call_adapter(self) -> str:
+        """Call adapter (student) via vLLM on-policy generation."""
+        prompt_text = self.tokenizer.apply_chat_template(
+            self.adapter_history,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        return vllm_generate(prompt_text, base_url=self.vllm_base_url)
+
+    # ------------------------------------------------------------------
+    # History management
+    # ------------------------------------------------------------------
+
+    def build_adapter_history(self, api_response: str, user_message: str | None) -> None:
+        """Build/append to adapter conversation history."""
+        if not self.adapter_history:
+            self.adapter_history.append({"role": "system", "content": ADAPTER_SYSTEM_PROMPT})
+
+        if user_message is not None:
+            content = (
+                f"<|USER_REQUEST_START|>\n{user_message}\n<|USER_REQUEST_END|>\n\n"
+                f"<|API_RESPONSE_START|>\n{api_response}\n<|API_RESPONSE_END|>"
+            )
+        else:
+            content = f"<|API_RESPONSE_START|>\n{api_response}\n<|API_RESPONSE_END|>"
+
+        self.adapter_history.append({"role": "user", "content": content})
+
+    # ------------------------------------------------------------------
+    # Parsing
+    # ------------------------------------------------------------------
+
+    def parse_adapter_response(self, text: str) -> tuple[str, str]:
+        """Extract verdict and feedback from adapter output."""
+        verdict_match = _VERDICT_RE.search(text)
+        feedback_match = _FEEDBACK_RE.search(text)
+
+        verdict = verdict_match.group(1).strip() if verdict_match else ""
+        feedback = feedback_match.group(1).strip() if feedback_match else ""
+
+        if not verdict:
+            logger.warning(f"Could not parse verdict from adapter response: {text[:200]}")
+        return verdict, feedback
+
+    def parse_model_answer(self, response: str) -> str | None:
+        """Extract \\boxed{...} answer from API model response."""
+        match = _BOXED_RE.search(response)
+        if match:
+            return match.group(1).strip()
+        self.verdict = False
+        self.feedback = f"Parse failed: no \\boxed{{}} in API response: {response[:200]}"
+        return None
+
+    # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate(self, model_answer: str, golden_answer: str) -> bool:
+        if str(model_answer) == str(golden_answer):
+            self.verdict = True
+            self.feedback = f"PASS. Model generated {model_answer}. Correct answer is {golden_answer}"
+        else:
+            self.verdict = False
+            self.feedback = f"FAIL. Model generated {model_answer}. Correct answer was {golden_answer}"
+        return self.verdict
+
+    # ------------------------------------------------------------------
+    # Training attributes
+    # ------------------------------------------------------------------
+
+    def generate_training_attrs(self) -> None:
+        """Build completion_text, prompt_text, and privileged_information_prompt.
+
+        Uses string slicing: full_text = prompt_text + completion_text.
+        prompt_text ends with <|im_start|>assistant\\n (generation prompt),
+        completion_text starts at the actual content (including <think> if present)
+        and includes <|im_end|> at the end.
+        """
+        assert self.adapter_history[-1]["role"] == "assistant", (
+            "Last adapter_history entry must be an assistant message"
+        )
+
+        # full_text: entire conversation with all turns (no generation prompt)
+        full_text = self.tokenizer.apply_chat_template(
+            self.adapter_history,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        # prompt_text: everything up to and including <|im_start|>assistant\n
+        self.prompt_text = self.tokenizer.apply_chat_template(
+            self.adapter_history[:-1],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+
+        # completion_text: slice off the prompt prefix, strip trailing \n template artifact
+        self.completion_text = full_text[len(self.prompt_text):].rstrip("\n")
+
+        # conditional_text: prompt + hindsight appended to last user message
+        verdict_str = "PASS" if self.verdict else "FAIL"
+        hindsight = HINDSIGHT_TEMPLATE.format(verdict=verdict_str, feedback=self.feedback)
+
+        cond_history = copy.deepcopy(self.adapter_history[:-1])
+        cond_history[-1]["content"] += "\n\n" + hindsight
+        self.privileged_information_prompt = self.tokenizer.apply_chat_template(
+            cond_history,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )

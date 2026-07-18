@@ -22,7 +22,7 @@ import math
 
 import wandb
 from src.collator import SDFTCollator
-from src.env import RagEnv
+from src.env import ApiAdapterEnv
 from src.loss import compute_kl
 from src.student import forward_student
 from src.config import (
@@ -163,18 +163,14 @@ def train():
           item = next(data_iter)
           items.append(item)
 
-        # --- Rollout: generate completions + optional reflector feedback ---
-        online_feedback = HINDSIGHT_FIELD == "online_feedback"
+        # --- Rollout: generate completions via ApiAdapterEnv ---
         envs = [
-          RagEnv(
+          ApiAdapterEnv(
             prompt_text=item["prompt_texts"][0],
             vllm_base_url=VLLM_BASE_URL,
-            privileged_information_prompt=item["conditional_texts"][0] if not online_feedback else None,
             raw_question=item["raw_questions"][0],
             golden_answer=item["golden_answers"][0],
-            normalized_messages=item["normalized_messages"][0],
             tokenizer=tokenizer,
-            use_reflector=online_feedback,
           )
           for item in items
         ]
@@ -184,8 +180,6 @@ def train():
         for micro_step, env in enumerate(envs):
           # TODO: (rohan) we only have support for BATCH_SIZE=1
           completion_ids: list[int] = tokenizer.encode(env.completion_text, add_special_tokens=False)
-          if tokenizer.eos_token_id is not None:
-            completion_ids.append(tokenizer.eos_token_id)
           if len(completion_ids) == 0:
             logger.warning(f"Empty completion, skipping micro_step {micro_step}")
             continue
