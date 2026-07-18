@@ -4,16 +4,17 @@ version = "0.1.0"
 requires-python = ">=3.12"
 description = "Self-Distillation Fine-Tuning with online reverse KL"
 
-[project.dependencies]
-# vllm 0.23 pulls torch, transformers, numpy, requests
-vllm = "==0.23"
-datasets = "*"
-loguru = "*"
-wandb = "*"
-flash-attn = "*"
-anthropic = {extras = ["vertex"]}
-tenacity = "*"
-bitsandbytes = "*"
-accelerate = "*"
-litellm = "*"
-google-cloud-aiplatform = "*"
+dependencies = [
+    # vllm 0.23 pulls torch, transformers, numpy, requests
+    "vllm==0.23",
+    "datasets",
+    "loguru",
+    "wandb",
+    "flash-attn",
+    "anthropic[vertex]",
+    "tenacity",
+    "bitsandbytes",
+    "accelerate",
+    "litellm",
+    "google-cloud-aiplatform",
+]
