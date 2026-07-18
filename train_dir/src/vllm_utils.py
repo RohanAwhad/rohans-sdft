@@ -40,6 +40,7 @@ def wait_for_vllm(timeout: int = 300) -> None:
 
 def vllm_generate(
     prompt_text: str,
+    base_url: str = VLLM_BASE_URL,
     max_tokens: int = GEN_MAX_NEW_TOKENS,
     temperature: float = GEN_TEMPERATURE,
     top_p: float = GEN_TOP_P,
@@ -48,7 +49,7 @@ def vllm_generate(
     # TODO: add retry mechanism and think about error handling
     try:
       resp = requests.post(
-          f"{VLLM_BASE_URL}/v1/completions",
+          f"{base_url}/v1/completions",
           json={
               "model": MODEL_NAME,
               "prompt": prompt_text,

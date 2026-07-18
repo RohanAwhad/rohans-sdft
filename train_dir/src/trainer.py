@@ -8,7 +8,6 @@ Orchestrates:
     5. Epoch-level weight sync to both servers
 """
 
-import copy
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +22,7 @@ import math
 
 import wandb
 from src.collator import SDFTCollator
+from src.env import RagEnv
 from src.loss import compute_kl
 from src.student import forward_student
 from src.config import (
@@ -38,9 +38,9 @@ from src.config import (
     HINDSIGHT_FIELD,
     SAVE_EVERY,
     TRAIN_DATA_PATH,
+    VLLM_BASE_URL,
 )
 from src.config import EMA_ALPHA
-from src import reflector
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
@@ -53,30 +53,10 @@ from src.nccl_comm import (
 from src.vllm_utils import (
     init_vllm_weight_engine,
     sync_weights_to_vllm,
-    vllm_generate,
     wait_for_vllm,
 )
 
 DEVICE = torch.device("cuda:0")
-
-
-ONLINE_FEEDBACK_TEMPLATE = (
-    "Correct solution:\n{golden_answer}\n\n"
-    "The following is feedback from your earlier attempt:\n{feedback}"
-)
-
-
-def build_conditional_with_feedback(
-    tokenizer, messages: list[dict], feedback: str, golden_answer: str,
-) -> str:
-    """Build teacher conditional text using reflector feedback as privileged info."""
-    cond_history = copy.deepcopy(messages)
-    cond_history[-1]["content"] += "\n\n" + ONLINE_FEEDBACK_TEMPLATE.format(
-        feedback=feedback, golden_answer=golden_answer,
-    )
-    return tokenizer.apply_chat_template(
-        cond_history, tokenize=False, add_generation_prompt=True, enable_thinking=False,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -183,44 +163,27 @@ def train():
           item = next(data_iter)
           items.append(item)
 
-        prompt_texts = [x for item in items for x in item['prompt_texts']]  # (batch_size x grad_accum_steps)
-        with ThreadPoolExecutor(max_workers=min(16, GRAD_ACCUM_STEPS)) as executor:
-          completions = list(executor.map(vllm_generate, prompt_texts))
-        completions = [completions[i:i+BATCH_SIZE] for i in range(0, len(completions), BATCH_SIZE)]
+        # --- Rollout: generate completions + optional reflector feedback ---
+        online_feedback = HINDSIGHT_FIELD == "online_feedback"
+        envs = [
+          RagEnv(
+            prompt_text=item["prompt_texts"][0],
+            vllm_base_url=VLLM_BASE_URL,
+            privileged_information_prompt=item["conditional_texts"][0] if not online_feedback else None,
+            raw_question=item["raw_questions"][0],
+            golden_answer=item["golden_answers"][0],
+            normalized_messages=item["normalized_messages"][0],
+            tokenizer=tokenizer,
+            use_reflector=online_feedback,
+          )
+          for item in items
+        ]
+        with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
+          list(executor.map(lambda e: e.run(), envs))
 
-        # --- Reflector: parallel feedback generation (online_feedback mode) ---
-        reflector_results: list[dict[str, str] | None] = [None] * GRAD_ACCUM_STEPS
-        if HINDSIGHT_FIELD == "online_feedback":
-          def _reflect(idx: int) -> tuple[int, dict[str, str]]:
-            item = items[idx]
-            return idx, reflector.run(
-              question=item["raw_questions"][0],
-              golden_answer=item["golden_answers"][0],
-              model_response=completions[idx][0],
-            )
-          with ThreadPoolExecutor(max_workers=GRAD_ACCUM_STEPS) as executor:
-            for idx, result in executor.map(_reflect, range(GRAD_ACCUM_STEPS)):
-              reflector_results[idx] = result
-
-        for micro_step in range(GRAD_ACCUM_STEPS):
-          # run forward pass
+        for micro_step, env in enumerate(envs):
           # TODO: (rohan) we only have support for BATCH_SIZE=1
-          item = items[micro_step]
-          prompt_text: str = item["prompt_texts"][0]
-          completion_text: str = completions[micro_step][0]
-
-          # Conditional text: online reflector feedback or static hindsight
-          if HINDSIGHT_FIELD == "online_feedback" and reflector_results[micro_step] is not None:
-            conditional_text = build_conditional_with_feedback(
-              tokenizer,
-              item["normalized_messages"][0],
-              feedback=reflector_results[micro_step]["feedback"],
-              golden_answer=item["golden_answers"][0],
-            )
-          else:
-            conditional_text: str = item["conditional_texts"][0]
-
-          completion_ids: list[int] = tokenizer.encode(completion_text, add_special_tokens=False)
+          completion_ids: list[int] = tokenizer.encode(env.completion_text, add_special_tokens=False)
           if tokenizer.eos_token_id is not None:
             completion_ids.append(tokenizer.eos_token_id)
           if len(completion_ids) == 0:
@@ -230,7 +193,7 @@ def train():
 
           # Teacher log-probs via NCCL
           cond_ids: list[int] = tokenizer.encode(
-            conditional_text, add_special_tokens=False, truncation=True, max_length=2048,
+            env.privileged_information_prompt, add_special_tokens=False, truncation=True, max_length=2048,
           )
           teacher_log_probs = request_teacher_log_probs(
             token_ids=cond_ids + completion_ids,
@@ -240,7 +203,7 @@ def train():
           )  # (C, V)
 
           # Student forward pass
-          student_logits = forward_student(model, tokenizer, prompt_text, completion_ids, DEVICE)  # (C, V)
+          student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)  # (C, V)
 
           # Reverse KL loss
           loss, step_metrics = compute_kl(
@@ -258,9 +221,9 @@ def train():
           epoch_samples += 1
           for k, v in step_metrics.items():
             accum_metrics.setdefault(k, []).append(v)
-          if reflector_results[micro_step] is not None:
+          if env.reflector_result is not None:
             accum_metrics.setdefault("reflector/pass_rate", []).append(
-              1.0 if reflector_results[micro_step]["verdict"] == "PASS" else 0.0
+              1.0 if env.reflector_result["verdict"] == "PASS" else 0.0
             )
 
         # backward pass
