@@ -47,10 +47,10 @@ And the output expected from you is:
 
 ```
 <|VERDICT_START|>
-this will be PASS/FAIL
+PASS/FAIL
 <|VERDICT_END|>
 <|FEEDBACK_START|>
-... keep it 1-3 lines
+... keep it 1-3 lines ...
 <|FEEDBACK_END|>
 ```
 
@@ -60,14 +60,19 @@ And when the verdict is FAIL, and the api model generates a new response, that w
 <|API_RESPONSE_START|>
 ...
 <|API_RESPONSE_END|>
-```"""
+```
+
+---
+In the current setup, you have to verify mathematical operations. Addition, subtraction, multiplication and division.
+And α, β, θ, and γ are encrypted operations which each represent one of the ops.
+User will not provide which symbol represents which op.
+""".strip()
 
 
 HINDSIGHT_TEMPLATE = (
     "Treat the below information as hindsight from the env for the action that you are about to take.\n"
-    "Verdict: {verdict}\n"
-    "Feedback: {feedback}\n"
-    'Expected Verdict is "PASS"'
+    "Note: α, β, θ, and γ are encrypted operations which each represent one of addition, multiplication, subtraction, or division.\n"
+    "Feedback: {feedback}"
 )
 
 
@@ -146,7 +151,7 @@ class ApiAdapterEnv(BaseEnv):
             verdict, feedback = self.parse_adapter_response(adapter_response)
             if not verdict:
                 self.verdict = False
-                self.feedback = f"Parse failed: could not parse adapter response: {adapter_response[:200]}"
+                self.feedback = f"Parse failed: could not parse adapter response"
                 return None
             if verdict.strip().upper() == "PASS":
                 return api_response
@@ -299,8 +304,7 @@ class ApiAdapterEnv(BaseEnv):
         self.completion_text = full_text[len(self.prompt_text):].rstrip("\n")
 
         # conditional_text: prompt + hindsight appended to last user message
-        verdict_str = "PASS" if self.verdict else "FAIL"
-        hindsight = HINDSIGHT_TEMPLATE.format(verdict=verdict_str, feedback=self.feedback)
+        hindsight = HINDSIGHT_TEMPLATE.format(feedback=self.feedback)
 
         cond_history = copy.deepcopy(self.adapter_history[:-1])
         cond_history[-1]["content"] += "\n\n" + hindsight
