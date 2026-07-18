@@ -241,6 +241,12 @@ def train():
         for k, vals in accum_metrics.items():
           log_dict[k] = sum(vals) / len(vals)
 
+        if optimizer_step % 10 == 0 and hasattr(env, "adapter_history"):
+          table = wandb.Table(columns=["step", "question", "golden_answer", "num_turns", "verdict", "conversation"])
+          conversation = "\n".join(str(msg) for msg in env.adapter_history)
+          table.add_data(optimizer_step, env.raw_question, env.golden_answer, len(env.adapter_history), env.verdict, conversation)
+          log_dict["episode/sample"] = table
+
         wandb.log(log_dict, step=optimizer_step)
         logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
 
