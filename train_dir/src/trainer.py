@@ -27,6 +27,7 @@ from src.loss import compute_kl
 from src.student import forward_student
 from src.config import (
     BATCH_SIZE,
+    EMA_ALPHA,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
     LEARNING_RATE,
@@ -39,8 +40,10 @@ from src.config import (
     SAVE_EVERY,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
+    WANDB_PROJECT,
+    WANDB_ENTITY,
+    WANDB_NAME,
 )
-from src.config import EMA_ALPHA
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
@@ -102,11 +105,9 @@ def train():
   logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
 
   wandb.init(
-      project=os.environ.get("WANDB_PROJECT", "sdft-online"),
-      entity=os.environ.get("WANDB_ENTITY"),
-      name=os.environ.get(
-          "WANDB_NAME", f"sdft-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}"
-      ),
+      project=WANDB_PROJECT,
+      entity=WANDB_ENTITY,
+      name=WANDB_NAME or f"sdft-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}",
       config={
           "model": MODEL_NAME,
           "learning_rate": LEARNING_RATE,
