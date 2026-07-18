@@ -45,7 +45,7 @@ class RagEnv(BaseEnv):
         self.reflector_result: dict[str, str] | None = None
 
     def run(self) -> None:
-        self.completion_text = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
+        self.completion_text, _ = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
         self.completion_text += self.tokenizer.eos_token
 
         if self.use_reflector:

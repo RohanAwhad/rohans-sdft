@@ -16,7 +16,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 from src.env.base import BaseEnv
 from src.vllm_utils import vllm_generate
-from src.config import API_MODEL, MAX_ADAPTER_TURNS
+from src.config import API_MODEL, GEN_MAX_NEW_TOKENS, MAX_ADAPTER_TURNS, THINKING_BUDGET
 
 
 ADAPTER_SYSTEM_PROMPT = """\
@@ -170,14 +170,39 @@ class ApiAdapterEnv(BaseEnv):
         return response.choices[0].message.content
 
     def call_adapter(self) -> str:
-        """Call adapter (student) via vLLM on-policy generation."""
+        """Call adapter (student) via vLLM with thinking budget enforcement.
+
+        Phase 1: generate with max_tokens=THINKING_BUDGET.
+        Phase 2: if thinking was truncated (finish_reason=="length"),
+                 force-close </think> and continue with remaining budget.
+        """
         prompt_text = self.tokenizer.apply_chat_template(
             self.adapter_history,
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=True,
         )
-        return vllm_generate(prompt_text, base_url=self.vllm_base_url)
+
+        # Phase 1: thinking-budgeted generation
+        text, finish_reason = vllm_generate(
+            prompt_text, base_url=self.vllm_base_url, max_tokens=THINKING_BUDGET,
+        )
+
+        if finish_reason != "length":
+            return text
+
+        # Phase 2: force-close thinking, generate the actual answer
+        truncated_thinking = text
+        if "</think>" not in truncated_thinking:
+            truncated_thinking = truncated_thinking.rstrip() + ".\n</think>\n\n"
+
+        continued_prompt = prompt_text + truncated_thinking
+        answer_text, _ = vllm_generate(
+            continued_prompt,
+            base_url=self.vllm_base_url,
+            max_tokens=GEN_MAX_NEW_TOKENS - THINKING_BUDGET,
+        )
+        return truncated_thinking + answer_text
 
     # ------------------------------------------------------------------
     # History management

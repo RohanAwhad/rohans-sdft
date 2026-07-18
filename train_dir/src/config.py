@@ -18,6 +18,7 @@ MAX_GRAD_NORM = 10.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))  # teacher EMA: phi = alpha*theta + (1-alpha)*phi
 
 # Generation (vLLM rollout)
+THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "512"))
 GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))

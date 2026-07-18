@@ -44,8 +44,12 @@ def vllm_generate(
     max_tokens: int = GEN_MAX_NEW_TOKENS,
     temperature: float = GEN_TEMPERATURE,
     top_p: float = GEN_TOP_P,
-) -> str:
-    """Generate a completion via vLLM's OpenAI-compatible API."""
+) -> tuple[str, str]:
+    """Generate a completion via vLLM's OpenAI-compatible API.
+
+    Returns (generated_text, finish_reason).
+    finish_reason is "length" if max_tokens was hit, "stop" if natural stop.
+    """
     # TODO: add retry mechanism and think about error handling
     try:
       resp = requests.post(
@@ -60,9 +64,10 @@ def vllm_generate(
           timeout=180,
       )
       resp.raise_for_status()
-      return resp.json()["choices"][0]["text"]
+      choice = resp.json()["choices"][0]
+      return choice["text"], choice["finish_reason"]
     except Exception as e:
-      return "Couldn't generate response. Generation failed"
+      return "Couldn't generate response. Generation failed", "error"
 
 
 # ---------------------------------------------------------------------------
