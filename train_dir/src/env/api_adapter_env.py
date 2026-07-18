@@ -11,6 +11,7 @@ import copy
 import re
 
 import litellm
+litellm.suppress_debug_info = True
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
