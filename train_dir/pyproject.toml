@@ -10,7 +10,6 @@ dependencies = [
     "datasets",
     "loguru",
     "wandb",
-    "flash-attn",
     "anthropic[vertex]",
     "tenacity",
     "bitsandbytes",
@@ -18,6 +17,3 @@ dependencies = [
     "litellm",
     "google-cloud-aiplatform",
 ]
-
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch"]
