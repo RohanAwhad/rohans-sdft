@@ -38,9 +38,9 @@ The input to you for this task will be:
 ...
 <|USER_REQUEST_END|>
 
-<|API_RESPONSE_START|>
+<|LLM_RESPONSE_START|>
 ...
-<|API_RESPONSE_END|>
+<|LLM_RESPONSE_END|>
 ```
 
 And the output expected from you is:
@@ -54,12 +54,12 @@ PASS/FAIL
 <|FEEDBACK_END|>
 ```
 
-And when the verdict is FAIL, and the api model generates a new response, that will be attached as a new message turn like this:
+And when the verdict is FAIL, and the LLM generates a new response, that will be attached as a new message turn like this:
 
 ```
-<|API_RESPONSE_START|>
+<|LLM_RESPONSE_START|>
 ...
-<|API_RESPONSE_END|>
+<|LLM_RESPONSE_END|>
 ```
 
 ---
@@ -70,9 +70,13 @@ User will not provide which symbol represents which op.
 
 
 HINDSIGHT_TEMPLATE = (
+    "=== PRIVILEGED INFORMATION ===\n"
     "Treat the below information as hindsight from the env for the action that you are about to take.\n"
     "Note: α, β, θ, and γ are encrypted operations which each represent one of addition, multiplication, subtraction, or division.\n"
-    "Feedback: {feedback}"
+    "---\n"
+    "LLM Response: {llm_response}\n"
+    "---\n"
+    "Env Feedback: {feedback}"
 )
 
 
@@ -144,10 +148,6 @@ class ApiAdapterEnv(BaseEnv):
         while True:
             adapter_response = self.call_adapter()
             self.adapter_history.append({"role": "assistant", "content": adapter_response})
-            turns_remaining -= 1
-            if turns_remaining == 0:
-                break
-
             verdict, feedback = self.parse_adapter_response(adapter_response)
             if not verdict:
                 self.verdict = False
@@ -161,8 +161,8 @@ class ApiAdapterEnv(BaseEnv):
             api_response = self.call_api(self.api_history)
             self.api_history.append({"role": "assistant", "content": api_response})
 
-            if turns_remaining == 0:
-                break
+            turns_remaining -= 1
+            if turns_remaining == 0: break
             self.build_adapter_history(api_response, user_message=None)
 
         return api_response
@@ -224,10 +224,10 @@ class ApiAdapterEnv(BaseEnv):
         if user_message is not None:
             content = (
                 f"<|USER_REQUEST_START|>\n{user_message}\n<|USER_REQUEST_END|>\n\n"
-                f"<|API_RESPONSE_START|>\n{api_response}\n<|API_RESPONSE_END|>"
+                f"<|LLM_RESPONSE_START|>\n{api_response}\n<|LLM_RESPONSE_END|>"
             )
         else:
-            content = f"<|API_RESPONSE_START|>\n{api_response}\n<|API_RESPONSE_END|>"
+            content = f"<|LLM_RESPONSE_START|>\n{api_response}\n<|LLM_RESPONSE_END|>"
 
         self.adapter_history.append({"role": "user", "content": content})
 
@@ -304,7 +304,7 @@ class ApiAdapterEnv(BaseEnv):
         self.completion_text = full_text[len(self.prompt_text):].rstrip("\n")
 
         # conditional_text: prompt + hindsight appended to last user message
-        hindsight = HINDSIGHT_TEMPLATE.format(feedback=self.feedback)
+        hindsight = HINDSIGHT_TEMPLATE.format(llm_response=self.api_history[-1]['content'], feedback=self.feedback)
 
         cond_history = copy.deepcopy(self.adapter_history[:-1])
         cond_history[-1]["content"] += "\n\n" + hindsight
