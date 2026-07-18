@@ -11,3 +11,7 @@ datasets = "*"
 loguru = "*"
 wandb = "*"
 flash-attn = "*"
+anthropic = {extras = ["vertex"]}
+tenacity = "*"
+bitsandbytes = "*"
+accelerate = "*"

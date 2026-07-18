@@ -14,7 +14,9 @@ VIRTUAL_ENV="$VENV" uv pip install \
     datasets \
     loguru \
     wandb \
-    flash-attn
+    flash-attn \
+    bitsandbytes \
+    accelerate
 
 echo ""
 echo "Setup complete."
