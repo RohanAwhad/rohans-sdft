@@ -216,7 +216,7 @@ def train():
           epoch_samples += 1
           for k, v in step_metrics.items():
             accum_metrics.setdefault(k, []).append(v)
-          if env.reflector_result is not None:
+          if getattr(env, "reflector_result", None) is not None:
             accum_metrics.setdefault("reflector/pass_rate", []).append(
               1.0 if env.reflector_result["verdict"] == "PASS" else 0.0
             )
