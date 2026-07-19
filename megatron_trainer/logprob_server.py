@@ -99,21 +99,18 @@ def main() -> None:
         nonlocal logprob_nccl_comm
 
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-        from vllm.distributed.utils import _stateless_init_process_group
+        from vllm.distributed.utils import StatelessProcessGroup
 
         logger.info(
             f"Initializing NCCL weight sync: {request.master_address}:{request.master_port} "
             f"(rank=1, world_size={request.world_size})"
         )
 
-        pg = _stateless_init_process_group(
-            master_address=request.master_address,
-            master_port=request.master_port,
-            rank=1,  # logprob server is rank 1
-            world_size=request.world_size,
-            device=DEVICE,
+        pg = StatelessProcessGroup.create(
+            host=request.master_address, port=request.master_port,
+            rank=1, world_size=request.world_size,
         )
-        logprob_nccl_comm = PyNcclCommunicator(group=pg, device=DEVICE)
+        logprob_nccl_comm = PyNcclCommunicator(pg, device=DEVICE)
         logger.info("NCCL weight sync communicator ready.")
         return {"status": "ok"}
 

@@ -80,7 +80,7 @@ def init_logprob_weight_engine(device: torch.device):
     Trainer is rank 0, logprob server is rank 1 in this 2-process group.
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    from vllm.distributed.utils import _stateless_init_process_group
+    from vllm.distributed.utils import StatelessProcessGroup
     from vllm.utils.network_utils import get_ip, get_open_port
 
     master_address = get_ip()
@@ -106,14 +106,10 @@ def init_logprob_weight_engine(device: torch.device):
     t.start()
 
     # Trainer is rank 0 in this 2-process NCCL group
-    pg = _stateless_init_process_group(
-        master_address=master_address,
-        master_port=master_port,
-        rank=0,
-        world_size=2,
-        device=device,
+    pg = StatelessProcessGroup.create(
+        host=master_address, port=master_port, rank=0, world_size=2,
     )
-    comm = PyNcclCommunicator(group=pg, device=device)
+    comm = PyNcclCommunicator(pg, device=device)
     t.join()
     logger.info("Logprob NCCL weight engine initialized.")
     return comm
