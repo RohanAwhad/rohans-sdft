@@ -61,7 +61,9 @@ def vllm_generate(
         },
         timeout=180,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        logger.error(f"vLLM completions error ({resp.status_code}): {resp.text}")
+        resp.raise_for_status()
     choice = resp.json()["choices"][0]
     return choice["text"], choice["finish_reason"]
 

@@ -57,7 +57,9 @@ def request_teacher_log_probs_http(
         json={"token_ids": token_ids, "prompt_len": prompt_len},
         timeout=120,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        logger.error(f"Logprob server error ({resp.status_code}): {resp.text}")
+        resp.raise_for_status()
 
     # Decode binary response (float16 numpy → bfloat16 torch)
     log_probs_np = np.frombuffer(resp.content, dtype=np.float16).copy()
