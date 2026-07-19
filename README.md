@@ -116,9 +116,20 @@ bash megatron_trainer/smoke_all_in_container.sh
 | Checkpointing | `model.save_pretrained()` | manual safetensors export (avoids distributed barrier) |
 | Runtime | host Python venv | NeMo container (glibc 2.39 requirement) |
 
+### API Adapter Environment
+
+The Megatron trainer uses `ApiAdapterEnv` — a multi-turn rollout env where the student (adapter) vets responses from an external API model (via litellm/Vertex AI).
+
+**Prerequisites:**
+- gcloud auth on the host node: `gcloud auth application-default login` (one-time)
+- The launch scripts mount `~/.config/gcloud` into the container for Vertex AI access
+- Set `VERTEXAI_LOCATION` env var (default: `us-east5`)
+- Set `HINDSIGHT_FIELD=online_feedback` when using datasets without `enriched_user_response` (e.g., synthetic algebra)
+
 ### Container gotchas
 
 - `pip install --no-deps vllm==0.23 bitsandbytes` at startup (container has vLLM 0.20 which is incompatible)
+- `pip install litellm google-cloud-aiplatform tenacity` for API adapter env
 - `BNB_CUDA_VERSION=130` (container CUDA 13.2, highest bnb binary is 13.0)
 - `--enforce-eager` for vLLM (torch.compile incompatible with container's torch 2.12)
 - `start_vllm_patched.py` monkey-patches prometheus `_IncludedRouter` crash
@@ -144,7 +155,10 @@ train_dir/         Full SDFT training loop (HF transformers)       [complete]
   launch.sh            Logprob server + trainer launcher
 megatron_trainer/  SDFT with Megatron Bridge (NeMo container)      [complete]
   config.py            Config (same params, env-overridable)
-  collator.py          SDFTCollator (unchanged)
+  collator.py          SDFTCollator (prompt + privileged conditional)
+  env/                 Rollout environments
+    base.py            BaseEnv ABC
+    api_adapter_env.py ApiAdapterEnv (multi-turn adapter + external API)
   model_utils.py       AutoBridge init, HF weight export, checkpoint save
   nccl_comm.py         NCCL protocol (adapted for MCore GPTModel)
   vllm_utils.py        vLLM client + Megatron→HF weight conversion

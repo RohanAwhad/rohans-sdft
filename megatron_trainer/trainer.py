@@ -1,7 +1,7 @@
 """SDFT trainer — Megatron Bridge version.
 
 Orchestrates:
-    1. vLLM rollout generation (HTTP)
+    1. ApiAdapterEnv rollout (multi-turn adapter + external API)
     2. Student forward pass (Megatron-Core GPTModel, with gradients)
     3. Teacher log-probs (NCCL from logprob server)
     4. Reverse KL loss + backward
@@ -10,7 +10,7 @@ Orchestrates:
 
 import math
 import os
-import shutil
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import torch.nn.functional as F
@@ -37,7 +37,12 @@ from megatron_trainer.config import (
     OUTPUT_DIR,
     SAVE_EVERY,
     TRAIN_DATA_PATH,
+    VLLM_BASE_URL,
+    WANDB_PROJECT,
+    WANDB_ENTITY,
+    WANDB_NAME,
 )
+from megatron_trainer.env import ApiAdapterEnv
 from megatron_trainer.model_utils import (
     cleanup,
     init_distributed,
@@ -54,7 +59,6 @@ from megatron_trainer.nccl_comm import (
 from megatron_trainer.vllm_utils import (
     init_vllm_weight_engine,
     sync_weights_to_vllm,
-    vllm_generate,
     wait_for_vllm,
 )
 
@@ -195,7 +199,7 @@ def train() -> None:
     dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
     collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
     dataloader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator
+        dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True
     )
     logger.info(f"Dataset: {len(dataset)} examples")
 
@@ -211,11 +215,9 @@ def train() -> None:
 
     # ---- wandb ----
     wandb.init(
-        project=os.environ.get("WANDB_PROJECT", "sdft-online"),
-        entity=os.environ.get("WANDB_ENTITY"),
-        name=os.environ.get(
-            "WANDB_NAME", f"sdft-megatron-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}"
-        ),
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY,
+        name=WANDB_NAME or f"sdft-megatron-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}",
         config={
             "model": MODEL_NAME,
             "backend": "megatron-bridge",
@@ -229,6 +231,7 @@ def train() -> None:
             "lr_scheduler": "constant",
             "total_optimizer_steps": total_steps,
             "dataset": TRAIN_DATA_PATH,
+            "hindsight_field": HINDSIGHT_FIELD,
         },
     )
 
@@ -242,136 +245,137 @@ def train() -> None:
     logger.info("vLLM weight engine ready.")
 
     # ---- Training loop ----
-    global_step = 0
     optimizer_step = 0
+    success_cache: dict[str, str] = {}  # raw_question -> adapter verdict+feedback text
 
     for epoch in range(NUM_EPOCHS):
         logger.info(f"=== Epoch {epoch + 1}/{NUM_EPOCHS} ===")
-        epoch_loss_sum = 0.0
-        epoch_samples = 0
-        accum_loss_sum = 0.0
-        accum_samples = 0
-        accum_comp_len_sum = 0
+        epoch_loss_sum: float = 0.0
+        epoch_samples: int = 0
+        accum_loss_sum: float = 0.0
+        accum_samples: int = 0
+        accum_comp_len_sum: int = 0
         accum_metrics: dict[str, list[float]] = {}
 
         optimizer.zero_grad()
+        data_iter = iter(dataloader)
 
-        for batch_idx, item in enumerate(dataloader):
-            prompt_text = item["prompt_texts"][0]
-            conditional_text = item["conditional_texts"][0]
+        try:
+          while True:
+            items = []
+            for _ in range(GRAD_ACCUM_STEPS):
+              item = next(data_iter)
+              items.append(item)
 
-            # 1. Generate completion via vLLM
-            completion_text = vllm_generate(prompt_text)
-            completion_ids = tokenizer.encode(
-                completion_text, add_special_tokens=False
-            )
+            # --- Rollout: generate completions via ApiAdapterEnv ---
+            envs = [
+              ApiAdapterEnv(
+                prompt_text=item["prompt_texts"][0],
+                vllm_base_url=VLLM_BASE_URL,
+                raw_question=item["raw_questions"][0],
+                golden_answer=item["golden_answers"][0],
+                tokenizer=tokenizer,
+                success_cache=success_cache,
+              )
+              for item in items
+            ]
+            with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
+              list(executor.map(lambda e: e.run(), envs))
 
-            if tokenizer.eos_token_id is not None:
-                completion_ids.append(tokenizer.eos_token_id)
+            # Cache successful adapter responses for future hindsight
+            for env in envs:
+              if env.episode_result and env.completion_text:
+                parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
+                if parsed_verdict:
+                  cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
+                  success_cache[env.raw_question] = cached_text
 
-            if len(completion_ids) == 0:
-                logger.warning(f"Empty completion at step {global_step}, skipping")
+            for micro_step, env in enumerate(envs):
+              completion_ids: list[int] = tokenizer.encode(env.completion_text, add_special_tokens=False)
+              if len(completion_ids) == 0:
+                logger.warning(f"Empty completion, skipping micro_step {micro_step}")
                 continue
+              completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
-            completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
-
-            # 2. Teacher log-probs via NCCL
-            cond_ids = tokenizer.encode(
-                conditional_text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=2048,
-            )
-            teacher_log_probs = request_teacher_log_probs(
+              # Teacher log-probs via NCCL
+              cond_ids: list[int] = tokenizer.encode(
+                env.privileged_information_prompt, add_special_tokens=False, truncation=True, max_length=2048,
+              )
+              teacher_log_probs = request_teacher_log_probs(
                 token_ids=cond_ids + completion_ids,
                 prompt_len=len(cond_ids),
                 vocab_size=vocab_size,
                 device=DEVICE,
-            )
+              )  # (C, V)
 
-            # 3. Student forward pass
-            student_logits = forward_student(
-                model, tokenizer, prompt_text, completion_ids, DEVICE
-            )
+              # Student forward pass
+              student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)  # (C, V)
 
-            # 4. Reverse KL loss
-            loss, step_metrics = compute_kl(
+              # Reverse KL loss
+              loss, step_metrics = compute_kl(
                 student_logits, teacher_log_probs.detach(),
                 completion_ids, tokenizer.eos_token_id,
-            )
-            scaled_loss = loss / GRAD_ACCUM_STEPS
-            scaled_loss.backward()
+              )
+              scaled_loss = loss / GRAD_ACCUM_STEPS
+              scaled_loss.backward()
 
-            # Accumulate metrics
-            loss_val = loss.item()
-            accum_loss_sum += loss_val
-            accum_samples += 1
-            accum_comp_len_sum += len(completion_ids)
-            for k, v in step_metrics.items():
+              loss_val = loss.item()
+              accum_loss_sum += loss_val
+              accum_samples += 1
+              accum_comp_len_sum += len(completion_ids)
+              epoch_loss_sum += loss_val
+              epoch_samples += 1
+              for k, v in step_metrics.items():
                 accum_metrics.setdefault(k, []).append(v)
-            epoch_loss_sum += loss_val
-            epoch_samples += 1
-            global_step += 1
-
-            # 5. Optimizer step at accumulation boundary
-            if global_step % GRAD_ACCUM_STEPS == 0:
-                clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                optimizer_step += 1
-
-                avg_loss = accum_loss_sum / accum_samples
-                avg_comp_len = accum_comp_len_sum / accum_samples
-
-                log_dict = {
-                    "train/loss": avg_loss,
-                    "train/completion_length": avg_comp_len,
-                    "train/epoch": epoch,
-                    "train/lr": scheduler.get_last_lr()[0],
-                }
-                for k, vals in accum_metrics.items():
-                    log_dict[k] = sum(vals) / len(vals)
-
-                if optimizer_step % 10 == 0:
-                    log_dict["samples/prompt"] = wandb.Html(
-                        f"<pre>{_escape(prompt_text[:1000])}</pre>"
-                    )
-                    log_dict["samples/completion"] = wandb.Html(
-                        f"<pre>{_escape(completion_text[:1000])}</pre>"
-                    )
-
-                wandb.log(log_dict, step=optimizer_step)
-                logger.info(
-                    f"opt_step={optimizer_step} loss={avg_loss:.4f} "
-                    f"comp_len={avg_comp_len:.0f}"
+              if env.episode_result is not None:
+                accum_metrics.setdefault("episode/pass_rate", []).append(
+                  1.0 if env.episode_result else 0.0
                 )
 
-                accum_loss_sum = 0.0
-                accum_samples = 0
-                accum_comp_len_sum = 0
-                accum_metrics = {}
-
-                # ---- Weight sync ----
-                send_command(CMD_SYNC_WEIGHTS, DEVICE)
-                broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
-                sync_weights_to_vllm(model, DEVICE, vllm_group)
-
-                # ---- Step-level checkpoint ----
-                if optimizer_step % SAVE_EVERY == 0:
-                    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-                    save_hf_checkpoint(model, ckpt_dir, tokenizer)
-
-        # Flush remaining accumulated gradients
-        if global_step % GRAD_ACCUM_STEPS != 0:
+            # Optimizer step
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
             optimizer_step += 1
+
+            avg_loss = accum_loss_sum / max(accum_samples, 1)
+            avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)
+
+            log_dict = {
+              "train/loss": avg_loss,
+              "train/completion_length": avg_comp_len,
+              "train/epoch": epoch,
+              "train/lr": scheduler.get_last_lr()[0],
+            }
+            for k, vals in accum_metrics.items():
+              log_dict[k] = sum(vals) / len(vals)
+
+            if optimizer_step % 10 == 0 and hasattr(env, "adapter_history"):
+              table = wandb.Table(columns=["step", "question", "golden_answer", "num_turns", "verdict", "conversation"])
+              conversation = "\n".join(str(msg) for msg in env.adapter_history)
+              table.add_data(optimizer_step, env.raw_question, env.golden_answer, len(env.adapter_history), env.verdict, conversation)
+              log_dict["episode/sample"] = table
+
+            wandb.log(log_dict, step=optimizer_step)
+            logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
+
+            accum_loss_sum = 0.0
+            accum_samples = 0
+            accum_comp_len_sum = 0
+            accum_metrics = {}
+
+            # Sync weights
             send_command(CMD_SYNC_WEIGHTS, DEVICE)
             broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
             sync_weights_to_vllm(model, DEVICE, vllm_group)
+
+            # Checkpoint
+            if optimizer_step % SAVE_EVERY == 0:
+              ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+              save_hf_checkpoint(model, ckpt_dir, tokenizer)
+        except StopIteration:
+          pass
 
         # ---- Epoch summary ----
         avg_epoch_loss = epoch_loss_sum / max(epoch_samples, 1)
@@ -387,6 +391,10 @@ def train() -> None:
         # ---- Epoch checkpoint ----
         ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
         save_hf_checkpoint(model, ckpt_dir, tokenizer)
+
+    # ---- Final checkpoint ----
+    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+    save_hf_checkpoint(model, ckpt_dir, tokenizer)
 
     # ---- Shutdown ----
     send_command(CMD_SHUTDOWN, DEVICE)

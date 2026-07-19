@@ -54,14 +54,18 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e VLLM_SERVER_DEV_MODE=1 \
     -e VLLM_USE_V1=0 \
     -e BNB_CUDA_VERSION=130 \
+    -e VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east5}" \
+    -e HINDSIGHT_FIELD=online_feedback \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
+    -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
     -w /workspace \
     nvcr.io/nvidia/nemo:26.06 \
     bash -c '
 set -e
 pip install --quiet --no-deps vllm==0.23 bitsandbytes 2>/dev/null
+pip install --quiet litellm google-cloud-aiplatform tenacity 2>/dev/null
 
 echo "=== Starting vLLM on GPU 0 (internal) ==="
 CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py \

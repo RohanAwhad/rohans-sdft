@@ -285,7 +285,7 @@ Track progress below. Update after each phase.
 - [x] Phase 7: Checkpoint export -- WORKING. Manual safetensors export (avoids distributed barrier deadlock). 16GB model.safetensors loadable by HF transformers.
 - [x] Phase 8: Eval -- DONE. no_context: 34% (ref: 41%), with_context: 82% (ref: 83%). Comparable to reference.
 
-### Running the full training
+### Running the full training (RAG / enriched_user_response)
 ```bash
 # Full training (10 epochs, grad_accum=32, ~8 hours on 3x H100)
 TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
@@ -308,6 +308,102 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     nvcr.io/nvidia/nemo:26.06 \
     bash megatron_trainer/smoke_all_in_container.sh
 ```
+
+### Running with ApiAdapterEnv (synthetic algebra)
+
+Prerequisites:
+- `gcloud auth application-default login` on the host (one-time per node)
+- Credentials at `~/.config/gcloud/` (mounted into container)
+
+```bash
+# All-in-container: vLLM (GPU 0) + trainer (GPU 1) + logprob (GPU 2)
+cd /home/lab/rawhad/self_distillation/rohans_sdft && \
+TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
+    --name sdft-megatron-adapter \
+    --device nvidia.com/gpu=0 \
+    --device nvidia.com/gpu=1 \
+    --device nvidia.com/gpu=2 \
+    --ipc=host \
+    --network=host \
+    --add-host $(hostname):127.0.0.1 \
+    -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
+    -e RAYON_NUM_THREADS=1 \
+    -e TOKENIZERS_PARALLELISM=false \
+    -e MASTER_ADDR=127.0.0.1 \
+    -e PYTHONPATH=/workspace \
+    -e MODEL_NAME=Qwen/Qwen3-8B \
+    -e HF_MODEL_PATH=Qwen/Qwen3-8B \
+    -e NCCL_MASTER_PORT=29500 \
+    -e VLLM_PORT=8004 \
+    -e TRAIN_DATA_PATH=/workspace/train_dir/data/synthetic_algebra/train_sdft.jsonl \
+    -e HINDSIGHT_FIELD=online_feedback \
+    -e OUTPUT_DIR=/workspace/output_megatron_adapter_run \
+    -e MAX_ADAPTER_TURNS=1 \
+    -e GEN_TEMPERATURE=1.0 \
+    -e GRAD_ACCUM_STEPS=32 \
+    -e NUM_EPOCHS=100 \
+    -e SAVE_EVERY=500 \
+    -e LEARNING_RATE=2e-6 \
+    -e EMA_ALPHA=0.05 \
+    -e VLLM_SERVER_DEV_MODE=1 \
+    -e VLLM_USE_V1=0 \
+    -e BNB_CUDA_VERSION=130 \
+    -e VERTEXAI_LOCATION=us-east5 \
+    -e WANDB_PROJECT=api-adapter \
+    -e WANDB_ENTITY=ronny21 \
+    -e WANDB_NAME=sdft_megatron_adapter_run \
+    -v $(pwd):/workspace:z \
+    -v ~/.cache/huggingface:/root/.cache/huggingface:z \
+    -v ~/.config/gcloud:/root/.config/gcloud:ro \
+    -v ~/.netrc:/root/.netrc:ro \
+    -v /home/lab/rawhad:/home/lab/rawhad:ro \
+    -w /workspace \
+    nvcr.io/nvidia/nemo:26.06 \
+    bash -c '
+set -e
+pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
+pip install --quiet litellm google-cloud-aiplatform tenacity 2>/dev/null
+
+echo "=== Starting vLLM on GPU 0 (internal) ==="
+CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py \
+    --model "$MODEL_NAME" \
+    --port "$VLLM_PORT" \
+    --max-model-len 8192 \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.5 \
+    --weight-transfer-config "{\"backend\":\"nccl\"}" \
+    --enforce-eager \
+    --no-enable-log-requests \
+    &>/workspace/logs/vllm.log &
+VLLM_PID=$!
+
+echo "=== Starting logprob server on GPU 2 (internal) ==="
+CUDA_VISIBLE_DEVICES=2 python -m megatron_trainer.logprob_server \
+    &>/workspace/logs/logprob_server.log &
+LOGPROB_PID=$!
+
+echo "=== Waiting for vLLM... ==="
+for i in $(seq 1 120); do
+    curl -s http://localhost:$VLLM_PORT/v1/models >/dev/null 2>&1 && break
+    sleep 2
+done
+echo "vLLM ready"
+
+echo "=== Starting trainer on GPU 1 (internal) ==="
+CUDA_VISIBLE_DEVICES=1 python -m megatron_trainer.trainer 2>&1
+
+kill $VLLM_PID $LOGPROB_PID 2>/dev/null || true
+'
+```
+
+To use different GPUs (e.g., 3/4/5), change `--device nvidia.com/gpu=X` flags
+and adjust `NCCL_MASTER_PORT`/`VLLM_PORT` to avoid conflicts with other runs.
+
+Key differences from HF trainer:
+- **One command, not two terminals** — container runs all 3 processes
+- **GPU numbering is container-internal** (always 0/1/2) — `--device` flags select physical GPUs
+- **Paths are container paths** — use `/workspace/...` (mounted from repo root)
+- **No REFLECTOR_PROJECT_ID** — ApiAdapterEnv uses litellm + gcloud ADC, not direct Anthropic client
 
 ### Eval after training
 ```bash

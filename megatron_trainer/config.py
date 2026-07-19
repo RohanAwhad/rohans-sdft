@@ -19,6 +19,7 @@ MAX_GRAD_NORM = 10.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
 
 # Generation (vLLM rollout)
+THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "512"))
 GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
@@ -38,6 +39,15 @@ TRAIN_DATA_PATH = os.environ.get(
 
 # Collator
 HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")
+
+# API-Adapter env
+API_MODEL = os.environ.get("API_MODEL", "vertex_ai/claude-haiku-4-5@20251001")
+MAX_ADAPTER_TURNS = int(os.environ.get("MAX_ADAPTER_TURNS", "5"))
+
+# Wandb
+WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "sdft-online")
+WANDB_ENTITY = os.environ.get("WANDB_ENTITY")
+WANDB_NAME = os.environ.get("WANDB_NAME")
 
 # Output
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")

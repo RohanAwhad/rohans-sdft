@@ -59,15 +59,20 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e WANDB_PROJECT="${WANDB_PROJECT:-sdft-online}" \
     -e WANDB_NAME="${WANDB_NAME:-sdft-megatron-$(basename $MODEL_NAME)-e${NUM_EPOCHS:-10}}" \
     -e WANDB_ENTITY="${WANDB_ENTITY:-}" \
+    -e VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east5}" \
+    -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-online_feedback}" \
+    -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/train_dir/data/synthetic_algebra/train_sdft.jsonl}" \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.netrc:/root/.netrc:ro" \
+    -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
     -w /workspace \
     nvcr.io/nvidia/nemo:26.06 \
     bash -c '
 set -e
 pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
+pip install --quiet litellm google-cloud-aiplatform tenacity 2>/dev/null
 
 echo "=== Starting vLLM on GPU 0 (internal) ==="
 CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py \

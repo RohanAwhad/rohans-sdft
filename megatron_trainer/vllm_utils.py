@@ -40,12 +40,18 @@ def wait_for_vllm(timeout: int = 300) -> None:
 
 def vllm_generate(
     prompt_text: str,
+    base_url: str = VLLM_BASE_URL,
     max_tokens: int = GEN_MAX_NEW_TOKENS,
     temperature: float = GEN_TEMPERATURE,
     top_p: float = GEN_TOP_P,
-) -> str:
+) -> tuple[str, str]:
+    """Generate a completion via vLLM's OpenAI-compatible API.
+
+    Returns (generated_text, finish_reason).
+    finish_reason is "length" if max_tokens was hit, "stop" if natural stop.
+    """
     resp = requests.post(
-        f"{VLLM_BASE_URL}/v1/completions",
+        f"{base_url}/v1/completions",
         json={
             "model": MODEL_NAME,
             "prompt": prompt_text,
@@ -56,7 +62,8 @@ def vllm_generate(
         timeout=180,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["text"]
+    choice = resp.json()["choices"][0]
+    return choice["text"], choice["finish_reason"]
 
 
 # ---------------------------------------------------------------------------
