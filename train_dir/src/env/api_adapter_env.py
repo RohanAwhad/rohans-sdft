@@ -15,6 +15,7 @@ litellm.suppress_debug_info = True
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
+from src import reflector
 from src.env.base import BaseEnv
 from src.vllm_utils import vllm_generate
 from src.config import API_MODEL, GEN_MAX_NEW_TOKENS, MAX_ADAPTER_TURNS, THINKING_BUDGET
@@ -69,16 +70,6 @@ User will not provide which symbol represents which op.
 """.strip()
 
 
-HINDSIGHT_TEMPLATE = (
-    "=== PRIVILEGED INFORMATION ===\n"
-    "Treat the below information as hindsight from the env for the action that you are about to take.\n"
-    "Note: α, β, θ, and γ are encrypted operations which each represent one of addition, multiplication, subtraction, or division.\n"
-    "---\n"
-    "LLM Response: {llm_response}\n"
-    "---\n"
-    "Env Feedback: {feedback}"
-)
-
 
 _VERDICT_RE = re.compile(
     r"<\|VERDICT_START\|>\s*(.*?)\s*<\|VERDICT_END\|>", re.DOTALL
@@ -132,6 +123,12 @@ class ApiAdapterEnv(BaseEnv):
         model_answer = self.parse_model_answer(model_response) if model_response else None
         if model_answer is not None: self.evaluate(model_answer, self.golden_answer)
         self.episode_result = self.verdict
+        self.reflector_feedback = reflector.run_api_adapter(
+            raw_question=self.raw_question,
+            api_responses=[m["content"] for m in self.api_history if m["role"] == "assistant"],
+            adapter_verdicts=[re.sub(r"<think>.*?</think>", "", m["content"], flags=re.DOTALL).strip() for m in self.adapter_history if m["role"] == "assistant"],
+            episode_feedback=self.feedback,
+        )
         self.generate_training_attrs()
 
     # ------------------------------------------------------------------
@@ -305,18 +302,9 @@ class ApiAdapterEnv(BaseEnv):
         # completion_text: slice off the prompt prefix, strip trailing \n template artifact
         self.completion_text = full_text[len(self.prompt_text):].rstrip("\n")
 
-        # conditional_text: prompt + hindsight appended to last user message
-        hindsight = HINDSIGHT_TEMPLATE.format(llm_response=self.api_history[-1]['content'], feedback=self.feedback)
-
-        # Inject cached successful response when current rollout failed
-        if not self.verdict and self.success_cache and self.raw_question in self.success_cache:
-            hindsight += (
-                "\n\n=== CORRECT RESPONSE FROM ANOTHER ROLLOUT ===\n"
-                + self.success_cache[self.raw_question]
-            )
-
+        # conditional_text: prompt + reflector feedback appended to last user message
         cond_history = copy.deepcopy(self.adapter_history[:-1])
-        cond_history[-1]["content"] += "\n\n" + hindsight
+        cond_history[-1]["content"] += "\n\n" + self.reflector_feedback
         self.privileged_information_prompt = self.tokenizer.apply_chat_template(
             cond_history,
             tokenize=False,
