@@ -145,6 +145,7 @@ def train():
 
   # === Training Loop ===
   optimizer_step = 0
+  success_cache: dict[str, str] = {}  # raw_question -> adapter verdict+feedback text
   for epoch in range(NUM_EPOCHS):
     logger.info(f"=== Epoch {epoch + 1}/{NUM_EPOCHS} ===")
     epoch_loss_sum: float = 0.0
@@ -172,11 +173,20 @@ def train():
             raw_question=item["raw_questions"][0],
             golden_answer=item["golden_answers"][0],
             tokenizer=tokenizer,
+            success_cache=success_cache,
           )
           for item in items
         ]
         with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
           list(executor.map(lambda e: e.run(), envs))
+
+        # Cache successful adapter responses for future hindsight
+        for env in envs:
+          if env.episode_result and env.completion_text:
+            parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
+            if parsed_verdict:
+              cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
+              success_cache[env.raw_question] = cached_text
 
         for micro_step, env in enumerate(envs):
           # TODO: (rohan) we only have support for BATCH_SIZE=1

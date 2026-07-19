@@ -101,6 +101,7 @@ class ApiAdapterEnv(BaseEnv):
         tokenizer,
         api_model: str = API_MODEL,
         max_adapter_turns: int = MAX_ADAPTER_TURNS,
+        success_cache: dict[str, str] | None = None,
     ):
         self.prompt_text = prompt_text
         self.vllm_base_url = vllm_base_url
@@ -109,6 +110,7 @@ class ApiAdapterEnv(BaseEnv):
         self.tokenizer = tokenizer
         self.api_model = api_model
         self.max_adapter_turns = max_adapter_turns
+        self.success_cache = success_cache
 
         # state (populated during rollout)
         self.adapter_history: list[dict] = []
@@ -305,6 +307,13 @@ class ApiAdapterEnv(BaseEnv):
 
         # conditional_text: prompt + hindsight appended to last user message
         hindsight = HINDSIGHT_TEMPLATE.format(llm_response=self.api_history[-1]['content'], feedback=self.feedback)
+
+        # Inject cached successful response when current rollout failed
+        if not self.verdict and self.success_cache and self.raw_question in self.success_cache:
+            hindsight += (
+                "\n\n=== CORRECT RESPONSE FROM ANOTHER ROLLOUT ===\n"
+                + self.success_cache[self.raw_question]
+            )
 
         cond_history = copy.deepcopy(self.adapter_history[:-1])
         cond_history[-1]["content"] += "\n\n" + hindsight
