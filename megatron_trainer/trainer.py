@@ -24,7 +24,6 @@ import wandb
 from megatron_trainer.collator import SDFTCollator
 from megatron_trainer.config import (
     BATCH_SIZE,
-    EMA_ALPHA,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
     HF_MODEL_PATH,
@@ -32,7 +31,6 @@ from megatron_trainer.config import (
     LEARNING_RATE,
     MAX_GRAD_NORM,
     MODEL_NAME,
-    NCCL_MASTER_PORT,
     NUM_EPOCHS,
     OUTPUT_DIR,
     SAVE_EVERY,
@@ -45,16 +43,15 @@ from megatron_trainer.config import (
 from megatron_trainer.env import ApiAdapterEnv
 from megatron_trainer.model_utils import (
     cleanup,
-    init_distributed,
+    init_distributed_standalone,
     load_model,
     save_hf_checkpoint,
 )
-from megatron_trainer.nccl_comm import (
-    CMD_SHUTDOWN,
-    CMD_SYNC_WEIGHTS,
-    broadcast_weights_ema,
-    request_teacher_log_probs,
-    send_command,
+from megatron_trainer.logprob_client import (
+    init_logprob_weight_engine,
+    request_teacher_log_probs_http,
+    sync_weights_to_logprob_server,
+    wait_for_logprob_server,
 )
 from megatron_trainer.vllm_utils import (
     init_vllm_weight_engine,
@@ -175,9 +172,9 @@ def train() -> None:
 
     logger.info("=== SDFT Megatron Trainer Starting ===")
 
-    # ---- Initialize Megatron + torch.distributed ----
-    init_distributed(rank=0, world_size=2, master_port=NCCL_MASTER_PORT)
-    logger.info("Distributed init complete (trainer=rank0).")
+    # ---- Initialize Megatron + torch.distributed (standalone, world_size=1) ----
+    init_distributed_standalone()
+    logger.info("Distributed init complete (standalone).")
 
     # ---- Model + tokenizer ----
     logger.info(f"Loading model: {HF_MODEL_PATH}")
@@ -244,6 +241,13 @@ def train() -> None:
     vllm_group = init_vllm_weight_engine(DEVICE)
     logger.info("vLLM weight engine ready.")
 
+    # ---- Wait for logprob server + init weight engine ----
+    logger.info("Waiting for logprob server...")
+    wait_for_logprob_server()
+    logger.info("Initializing logprob weight transfer engine...")
+    logprob_comm = init_logprob_weight_engine(DEVICE)
+    logger.info("Logprob weight engine ready.")
+
     # ---- Training loop ----
     optimizer_step = 0
     success_cache: dict[str, str] = {}  # raw_question -> adapter verdict+feedback text
@@ -297,11 +301,11 @@ def train() -> None:
                 continue
               completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
-              # Teacher log-probs via NCCL
+              # Teacher log-probs via HTTP
               cond_ids: list[int] = tokenizer.encode(
                 env.privileged_information_prompt, add_special_tokens=False, truncation=True, max_length=2048,
               )
-              teacher_log_probs = request_teacher_log_probs(
+              teacher_log_probs = request_teacher_log_probs_http(
                 token_ids=cond_ids + completion_ids,
                 prompt_len=len(cond_ids),
                 vocab_size=vocab_size,
@@ -366,8 +370,7 @@ def train() -> None:
             accum_metrics = {}
 
             # Sync weights
-            send_command(CMD_SYNC_WEIGHTS, DEVICE)
-            broadcast_weights_ema(model, alpha=EMA_ALPHA, src=0)
+            sync_weights_to_logprob_server(model, logprob_comm)
             sync_weights_to_vllm(model, DEVICE, vllm_group)
 
             # Checkpoint
@@ -397,7 +400,6 @@ def train() -> None:
     save_hf_checkpoint(model, ckpt_dir, tokenizer)
 
     # ---- Shutdown ----
-    send_command(CMD_SHUTDOWN, DEVICE)
     cleanup()
     wandb.finish()
     logger.info("Training complete.")

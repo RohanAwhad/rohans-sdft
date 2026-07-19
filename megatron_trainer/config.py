@@ -31,6 +31,10 @@ VLLM_BASE_URL = f"http://localhost:{VLLM_PORT}"
 # NCCL (torch.distributed group for trainer <-> logprob server)
 NCCL_MASTER_PORT = int(os.environ.get("NCCL_MASTER_PORT", "29500"))
 
+# Logprob server (HTTP)
+LOGPROB_PORT = int(os.environ.get("LOGPROB_PORT", "8010"))
+LOGPROB_BASE_URL = f"http://localhost:{LOGPROB_PORT}"
+
 # Dataset
 TRAIN_DATA_PATH = os.environ.get(
     "TRAIN_DATA_PATH",

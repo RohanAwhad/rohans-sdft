@@ -8,6 +8,7 @@ Handles:
 """
 
 import os
+import socket
 from typing import Iterator
 
 import torch
@@ -17,6 +18,31 @@ from loguru import logger
 
 _bridge_instance = None
 _hf_weight_meta_cache = None
+
+
+def _get_free_port() -> int:
+    """Get an available port from the OS."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def init_distributed_standalone() -> None:
+    """Initialize torch.distributed world_size=1 for standalone Megatron model loading.
+
+    Used by both the trainer (Phase 1, single-rank) and the logprob server.
+    Each process gets its own independent torch.distributed world — no shared
+    process group with other processes. CUDA_VISIBLE_DEVICES should be set
+    externally to scope to a single GPU.
+    """
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(_get_free_port())
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
+    torch.cuda.set_device(0)
+    dist.init_process_group(backend="nccl", rank=0, world_size=1)
+    logger.info("torch.distributed initialized (standalone, world_size=1)")
 
 
 def init_distributed(rank: int, world_size: int = 2, master_port: int = 29500) -> None:

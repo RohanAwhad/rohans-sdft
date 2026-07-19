@@ -48,7 +48,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e PYTHONPATH=/workspace \
     -e MODEL_NAME="$MODEL_NAME" \
     -e HF_MODEL_PATH="$MODEL_NAME" \
-    -e NCCL_MASTER_PORT=29501 \
+    -e LOGPROB_PORT=8010 \
     -e VLLM_PORT="$VLLM_PORT" \
     -e OUTPUT_DIR="$OUTPUT_DIR" \
     -e NUM_EPOCHS="${NUM_EPOCHS:-10}" \
@@ -72,7 +72,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     bash -c '
 set -e
 pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
-pip install --quiet litellm google-cloud-aiplatform tenacity 2>/dev/null
+pip install --quiet litellm google-cloud-aiplatform tenacity fastapi uvicorn 2>/dev/null
 
 echo "=== Starting vLLM on GPU 0 (internal) ==="
 CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py \
