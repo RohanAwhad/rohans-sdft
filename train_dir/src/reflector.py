@@ -71,36 +71,49 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
 # ---------------------------------------------------------------------------
 
 ADAPTER_REFLECTOR_SYSTEM_PROMPT = """\
-You are reviewing an episode of an API adapter that vets math responses.
+You are a reflection llm.
+We are RL training an LLM to learn the user preferences from training data and relay that information to the API LLM when needed.
+So the LLM which we are training is called an Adapter LLM.
 
-The adapter sits between a user and an API LLM. It evaluates API responses \
-and issues PASS/FAIL verdicts with feedback. On FAIL, feedback is sent back \
-to the API to regenerate.
+Because this in reinforcement learning format, I will do a rollout in an env with adapter and api llms, and provide you with their conversation.
+I will also provide you with adapter's system prompt, user request, golden answer, episode feedback from the env, adapter conversation history,
+and final episode answer.
 
-The math uses encrypted operators (α, β, θ, γ) that each represent one of \
-addition, multiplication, subtraction, or division.
+Now, because it is expected that the adapter will learn user preferences over time and store that knowledge in its weights, it may or may not provide \
+justification for why it did what it did. Your job is not to ask for justification, but check whether the learned preference is correct or not.
+
 
 === EXAMPLE 1 ===
-Episode:
+# Episode Data:
 - User question: What is 5 * 9?
-- API response(s): ["5 * 9 = 45, so the answer is \\\\boxed{45}"]
-- Adapter verdict(s)/feedback: ["PASS. The calculation is correct."]
+- Golden answer: 45
 - Episode feedback: PASS. Model generated 45. Correct answer is 45
 
-```json
-{"feedback_for_adapter": "Adapter correctly verified 5 * 9 = 45 and issued PASS. Good job."}
-```
+### Adapter Conversation History:
+
+User: <|USER_REQUEST_START|>
+What is 5 * 9?
+<|USER_REQUEST_END|>
+
+<|LLM_RESPONSE_START|>
+5 * 9 = 45, so the answer is \boxed{45}
+<|LLM_RESPONSE_END|>
 
 === EXAMPLE 2 ===
-Episode:
+# Episode Data:
 - User question: What is 3 - 9?
-- API response(s): ["3 - 9 = 6, so the answer is \\\\boxed{6}"]
-- Adapter verdict(s)/feedback: ["PASS. The calculation looks correct."]
+- Golden answer: -6
 - Episode feedback: FAIL. Model generated 6. Correct answer was -6
 
-```json
-{"feedback_for_adapter": "Adapter missed that 3 - 9 = -6 not 6. Should have issued FAIL and pointed out the sign error."}
-```
+### Adapter Conversation History:
+
+User: <|USER_REQUEST_START|>
+What is 3 - 9?
+<|USER_REQUEST_END|>
+
+<|LLM_RESPONSE_START|>
+3 - 9 = 6, so the answer is \boxed{6}
+<|LLM_RESPONSE_END|>
 
 === YOUR TURN ===
 Output EXACTLY this JSON and nothing else:
@@ -109,12 +122,25 @@ Output EXACTLY this JSON and nothing else:
 ```"""
 
 ADAPTER_REFLECTOR_USER_TEMPLATE = """\
-Episode:
+# Episode Data:
 - Adapter system prompt: {adapter_system_prompt}
 - User question: {raw_question}
-- API response(s): {api_responses}
-- Adapter verdict(s)/feedback: {adapter_verdicts}
-- Episode feedback: {episode_feedback}"""
+- Golden answer: {golden_answer}
+- Episode feedback: {episode_feedback}
+
+### Adapter Conversation History:
+
+{adapter_conversation_history}
+
+### Final Episode Response
+
+{episode_answer}
+
+---
+
+Based on this conversation, give feedback for adapter's last turn, such that adapter can respond to api for the correct answer in one short.
+You can dump as much information as you can fit in 30 words about the adapter's response.
+""".strip()
 
 
 @retry(
@@ -124,8 +150,9 @@ Episode:
 )
 def run_api_adapter(
     raw_question: str,
-    api_responses: list[str],
-    adapter_verdicts: list[str],
+    golden_answer: str,
+    adapter_conversation_history: str,
+    episode_answer: str,
     episode_feedback: str,
     adapter_system_prompt: str = "",
 ) -> str:
@@ -136,8 +163,9 @@ def run_api_adapter(
     user_content = ADAPTER_REFLECTOR_USER_TEMPLATE.format(
         adapter_system_prompt=adapter_system_prompt,
         raw_question=raw_question,
-        api_responses=json.dumps(api_responses),
-        adapter_verdicts=json.dumps(adapter_verdicts),
+        golden_answer=golden_answer,
+        adapter_conversation_history=adapter_conversation_history,
+        episode_answer=episode_answer,
         episode_feedback=episode_feedback,
     )
     response = litellm.completion(

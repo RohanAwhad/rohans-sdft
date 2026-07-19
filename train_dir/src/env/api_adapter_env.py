@@ -123,10 +123,16 @@ class ApiAdapterEnv(BaseEnv):
         model_answer = self.parse_model_answer(model_response) if model_response else None
         if model_answer is not None: self.evaluate(model_answer, self.golden_answer)
         self.episode_result = self.verdict
+        conv_lines = []
+        for m in self.adapter_history:
+            if m["role"] == "system": continue
+            content = re.sub(r"<think>.*?</think>", "", m["content"], flags=re.DOTALL).strip() if m["role"] == "assistant" else m["content"]
+            conv_lines.append(f"{m['role'].capitalize()}: {content}")
         self.reflector_feedback = reflector.run_api_adapter(
             raw_question=self.raw_question,
-            api_responses=[m["content"] for m in self.api_history if m["role"] == "assistant"],
-            adapter_verdicts=[re.sub(r"<think>.*?</think>", "", m["content"], flags=re.DOTALL).strip() for m in self.adapter_history if m["role"] == "assistant"],
+            golden_answer=self.golden_answer,
+            adapter_conversation_history="\n\n".join(conv_lines),
+            episode_answer=model_response or "",
             episode_feedback=self.feedback,
             adapter_system_prompt=ADAPTER_SYSTEM_PROMPT,
         )
