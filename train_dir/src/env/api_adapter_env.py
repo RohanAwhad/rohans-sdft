@@ -128,6 +128,7 @@ class ApiAdapterEnv(BaseEnv):
             api_responses=[m["content"] for m in self.api_history if m["role"] == "assistant"],
             adapter_verdicts=[re.sub(r"<think>.*?</think>", "", m["content"], flags=re.DOTALL).strip() for m in self.adapter_history if m["role"] == "assistant"],
             episode_feedback=self.feedback,
+            adapter_system_prompt=ADAPTER_SYSTEM_PROMPT,
         )
         self.generate_training_attrs()
 

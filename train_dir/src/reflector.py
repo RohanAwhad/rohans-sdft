@@ -6,12 +6,12 @@ response and produces a one-line feedback. Returns structured {verdict, feedback
 
 import json
 
-import anthropic
-from anthropic import AnthropicVertex
+import litellm
+litellm.suppress_debug_info = True
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.config import REFLECTOR_MODEL, REFLECTOR_REGION, REFLECTOR_PROJECT_ID
+from src.config import REFLECTOR_MODEL
 
 
 REFLECTOR_SYSTEM_PROMPT = """\
@@ -35,44 +35,31 @@ Model's Response:
 {model_response}"""
 
 
-_client: AnthropicVertex | None = None
-
-
-def _get_client() -> AnthropicVertex:
-    global _client
-    if _client is None:
-        _client = AnthropicVertex(
-            region=REFLECTOR_REGION,
-            project_id=REFLECTOR_PROJECT_ID,
-        )
-    return _client
-
-
-
 
 @retry(
   stop=stop_after_attempt(3),
   wait=wait_exponential(multiplier=1, min=0.2, max=10),
-  retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError)),
+  retry=retry_if_exception_type((litellm.exceptions.APIError, litellm.exceptions.APIConnectionError, json.JSONDecodeError)),
 )
 def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
     """Reflect on model_response vs golden_answer.
 
     Returns: {"verdict": "PASS"|"FAIL", "feedback": "one line reason"}
     """
-    client = _get_client()
     user_content: str = REFLECTOR_USER_TEMPLATE.format(
         question=question,
         golden_answer=golden_answer,
         model_response=model_response,
     )
-    response = client.messages.create(
+    response = litellm.completion(
         model=REFLECTOR_MODEL,
         max_tokens=1024,
-        system=REFLECTOR_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": REFLECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
     )
-    raw: str = response.content[0].text.strip()
+    raw: str = response.choices[0].message.content.strip()
     raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
     parsed: dict[str, str] = json.loads(raw)
     logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
@@ -123,6 +110,7 @@ Output EXACTLY this JSON and nothing else:
 
 ADAPTER_REFLECTOR_USER_TEMPLATE = """\
 Episode:
+- Adapter system prompt: {adapter_system_prompt}
 - User question: {raw_question}
 - API response(s): {api_responses}
 - Adapter verdict(s)/feedback: {adapter_verdicts}
@@ -132,32 +120,35 @@ Episode:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=0.2, max=10),
-    retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError)),
+    retry=retry_if_exception_type((litellm.exceptions.APIError, litellm.exceptions.APIConnectionError, json.JSONDecodeError)),
 )
 def run_api_adapter(
     raw_question: str,
     api_responses: list[str],
     adapter_verdicts: list[str],
     episode_feedback: str,
+    adapter_system_prompt: str = "",
 ) -> str:
     """Reflect on an API-adapter episode.
 
     Returns: feedback_for_adapter string.
     """
-    client = _get_client()
     user_content = ADAPTER_REFLECTOR_USER_TEMPLATE.format(
+        adapter_system_prompt=adapter_system_prompt,
         raw_question=raw_question,
         api_responses=json.dumps(api_responses),
         adapter_verdicts=json.dumps(adapter_verdicts),
         episode_feedback=episode_feedback,
     )
-    response = client.messages.create(
+    response = litellm.completion(
         model=REFLECTOR_MODEL,
         max_tokens=1024,
-        system=ADAPTER_REFLECTOR_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": ADAPTER_REFLECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
     )
-    raw: str = response.content[0].text.strip()
+    raw: str = response.choices[0].message.content.strip()
     raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
     parsed: dict[str, str] = json.loads(raw)
     feedback = parsed["feedback_for_adapter"]

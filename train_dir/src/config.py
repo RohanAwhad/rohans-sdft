@@ -40,9 +40,7 @@ TRAIN_DATA_PATH = os.environ.get(
 HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")
 
 # Reflector (used when HINDSIGHT_FIELD=online_feedback)
-REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")
-REFLECTOR_REGION = os.environ.get("REFLECTOR_REGION", "us-east5")
-REFLECTOR_PROJECT_ID = os.environ.get("REFLECTOR_PROJECT_ID", "")
+REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "vertex_ai/claude-sonnet-4-6@default")
 
 # API-Adapter env
 API_MODEL = os.environ.get("API_MODEL", "vertex_ai/claude-haiku-4-5@20251001")
