@@ -13,6 +13,7 @@ llm_retry = retry(
         litellm.exceptions.RateLimitError,
         litellm.exceptions.APIError,
         litellm.exceptions.APIConnectionError,
+        litellm.exceptions.Timeout,
         json.JSONDecodeError,
     )),
 )
