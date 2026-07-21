@@ -194,13 +194,13 @@ class ApiAdapterEnv(BaseEnv):
             self.adapter_history,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True,
+            enable_thinking=bool(THINKING_BUDGET),
         )
 
-        # Phase 1: thinking-budgeted generation
         text, finish_reason = vllm_generate(
-            prompt_text, base_url=self.vllm_base_url, max_tokens=THINKING_BUDGET,
+            prompt_text, base_url=self.vllm_base_url, max_tokens=THINKING_BUDGET if THINKING_BUDGET else GEN_MAX_NEW_TOKENS,
         )
+        if not THINKING_BUDGET: return text
 
         if finish_reason != "length":
             return text
