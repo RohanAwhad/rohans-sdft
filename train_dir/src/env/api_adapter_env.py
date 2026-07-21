@@ -13,12 +13,10 @@ import re
 import litellm
 litellm.suppress_debug_info = True
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
-
 from src import reflector
 from src.env.base import BaseEnv
 from src.vllm_utils import vllm_generate
-from src.config import API_MODEL, GEN_MAX_NEW_TOKENS, MAX_ADAPTER_TURNS, THINKING_BUDGET
+from src.config import API_MODEL, GEN_MAX_NEW_TOKENS, MAX_ADAPTER_TURNS, THINKING_BUDGET, llm_retry
 
 
 ADAPTER_SYSTEM_PROMPT = """\
@@ -177,7 +175,7 @@ class ApiAdapterEnv(BaseEnv):
     # API calls
     # ------------------------------------------------------------------
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=1, max=10))
+    @llm_retry
     def call_api(self, messages: list[dict]) -> str:
         """Call external API model via litellm."""
         response = litellm.completion(model=self.api_model, messages=messages)

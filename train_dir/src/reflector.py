@@ -9,9 +9,7 @@ import json
 import litellm
 litellm.suppress_debug_info = True
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-from src.config import REFLECTOR_MODEL
+from src.config import REFLECTOR_MODEL, llm_retry
 
 
 REFLECTOR_SYSTEM_PROMPT = """\
@@ -36,11 +34,7 @@ Model's Response:
 
 
 
-@retry(
-  stop=stop_after_attempt(3),
-  wait=wait_exponential(multiplier=1, min=0.2, max=10),
-  retry=retry_if_exception_type((litellm.exceptions.APIError, litellm.exceptions.APIConnectionError, json.JSONDecodeError)),
-)
+@llm_retry
 def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
     """Reflect on model_response vs golden_answer.
 
@@ -143,11 +137,7 @@ You can dump as much information as you can fit in 30 words about the adapter's 
 """.strip()
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=0.2, max=10),
-    retry=retry_if_exception_type((litellm.exceptions.APIError, litellm.exceptions.APIConnectionError, json.JSONDecodeError)),
-)
+@llm_retry
 def run_api_adapter(
     raw_question: str,
     golden_answer: str,

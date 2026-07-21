@@ -1,6 +1,21 @@
 """SDFT training configuration. All overridable via environment variables."""
 
+import json
 import os
+
+import litellm
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
+llm_retry = retry(
+    stop=stop_after_attempt(10),
+    wait=wait_exponential_jitter(initial=5, max=120),
+    retry=retry_if_exception_type((
+        litellm.exceptions.RateLimitError,
+        litellm.exceptions.APIError,
+        litellm.exceptions.APIConnectionError,
+        json.JSONDecodeError,
+    )),
+)
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-0.6B")
 
