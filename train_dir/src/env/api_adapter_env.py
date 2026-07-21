@@ -309,9 +309,13 @@ class ApiAdapterEnv(BaseEnv):
         # completion_text: slice off the prompt prefix, strip trailing \n template artifact
         self.completion_text = full_text[len(self.prompt_text):].rstrip("\n")
 
-        # conditional_text: prompt + reflector feedback appended to last user message
+        # conditional_text: prompt + reflector feedback (+ cached correct answer) appended to last user message
         cond_history = copy.deepcopy(self.adapter_history[:-1])
-        cond_history[-1]["content"] += "\n\n" + self.reflector_feedback
+        privilege_text = self.reflector_feedback
+        if self.success_cache and self.raw_question in self.success_cache:
+            privilege_text += "\n\nCorrect answer from a previous successful attempt:\n" + self.success_cache[self.raw_question]
+            logger.debug(f"Cache hit for privilege prompt: {self.raw_question[:80]!r}")
+        cond_history[-1]["content"] += "\n\n" + privilege_text
         self.privileged_information_prompt = self.tokenizer.apply_chat_template(
             cond_history,
             tokenize=False,
