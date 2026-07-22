@@ -2,6 +2,8 @@
 
 import torch
 
+from src.config import STUDENT_MAX_PROMPT_LEN
+
 
 def forward_student(
     model: torch.nn.Module,
@@ -9,6 +11,7 @@ def forward_student(
     prompt_text: str,
     completion_ids: list[int],
     device: torch.device,
+    max_length: int = STUDENT_MAX_PROMPT_LEN,
 ) -> torch.Tensor:
     """Student forward pass. Returns logits at completion positions.
 
@@ -23,7 +26,7 @@ def forward_student(
         add_special_tokens=False,
         return_tensors="pt",
         truncation=True,
-        max_length=2048,
+        max_length=max_length,
     ).to(device)
     prompt_ids = prompt_enc["input_ids"][0]  # (P,)
     prompt_len = prompt_ids.size(0)

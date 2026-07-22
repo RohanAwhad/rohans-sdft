@@ -37,6 +37,8 @@ from src.config import (
     OUTPUT_DIR,
     HINDSIGHT_FIELD,
     SAVE_EVERY,
+    STUDENT_MAX_PROMPT_LEN,
+    TEACHER_MAX_PROMPT_LEN,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
 )
@@ -120,6 +122,8 @@ def train():
           "total_optimizer_steps": total_steps,
           "dataset": TRAIN_DATA_PATH,
           "hindsight_field": HINDSIGHT_FIELD,
+          "student_max_prompt_len": STUDENT_MAX_PROMPT_LEN,
+          "teacher_max_prompt_len": TEACHER_MAX_PROMPT_LEN,
       },
   )
   if HINDSIGHT_FIELD == "online_feedback":
@@ -193,7 +197,8 @@ def train():
 
           # Teacher log-probs via NCCL
           cond_ids: list[int] = tokenizer.encode(
-            env.privileged_information_prompt, add_special_tokens=False, truncation=True, max_length=2048,
+            env.privileged_information_prompt, add_special_tokens=False, truncation=True,
+            max_length=TEACHER_MAX_PROMPT_LEN,
           )
           teacher_log_probs = request_teacher_log_probs(
             token_ids=cond_ids + completion_ids,

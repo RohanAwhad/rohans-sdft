@@ -22,6 +22,10 @@ GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
 
+# Prompt truncation
+STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))
+TEACHER_MAX_PROMPT_LEN = int(os.environ.get("TEACHER_MAX_PROMPT_LEN", "2048"))
+
 # vLLM server
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 VLLM_BASE_URL = f"http://localhost:{VLLM_PORT}"
