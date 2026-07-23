@@ -110,6 +110,11 @@ def load_model(hf_model_path: str) -> torch.nn.Module:
     models = provider.provide_distributed_model(wrap_with_ddp=False)
     model = models[0]
 
+    # Ensure model-parallel RNG state is initialized (required by
+    # TransformerEngine attention's dropout context even in eval mode)
+    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+    model_parallel_cuda_manual_seed(42)
+
     logger.info(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()):,}")
     return model
 
