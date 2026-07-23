@@ -2,7 +2,7 @@
 
 Orchestrates:
     1. ApiAdapterEnv rollout (rank 0 only, broadcast to all ranks)
-    2. Student forward pass (Megatron-Core GPTModel via MegatronDDP)
+    2. Student forward pass (Megatron-Core GPTModel via PyTorch DDP)
     3. Teacher log-probs (HTTP from logprob server, each rank independently)
     4. Reverse KL loss + backward (with gradient accumulation + no_sync)
     5. Step-level weight sync to both servers (rank 0 only)
@@ -19,6 +19,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import load_dataset
 from loguru import logger
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -201,32 +203,14 @@ def train() -> None:
         f"GPU mem after load: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB"
     )
 
-    # ---- MegatronDDP wrapping ----
-    from megatron.core.distributed import DistributedDataParallel as MegatronDDP
-    from megatron.core.distributed import DistributedDataParallelConfig
+    # ---- PyTorch DDP wrapping ----
+    ddp_model = DDP(model, device_ids=[local_rank])
+    logger.info("PyTorch DDP wrapping complete.")
 
-    ddp_config = DistributedDataParallelConfig()
-    ddp_model = MegatronDDP(
-        config=model.config, ddp_config=ddp_config, module=model,
-    )
-    logger.info("MegatronDDP wrapping complete.")
-
-    # ---- Megatron distributed optimizer (replaces bitsandbytes) ----
-    from megatron.core.optimizer import get_megatron_optimizer, OptimizerConfig
-
-    opt_config = OptimizerConfig(
-        optimizer='adam',
-        lr=LEARNING_RATE,
-        bf16=True,
-        clip_grad=MAX_GRAD_NORM,
-        use_distributed_optimizer=True,
-        adam_beta1=0.9,
-        adam_beta2=0.999,
-        adam_eps=1e-8,
-        weight_decay=0.01,
-    )
-    optimizer = get_megatron_optimizer(opt_config, model_chunks=[ddp_model])
-    logger.info(f"Megatron distributed optimizer ready. LR={LEARNING_RATE}")
+    # ---- Optimizer (8-bit Adam, same as Phase 1) ----
+    import bitsandbytes as bnb
+    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
+    logger.info(f"8-bit Adam optimizer ready. LR={LEARNING_RATE}")
 
     # ---- Dataset (all ranks load, only rank 0 iterates) ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
@@ -345,7 +329,7 @@ def train() -> None:
             my_items = rollout_data[rank * local_accum_steps : (rank + 1) * local_accum_steps]
 
             # ---- Gradient accumulation loop ----
-            ddp_model.zero_grad_buffer()
+            optimizer.zero_grad()
             accum_loss_sum: float = 0.0
             accum_samples: int = 0
             accum_comp_len_sum: int = 0
@@ -399,7 +383,8 @@ def train() -> None:
                 for k, v in step_metrics.items():
                     accum_metrics.setdefault(k, []).append(v)
 
-            # ---- Optimizer step (grad clipping is internal) ----
+            # ---- Optimizer step ----
+            clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
             optimizer_step += 1
 
