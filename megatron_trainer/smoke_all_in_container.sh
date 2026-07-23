@@ -76,6 +76,8 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-enriched_user_response}" \
     -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/home/lab/rawhad/sdft_knowledge_ingestion_experiment/data/train_maas_sdft.jsonl}" \
+    -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-2048}" \
+    -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
