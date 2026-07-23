@@ -134,6 +134,8 @@ for i in \$(seq 0 \$((NUM_VLLM - 1))); do
         --no-enable-log-requests \\
         &>/workspace/logs/vllm_\$i.log &
     VLLM_PIDS=\"\$VLLM_PIDS \$!\"
+    # Wait for this instance to bind its ports before starting the next
+    sleep 30
 done
 
 echo \"=== Starting logprob server on internal GPU \$LOGPROB_GPU ===\"
