@@ -73,7 +73,9 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e BNB_CUDA_VERSION=130 \
     -e VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east5}" \
     -e VERTEXAI_PROJECT="${VERTEXAI_PROJECT:-}" \
-    -e HINDSIGHT_FIELD=online_feedback \
+    -e ENV_TYPE="${ENV_TYPE:-rag}" \
+    -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-enriched_user_response}" \
+    -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/home/lab/rawhad/sdft_knowledge_ingestion_experiment/data/train_maas_sdft.jsonl}" \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \

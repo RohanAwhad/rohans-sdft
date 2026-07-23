@@ -1,7 +1,9 @@
 """SDFT trainer — Megatron Bridge version with DDP support.
 
 Orchestrates:
-    1. ApiAdapterEnv rollout (rank 0 only, broadcast to all ranks)
+    1. Env rollout (rank 0 only, broadcast to all ranks)
+       - ENV_TYPE=rag: RagEnv (vLLM generation + optional reflector)
+       - ENV_TYPE=api_adapter: ApiAdapterEnv (multi-turn adapter loop)
     2. Student forward pass (Megatron-Core GPTModel via PyTorch DDP)
     3. Teacher log-probs (HTTP from logprob server, each rank independently)
     4. Reverse KL loss + backward (with gradient accumulation + no_sync)
@@ -28,6 +30,7 @@ import wandb
 from megatron_trainer.collator import SDFTCollator
 from megatron_trainer.config import (
     BATCH_SIZE,
+    ENV_TYPE,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
     HF_MODEL_PATH,
@@ -44,7 +47,7 @@ from megatron_trainer.config import (
     WANDB_ENTITY,
     WANDB_NAME,
 )
-from megatron_trainer.env import ApiAdapterEnv
+from megatron_trainer.env import ApiAdapterEnv, RagEnv
 from megatron_trainer.model_utils import (
     cleanup,
     init_distributed_trainer,
@@ -234,6 +237,7 @@ def train() -> None:
             name=WANDB_NAME or f"sdft-megatron-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}",
             config={
                 "model": MODEL_NAME,
+                "env_type": ENV_TYPE,
                 "backend": "megatron-bridge-ddp",
                 "learning_rate": LEARNING_RATE,
                 "batch_size": BATCH_SIZE,
@@ -276,30 +280,49 @@ def train() -> None:
 
         for _step in range(steps_per_epoch):
             # ---- Rank 0: rollout + build broadcast data ----
+            full_pass_rate = None
             if rank == 0:
                 items = [next(data_iter) for _ in range(GRAD_ACCUM_STEPS)]
 
-                envs = [
-                    ApiAdapterEnv(
-                        prompt_text=item["prompt_texts"][0],
-                        vllm_base_url=VLLM_BASE_URL,
-                        raw_question=item["raw_questions"][0],
-                        golden_answer=item["golden_answers"][0],
-                        tokenizer=tokenizer,
-                        success_cache=success_cache,
-                    )
-                    for item in items
-                ]
+                if ENV_TYPE == "rag":
+                    use_reflector = HINDSIGHT_FIELD == "online_feedback"
+                    envs = [
+                        RagEnv(
+                            prompt_text=item["prompt_texts"][0],
+                            vllm_base_url=VLLM_BASE_URL,
+                            privileged_information_prompt=item["conditional_texts"][0],
+                            raw_question=item["raw_questions"][0],
+                            golden_answer=item["golden_answers"][0],
+                            normalized_messages=item["normalized_messages"][0],
+                            tokenizer=tokenizer,
+                            use_reflector=use_reflector,
+                        )
+                        for item in items
+                    ]
+                else:
+                    envs = [
+                        ApiAdapterEnv(
+                            prompt_text=item["prompt_texts"][0],
+                            vllm_base_url=VLLM_BASE_URL,
+                            raw_question=item["raw_questions"][0],
+                            golden_answer=item["golden_answers"][0],
+                            tokenizer=tokenizer,
+                            success_cache=success_cache,
+                        )
+                        for item in items
+                    ]
+
                 with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
                     list(executor.map(lambda e: e.run(), envs))
 
-                # Cache successful adapter responses
-                for env in envs:
-                    if env.episode_result and env.completion_text:
-                        parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
-                        if parsed_verdict:
-                            cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
-                            success_cache[env.raw_question] = cached_text
+                if ENV_TYPE == "api_adapter":
+                    # Cache successful adapter responses
+                    for env in envs:
+                        if env.episode_result and env.completion_text:
+                            parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
+                            if parsed_verdict:
+                                cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
+                                success_cache[env.raw_question] = cached_text
 
                 # Build broadcast payload
                 rollout_data = [
@@ -307,18 +330,17 @@ def train() -> None:
                         "prompt_text": env.prompt_text,
                         "completion_text": env.completion_text,
                         "privileged_information_prompt": env.privileged_information_prompt,
-                        "episode_result": env.episode_result,
-                        "raw_question": env.raw_question,
-                        "golden_answer": env.golden_answer,
-                        "verdict": env.verdict,
-                        "feedback": env.feedback,
                     }
                     for env in envs
                 ]
 
-                # Compute full pass_rate before slicing (rank 0 has all data)
-                pass_results = [d["episode_result"] for d in rollout_data if d["episode_result"] is not None]
-                full_pass_rate = sum(1.0 for r in pass_results if r) / max(len(pass_results), 1)
+                # Compute pass_rate (env-type dependent)
+                if ENV_TYPE == "api_adapter":
+                    pass_results = [env.episode_result for env in envs if env.episode_result is not None]
+                    full_pass_rate = sum(1.0 for r in pass_results if r) / max(len(pass_results), 1)
+                elif ENV_TYPE == "rag" and envs[0].reflector_result is not None:
+                    verdicts = [env.reflector_result["verdict"] for env in envs if env.reflector_result]
+                    full_pass_rate = sum(1.0 for v in verdicts if v == "PASS") / max(len(verdicts), 1)
             else:
                 rollout_data = [None] * GRAD_ACCUM_STEPS
 
@@ -405,8 +427,10 @@ def train() -> None:
                     "train/completion_length": avg_comp_len,
                     "train/epoch": epoch,
                     "train/lr": LEARNING_RATE,
-                    "episode/pass_rate": full_pass_rate,
                 }
+                if full_pass_rate is not None:
+                    key = "reflector/pass_rate" if ENV_TYPE == "rag" else "episode/pass_rate"
+                    log_dict[key] = full_pass_rate
                 for k, vals in accum_metrics.items():
                     log_dict[k] = sum(vals) / len(vals)
 
