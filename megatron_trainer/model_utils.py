@@ -106,6 +106,9 @@ def load_model(hf_model_path: str) -> torch.nn.Module:
 
     provider.gradient_accumulation_fusion = False
     provider.async_tensor_model_parallel_allreduce = False
+    provider.recompute_granularity = 'full'
+    provider.recompute_method = 'uniform'
+    provider.recompute_num_layers = 1
 
     models = provider.provide_distributed_model(wrap_with_ddp=False)
     model = models[0]

@@ -156,12 +156,7 @@ def forward_student(
     seq_len = input_ids.size(1)
     position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
-    def _fwd(ids, pos_ids):
-        return model(input_ids=ids, position_ids=pos_ids, attention_mask=None)
-
-    logits = torch.utils.checkpoint.checkpoint(
-        _fwd, input_ids, position_ids, use_reentrant=False,
-    )
+    logits = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
 
     completion_logits = logits[0, prompt_len - 1 : prompt_len + C - 1, :]
     return completion_logits
