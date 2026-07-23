@@ -1,22 +1,24 @@
-"""SDFT trainer — Megatron Bridge version.
+"""SDFT trainer — Megatron Bridge version with DDP support.
 
 Orchestrates:
-    1. ApiAdapterEnv rollout (multi-turn adapter + external API)
-    2. Student forward pass (Megatron-Core GPTModel, with gradients)
-    3. Teacher log-probs (NCCL from logprob server)
-    4. Reverse KL loss + backward
-    5. Step-level weight sync to both servers
+    1. ApiAdapterEnv rollout (rank 0 only, broadcast to all ranks)
+    2. Student forward pass (Megatron-Core GPTModel via MegatronDDP)
+    3. Teacher log-probs (HTTP from logprob server, each rank independently)
+    4. Reverse KL loss + backward (with gradient accumulation + no_sync)
+    5. Step-level weight sync to both servers (rank 0 only)
+
+Launch: torchrun --nproc_per_node=N -m megatron_trainer.trainer
 """
 
-import math
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import load_dataset
 from loguru import logger
-from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -43,7 +45,7 @@ from megatron_trainer.config import (
 from megatron_trainer.env import ApiAdapterEnv
 from megatron_trainer.model_utils import (
     cleanup,
-    init_distributed_standalone,
+    init_distributed_trainer,
     load_model,
     save_hf_checkpoint,
 )
@@ -58,8 +60,6 @@ from megatron_trainer.vllm_utils import (
     sync_weights_to_vllm,
     wait_for_vllm,
 )
-
-DEVICE = torch.device("cuda:0")
 
 # ---------------------------------------------------------------------------
 # Core computations
@@ -172,9 +172,20 @@ def train() -> None:
 
     logger.info("=== SDFT Megatron Trainer Starting ===")
 
-    # ---- Initialize Megatron + torch.distributed (standalone, world_size=1) ----
-    init_distributed_standalone()
-    logger.info("Distributed init complete (standalone).")
+    # ---- Initialize torch.distributed via torchrun ----
+    local_rank = init_distributed_trainer()
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = torch.device(f"cuda:{local_rank}")
+
+    assert GRAD_ACCUM_STEPS % world_size == 0, (
+        f"GRAD_ACCUM_STEPS ({GRAD_ACCUM_STEPS}) must be divisible by "
+        f"num_trainers ({world_size})"
+    )
+    local_accum_steps = GRAD_ACCUM_STEPS // world_size
+
+    logger.info(f"DDP: rank={rank}/{world_size}, local_rank={local_rank}, "
+                f"local_accum_steps={local_accum_steps}")
 
     # ---- Model + tokenizer ----
     logger.info(f"Loading model: {HF_MODEL_PATH}")
@@ -183,202 +194,264 @@ def train() -> None:
     model.train()
 
     # Use padded vocab size from model (Megatron pads for TP alignment)
-    # The model's output logits have this dimension, not tokenizer.vocab_size
     unwrapped = model.module if hasattr(model, 'module') else model
     vocab_size = unwrapped.vocab_size
     logger.info(
         f"Model loaded. vocab_size={vocab_size} (tokenizer={tokenizer.vocab_size}) "
-        f"GPU mem after load: {torch.cuda.memory_allocated(DEVICE) / 1e9:.2f} GB"
+        f"GPU mem after load: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB"
     )
 
-    # ---- Dataset ----
+    # ---- MegatronDDP wrapping ----
+    from megatron.core.distributed import DistributedDataParallel as MegatronDDP
+    from megatron.core.distributed import DistributedDataParallelConfig
+
+    ddp_config = DistributedDataParallelConfig()
+    ddp_model = MegatronDDP(
+        config=model.config, ddp_config=ddp_config, module=model,
+    )
+    logger.info("MegatronDDP wrapping complete.")
+
+    # ---- Megatron distributed optimizer (replaces bitsandbytes) ----
+    from megatron.core.optimizer import get_megatron_optimizer, OptimizerConfig
+
+    opt_config = OptimizerConfig(
+        optimizer='adam',
+        lr=LEARNING_RATE,
+        bf16=True,
+        clip_grad=MAX_GRAD_NORM,
+        use_distributed_optimizer=True,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        adam_eps=1e-8,
+        weight_decay=0.01,
+    )
+    optimizer = get_megatron_optimizer(opt_config, model_chunks=[ddp_model])
+    logger.info(f"Megatron distributed optimizer ready. LR={LEARNING_RATE}")
+
+    # ---- Dataset (all ranks load, only rank 0 iterates) ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
     dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
     collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
     dataloader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True
+        dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True,
     )
-    logger.info(f"Dataset: {len(dataset)} examples")
+    steps_per_epoch = len(dataset) // GRAD_ACCUM_STEPS
+    logger.info(f"Dataset: {len(dataset)} examples, {steps_per_epoch} steps/epoch")
 
-    # ---- Optimizer (8-bit Adam) ----
-    import bitsandbytes as bnb
-    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
+    # ---- Rank 0 only: wandb, vLLM, logprob server ----
+    vllm_group = None
+    logprob_comm = None
+    success_cache: dict[str, str] = {}
 
-    # ---- LR scheduler (constant) ----
-    steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
-    total_steps = steps_per_epoch * NUM_EPOCHS
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
-    logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
+    if rank == 0:
+        wandb.init(
+            project=WANDB_PROJECT,
+            entity=WANDB_ENTITY,
+            name=WANDB_NAME or f"sdft-megatron-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}",
+            config={
+                "model": MODEL_NAME,
+                "backend": "megatron-bridge-ddp",
+                "learning_rate": LEARNING_RATE,
+                "batch_size": BATCH_SIZE,
+                "grad_accum_steps": GRAD_ACCUM_STEPS,
+                "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
+                "num_trainers": world_size,
+                "local_accum_steps": local_accum_steps,
+                "num_epochs": NUM_EPOCHS,
+                "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
+                "loss": "reverse_kl",
+                "dataset": TRAIN_DATA_PATH,
+                "hindsight_field": HINDSIGHT_FIELD,
+            },
+        )
 
-    # ---- wandb ----
-    wandb.init(
-        project=WANDB_PROJECT,
-        entity=WANDB_ENTITY,
-        name=WANDB_NAME or f"sdft-megatron-{MODEL_NAME.split('/')[-1]}-e{NUM_EPOCHS}",
-        config={
-            "model": MODEL_NAME,
-            "backend": "megatron-bridge",
-            "learning_rate": LEARNING_RATE,
-            "batch_size": BATCH_SIZE,
-            "grad_accum_steps": GRAD_ACCUM_STEPS,
-            "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
-            "num_epochs": NUM_EPOCHS,
-            "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
-            "loss": "reverse_kl",
-            "lr_scheduler": "constant",
-            "total_optimizer_steps": total_steps,
-            "dataset": TRAIN_DATA_PATH,
-            "hindsight_field": HINDSIGHT_FIELD,
-        },
-    )
+        logger.info("Waiting for vLLM server...")
+        wait_for_vllm()
+        logger.info("Initializing vLLM weight transfer engine...")
+        vllm_group = init_vllm_weight_engine(device)
+        logger.info("vLLM weight engine ready.")
 
-    # ---- Wait for vLLM ----
-    logger.info("Waiting for vLLM server...")
-    wait_for_vllm()
+        logger.info("Waiting for logprob server...")
+        wait_for_logprob_server()
+        logger.info("Initializing logprob weight transfer engine...")
+        logprob_comm = init_logprob_weight_engine(device)
+        logger.info("Logprob weight engine ready.")
 
-    # ---- Init vLLM weight engine (separate NCCL group) ----
-    logger.info("Initializing vLLM weight transfer engine...")
-    vllm_group = init_vllm_weight_engine(DEVICE)
-    logger.info("vLLM weight engine ready.")
-
-    # ---- Wait for logprob server + init weight engine ----
-    logger.info("Waiting for logprob server...")
-    wait_for_logprob_server()
-    logger.info("Initializing logprob weight transfer engine...")
-    logprob_comm = init_logprob_weight_engine(DEVICE)
-    logger.info("Logprob weight engine ready.")
+    # Barrier: all ranks wait for rank 0 to finish setup
+    dist.barrier()
 
     # ---- Training loop ----
     optimizer_step = 0
-    success_cache: dict[str, str] = {}  # raw_question -> adapter verdict+feedback text
 
     for epoch in range(NUM_EPOCHS):
         logger.info(f"=== Epoch {epoch + 1}/{NUM_EPOCHS} ===")
         epoch_loss_sum: float = 0.0
         epoch_samples: int = 0
-        accum_loss_sum: float = 0.0
-        accum_samples: int = 0
-        accum_comp_len_sum: int = 0
-        accum_metrics: dict[str, list[float]] = {}
 
-        optimizer.zero_grad()
-        data_iter = iter(dataloader)
+        data_iter = iter(dataloader) if rank == 0 else None
 
-        try:
-          while True:
-            items = []
-            for _ in range(GRAD_ACCUM_STEPS):
-              item = next(data_iter)
-              items.append(item)
+        for _step in range(steps_per_epoch):
+            # ---- Rank 0: rollout + build broadcast data ----
+            if rank == 0:
+                items = [next(data_iter) for _ in range(GRAD_ACCUM_STEPS)]
 
-            # --- Rollout: generate completions via ApiAdapterEnv ---
-            envs = [
-              ApiAdapterEnv(
-                prompt_text=item["prompt_texts"][0],
-                vllm_base_url=VLLM_BASE_URL,
-                raw_question=item["raw_questions"][0],
-                golden_answer=item["golden_answers"][0],
-                tokenizer=tokenizer,
-                success_cache=success_cache,
-              )
-              for item in items
-            ]
-            with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
-              list(executor.map(lambda e: e.run(), envs))
+                envs = [
+                    ApiAdapterEnv(
+                        prompt_text=item["prompt_texts"][0],
+                        vllm_base_url=VLLM_BASE_URL,
+                        raw_question=item["raw_questions"][0],
+                        golden_answer=item["golden_answers"][0],
+                        tokenizer=tokenizer,
+                        success_cache=success_cache,
+                    )
+                    for item in items
+                ]
+                with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
+                    list(executor.map(lambda e: e.run(), envs))
 
-            # Cache successful adapter responses for future hindsight
-            for env in envs:
-              if env.episode_result and env.completion_text:
-                parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
-                if parsed_verdict:
-                  cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
-                  success_cache[env.raw_question] = cached_text
+                # Cache successful adapter responses
+                for env in envs:
+                    if env.episode_result and env.completion_text:
+                        parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
+                        if parsed_verdict:
+                            cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
+                            success_cache[env.raw_question] = cached_text
 
-            for micro_step, env in enumerate(envs):
-              completion_ids: list[int] = tokenizer.encode(env.completion_text, add_special_tokens=False)
-              if len(completion_ids) == 0:
-                logger.warning(f"Empty completion, skipping micro_step {micro_step}")
-                continue
-              completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
+                # Build broadcast payload
+                rollout_data = [
+                    {
+                        "prompt_text": env.prompt_text,
+                        "completion_text": env.completion_text,
+                        "privileged_information_prompt": env.privileged_information_prompt,
+                        "episode_result": env.episode_result,
+                        "raw_question": env.raw_question,
+                        "golden_answer": env.golden_answer,
+                        "verdict": env.verdict,
+                        "feedback": env.feedback,
+                    }
+                    for env in envs
+                ]
 
-              # Teacher log-probs via HTTP
-              cond_ids: list[int] = tokenizer.encode(
-                env.privileged_information_prompt, add_special_tokens=False, truncation=True, max_length=2048,
-              )
-              teacher_log_probs = request_teacher_log_probs_http(
-                token_ids=cond_ids + completion_ids,
-                prompt_len=len(cond_ids),
-                vocab_size=vocab_size,
-                device=DEVICE,
-              )  # (C, V)
+                # Compute full pass_rate before slicing (rank 0 has all data)
+                pass_results = [d["episode_result"] for d in rollout_data if d["episode_result"] is not None]
+                full_pass_rate = sum(1.0 for r in pass_results if r) / max(len(pass_results), 1)
+            else:
+                rollout_data = [None] * GRAD_ACCUM_STEPS
 
-              # Student forward pass
-              student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)  # (C, V)
+            # ---- Broadcast rollout data to all ranks ----
+            dist.broadcast_object_list(rollout_data, src=0)
 
-              # Reverse KL loss
-              loss, step_metrics = compute_kl(
-                student_logits, teacher_log_probs.detach(),
-                completion_ids, tokenizer.eos_token_id,
-              )
-              scaled_loss = loss / GRAD_ACCUM_STEPS
-              scaled_loss.backward()
+            # ---- Each rank slices its portion ----
+            my_items = rollout_data[rank * local_accum_steps : (rank + 1) * local_accum_steps]
 
-              loss_val = loss.item()
-              accum_loss_sum += loss_val
-              accum_samples += 1
-              accum_comp_len_sum += len(completion_ids)
-              epoch_loss_sum += loss_val
-              epoch_samples += 1
-              for k, v in step_metrics.items():
-                accum_metrics.setdefault(k, []).append(v)
-              if env.episode_result is not None:
-                accum_metrics.setdefault("episode/pass_rate", []).append(
-                  1.0 if env.episode_result else 0.0
+            # ---- Gradient accumulation loop ----
+            ddp_model.zero_grad_buffer()
+            accum_loss_sum: float = 0.0
+            accum_samples: int = 0
+            accum_comp_len_sum: int = 0
+            accum_metrics: dict[str, list[float]] = {}
+
+            for micro_step, item_data in enumerate(my_items):
+                completion_ids: list[int] = tokenizer.encode(
+                    item_data["completion_text"], add_special_tokens=False,
+                )
+                if len(completion_ids) == 0:
+                    logger.warning(f"Empty completion, skipping micro_step {micro_step}")
+                    continue
+                completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
+
+                # Teacher log-probs via HTTP (each rank independently)
+                cond_ids: list[int] = tokenizer.encode(
+                    item_data["privileged_information_prompt"],
+                    add_special_tokens=False, truncation=True, max_length=2048,
+                )
+                teacher_log_probs = request_teacher_log_probs_http(
+                    token_ids=cond_ids + completion_ids,
+                    prompt_len=len(cond_ids),
+                    vocab_size=vocab_size,
+                    device=device,
+                )  # (C, V)
+
+                # Student forward pass (use raw model — DDP hooks are on params)
+                student_logits = forward_student(
+                    model, tokenizer, item_data["prompt_text"], completion_ids, device,
+                )  # (C, V)
+
+                # Reverse KL loss
+                loss, step_metrics = compute_kl(
+                    student_logits, teacher_log_probs.detach(),
+                    completion_ids, tokenizer.eos_token_id,
                 )
 
-            # Optimizer step
-            clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+                # no_sync on non-final micro-steps (skip allreduce)
+                is_final = (micro_step == local_accum_steps - 1)
+                ctx = nullcontext() if is_final else ddp_model.no_sync()
+                with ctx:
+                    scaled_loss = loss / local_accum_steps
+                    scaled_loss.backward()
+
+                loss_val = loss.item()
+                accum_loss_sum += loss_val
+                accum_samples += 1
+                accum_comp_len_sum += len(completion_ids)
+                epoch_loss_sum += loss_val
+                epoch_samples += 1
+                for k, v in step_metrics.items():
+                    accum_metrics.setdefault(k, []).append(v)
+
+            # ---- Optimizer step (grad clipping is internal) ----
             optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
             optimizer_step += 1
 
-            avg_loss = accum_loss_sum / max(accum_samples, 1)
-            avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)
+            # ---- Aggregate loss across ranks ----
+            loss_tensor = torch.tensor(
+                [accum_loss_sum, float(accum_samples)], device=device,
+            )
+            dist.all_reduce(loss_tensor)
 
-            log_dict = {
-              "train/loss": avg_loss,
-              "train/completion_length": avg_comp_len,
-              "train/epoch": epoch,
-              "train/lr": scheduler.get_last_lr()[0],
-            }
-            for k, vals in accum_metrics.items():
-              log_dict[k] = sum(vals) / len(vals)
+            if rank == 0:
+                total_loss = loss_tensor[0].item()
+                total_samples = max(loss_tensor[1].item(), 1)
+                avg_loss = total_loss / total_samples
+                avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)
 
-            if optimizer_step % 10 == 0 and hasattr(env, "adapter_history"):
-              table = wandb.Table(columns=["step", "question", "golden_answer", "num_turns", "verdict", "conversation"])
-              conversation = "\n".join(str(msg) for msg in env.adapter_history)
-              table.add_data(optimizer_step, env.raw_question, env.golden_answer, len(env.adapter_history), env.verdict, conversation)
-              log_dict["episode/sample"] = table
+                log_dict: dict = {
+                    "train/loss": avg_loss,
+                    "train/completion_length": avg_comp_len,
+                    "train/epoch": epoch,
+                    "train/lr": LEARNING_RATE,
+                    "episode/pass_rate": full_pass_rate,
+                }
+                for k, vals in accum_metrics.items():
+                    log_dict[k] = sum(vals) / len(vals)
 
-            wandb.log(log_dict, step=optimizer_step)
-            logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
+                if optimizer_step % 10 == 0 and envs:
+                    env = envs[-1]
+                    if hasattr(env, "adapter_history"):
+                        table = wandb.Table(
+                            columns=["step", "question", "golden_answer", "num_turns", "verdict", "conversation"],
+                        )
+                        conversation = "\n".join(str(msg) for msg in env.adapter_history)
+                        table.add_data(
+                            optimizer_step, env.raw_question, env.golden_answer,
+                            len(env.adapter_history), env.verdict, conversation,
+                        )
+                        log_dict["episode/sample"] = table
 
-            accum_loss_sum = 0.0
-            accum_samples = 0
-            accum_comp_len_sum = 0
-            accum_metrics = {}
+                wandb.log(log_dict, step=optimizer_step)
+                logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
 
-            # Sync weights
-            sync_weights_to_logprob_server(model, logprob_comm)
-            sync_weights_to_vllm(model, DEVICE, vllm_group)
+                # ---- Sync weights (rank 0 only) ----
+                sync_weights_to_logprob_server(model, logprob_comm)
+                sync_weights_to_vllm(model, device, vllm_group)
 
-            # Checkpoint
-            if optimizer_step % SAVE_EVERY == 0:
-              ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-              save_hf_checkpoint(model, ckpt_dir, tokenizer)
-        except StopIteration:
-          pass
+                # ---- Checkpoint ----
+                if optimizer_step % SAVE_EVERY == 0:
+                    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+                    save_hf_checkpoint(model, ckpt_dir, tokenizer)
+
+            # All ranks wait for rank 0 weight sync before next step
+            dist.barrier()
 
         # ---- Epoch summary ----
         avg_epoch_loss = epoch_loss_sum / max(epoch_samples, 1)
@@ -386,22 +459,21 @@ def train() -> None:
             f"Epoch {epoch + 1}/{NUM_EPOCHS} done. "
             f"avg_loss={avg_epoch_loss:.4f} samples={epoch_samples}"
         )
-        wandb.log(
-            {"epoch/avg_loss": avg_epoch_loss, "epoch/number": epoch + 1},
-            step=optimizer_step,
-        )
+        if rank == 0:
+            wandb.log(
+                {"epoch/avg_loss": avg_epoch_loss, "epoch/number": epoch + 1},
+                step=optimizer_step,
+            )
+            ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
+            save_hf_checkpoint(model, ckpt_dir, tokenizer)
 
-        # ---- Epoch checkpoint ----
-        ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
+    # ---- Final checkpoint + shutdown ----
+    if rank == 0:
+        ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
         save_hf_checkpoint(model, ckpt_dir, tokenizer)
+        wandb.finish()
 
-    # ---- Final checkpoint ----
-    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-    save_hf_checkpoint(model, ckpt_dir, tokenizer)
-
-    # ---- Shutdown ----
     cleanup()
-    wandb.finish()
     logger.info("Training complete.")
 
 

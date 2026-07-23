@@ -27,6 +27,23 @@ def _get_free_port() -> int:
         return s.getsockname()[1]
 
 
+def init_distributed_trainer() -> int:
+    """Initialize torch.distributed for trainer DDP via torchrun.
+
+    torchrun sets LOCAL_RANK, RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT.
+    Returns local_rank for CUDA device selection.
+    """
+    local_rank = int(os.environ["LOCAL_RANK"])
+    os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    logger.info(
+        f"torch.distributed initialized (trainer DDP, "
+        f"rank={dist.get_rank()}, world_size={dist.get_world_size()}, local_rank={local_rank})"
+    )
+    return local_rank
+
+
 def init_distributed_standalone() -> None:
     """Initialize torch.distributed world_size=1 for standalone Megatron model loading.
 
