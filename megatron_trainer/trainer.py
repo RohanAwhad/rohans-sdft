@@ -492,11 +492,9 @@ def train() -> None:
             t_total = time.monotonic() - t_step_start
             if rank == 0:
                 logger.info(
-                    f"TIMING opt_step={optimizer_step} | "
-                    f"total={t_total:.1f}s gen={t_generation:.1f}s bcast={t_broadcast:.1f}s "
+                    f"TIMING step={optimizer_step} | total={t_total:.1f}s gen={t_generation:.1f}s "
                     f"teacher={t_teacher_sum:.1f}s student={t_student_sum:.1f}s "
-                    f"loss_bwd={t_loss_bwd_sum:.1f}s optim={t_optimizer:.1f}s "
-                    f"allreduce={t_allreduce:.1f}s wsync={t_weight_sync:.1f}s barrier={t_barrier:.1f}s"
+                    f"loss_bwd={t_loss_bwd_sum:.1f}s optim={t_optimizer:.1f}s wsync={t_weight_sync:.1f}s"
                 )
 
         # ---- Epoch summary ----
