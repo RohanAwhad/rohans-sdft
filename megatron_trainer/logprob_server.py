@@ -12,6 +12,7 @@ Endpoints:
 """
 
 import os
+import threading
 
 import numpy as np
 import torch
@@ -59,6 +60,9 @@ def main() -> None:
     # ---- PyNcclCommunicator — initialized later via HTTP handshake ----
     logprob_nccl_comm = None
     request_count = 0
+    # Serialize model access: FastAPI runs sync endpoints in a threadpool,
+    # and Megatron's global RNG state tracker is not thread-safe.
+    model_lock = threading.Lock()
 
     # ---- FastAPI app ----
     app = FastAPI()
@@ -75,7 +79,7 @@ def main() -> None:
         completion_len = seq_len - request.prompt_len
         token_ids = torch.tensor(request.token_ids, device=DEVICE, dtype=torch.long)
 
-        with torch.no_grad():
+        with model_lock, torch.no_grad():
             input_ids = token_ids.unsqueeze(0)
             position_ids = torch.arange(seq_len, device=DEVICE, dtype=torch.long).unsqueeze(0)
             logits = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
@@ -119,10 +123,11 @@ def main() -> None:
         """Receive weights from trainer via NCCL, EMA blend into model."""
         assert logprob_nccl_comm is not None, "Call /init_weight_sync first"
 
-        for param in model.parameters():
-            incoming = torch.empty_like(param.data)
-            logprob_nccl_comm.broadcast(incoming, src=0)
-            param.data.lerp_(incoming, EMA_ALPHA)
+        with model_lock:
+            for param in model.parameters():
+                incoming = torch.empty_like(param.data)
+                logprob_nccl_comm.broadcast(incoming, src=0)
+                param.data.lerp_(incoming, EMA_ALPHA)
 
         logger.debug(f"Weights EMA-blended (alpha={EMA_ALPHA}).")
         return {"status": "ok"}
