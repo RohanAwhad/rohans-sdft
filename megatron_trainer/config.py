@@ -30,6 +30,15 @@ GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 VLLM_BASE_URL = f"http://localhost:{VLLM_PORT}"
 
+# Multi-instance vLLM: comma-separated ports (e.g. "8001,8002,8003")
+# Falls back to single VLLM_PORT if not set.
+_vllm_ports_str = os.environ.get("VLLM_PORTS", "")
+VLLM_BASE_URLS: list[str] = (
+    [f"http://localhost:{p.strip()}" for p in _vllm_ports_str.split(",") if p.strip()]
+    if _vllm_ports_str
+    else [VLLM_BASE_URL]
+)
+
 # Logprob server (HTTP)
 LOGPROB_PORT = int(os.environ.get("LOGPROB_PORT", "8010"))
 LOGPROB_BASE_URL = f"http://localhost:{LOGPROB_PORT}"

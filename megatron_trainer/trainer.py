@@ -46,6 +46,7 @@ from megatron_trainer.config import (
     TEACHER_MAX_PROMPT_LEN,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
+    VLLM_BASE_URLS,
     WANDB_PROJECT,
     WANDB_ENTITY,
     WANDB_NAME,
@@ -291,7 +292,7 @@ def train() -> None:
                     envs = [
                         RagEnv(
                             prompt_text=item["prompt_texts"][0],
-                            vllm_base_url=VLLM_BASE_URL,
+                            vllm_base_url=VLLM_BASE_URLS[i % len(VLLM_BASE_URLS)],
                             privileged_information_prompt=item["conditional_texts"][0],
                             raw_question=item["raw_questions"][0],
                             golden_answer=item["golden_answers"][0],
@@ -299,22 +300,22 @@ def train() -> None:
                             tokenizer=tokenizer,
                             use_reflector=use_reflector,
                         )
-                        for item in items
+                        for i, item in enumerate(items)
                     ]
                 else:
                     envs = [
                         ApiAdapterEnv(
                             prompt_text=item["prompt_texts"][0],
-                            vllm_base_url=VLLM_BASE_URL,
+                            vllm_base_url=VLLM_BASE_URLS[i % len(VLLM_BASE_URLS)],
                             raw_question=item["raw_questions"][0],
                             golden_answer=item["golden_answers"][0],
                             tokenizer=tokenizer,
                             success_cache=success_cache,
                         )
-                        for item in items
+                        for i, item in enumerate(items)
                     ]
 
-                with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
+                with ThreadPoolExecutor(max_workers=min(32, len(envs))) as executor:
                     list(executor.map(lambda e: e.run(), envs))
 
                 if ENV_TYPE == "api_adapter":
