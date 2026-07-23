@@ -115,6 +115,13 @@ def load_model(hf_model_path: str) -> torch.nn.Module:
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
     model_parallel_cuda_manual_seed(42)
 
+    # Free HF model from GPU — only metadata is needed for weight conversion.
+    # Saves ~16 GB GPU memory (critical for DDP with MegatronDDP main_grad buffers).
+    if hasattr(bridge, 'hf_pretrained') and hasattr(bridge.hf_pretrained, 'to'):
+        bridge.hf_pretrained.to('cpu')
+        torch.cuda.empty_cache()
+        logger.info("HF model moved to CPU to free GPU memory.")
+
     logger.info(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()):,}")
     return model
 
