@@ -83,6 +83,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
     -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-}" \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
+    -e LOGPROB_BATCH_SIZE="${LOGPROB_BATCH_SIZE:-4}" \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
