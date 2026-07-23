@@ -24,10 +24,10 @@ GPU_LOGPROB=$((GPU_START + NUM_VLLM_GPUS + NUM_TRAINERS))
 VLLM_DEVICES=""
 VLLM_PORTS_LIST=""
 VLLM_PORT_BASE=${VLLM_PORT:-8001}
-# Space ports 10 apart so vLLM's internal ports (port+3, port+4) don't collide
+# Space ports 100 apart so vLLM's internal ports don't collide
 for i in $(seq 0 $((NUM_VLLM_GPUS - 1))); do
     gpu=$((GPU_START + i))
-    port=$((VLLM_PORT_BASE + i * 10))
+    port=$((VLLM_PORT_BASE + i * 100))
     VLLM_DEVICES="$VLLM_DEVICES --device nvidia.com/gpu=$gpu"
     VLLM_PORTS_LIST="${VLLM_PORTS_LIST:+$VLLM_PORTS_LIST,}$port"
 done
