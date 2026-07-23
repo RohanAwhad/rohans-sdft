@@ -7,11 +7,13 @@ sync via PyNcclCommunicator (initialized by trainer via HTTP handshake).
 Endpoints:
     GET  /health          — readiness probe
     POST /logprobs        — compute log-probs, return binary (float16)
+    POST /logprobs_batch  — batched log-probs, return binary (length-prefixed)
     POST /init_weight_sync — NCCL communicator init handshake
     POST /sync_weights     — receive weights via NCCL + EMA blend
 """
 
 import os
+import struct
 import threading
 
 import numpy as np
@@ -27,11 +29,16 @@ from megatron_trainer.config import EMA_ALPHA, HF_MODEL_PATH, LOGPROB_PORT
 from megatron_trainer.model_utils import init_distributed_standalone, load_model
 
 DEVICE = torch.device("cuda:0")
+LOGPROB_BATCH_SIZE = int(os.environ.get("LOGPROB_BATCH_SIZE", "16"))
 
 
 class LogprobRequest(BaseModel):
     token_ids: list[int]
     prompt_len: int
+
+
+class BatchLogprobRequest(BaseModel):
+    items: list[LogprobRequest]
 
 
 class NCCLInitRequest(BaseModel):
@@ -96,6 +103,60 @@ def main() -> None:
             logger.info(f"Served {request_count} logprob requests")
 
         return Response(content=response_bytes, media_type="application/octet-stream")
+
+    @app.post("/logprobs_batch")
+    def compute_logprobs_batch(request: BatchLogprobRequest):
+        """Batched teacher log-probs. Processes items in sub-batches of LOGPROB_BATCH_SIZE.
+
+        Response format (binary):
+            For each item: 4-byte int32 (completion_len), then completion_len * vocab_size float16 values.
+        """
+        nonlocal request_count
+
+        all_items = request.items
+        vocab_size: int | None = None
+        response_parts: list[bytes] = []
+
+        with model_lock, torch.no_grad():
+            for chunk_start in range(0, len(all_items), LOGPROB_BATCH_SIZE):
+                chunk = all_items[chunk_start : chunk_start + LOGPROB_BATCH_SIZE]
+                B = len(chunk)
+
+                # Pad sequences to max length in this chunk
+                seq_lens = [len(item.token_ids) for item in chunk]
+                max_seq_len = max(seq_lens)
+
+                input_ids = torch.zeros(B, max_seq_len, device=DEVICE, dtype=torch.long)
+                position_ids = torch.zeros(B, max_seq_len, device=DEVICE, dtype=torch.long)
+                attention_mask = torch.zeros(B, max_seq_len, device=DEVICE, dtype=torch.long)
+
+                for i, item in enumerate(chunk):
+                    s = seq_lens[i]
+                    input_ids[i, :s] = torch.tensor(item.token_ids, device=DEVICE, dtype=torch.long)
+                    position_ids[i, :s] = torch.arange(s, device=DEVICE, dtype=torch.long)
+                    attention_mask[i, :s] = 1
+
+                logits = model(
+                    input_ids=input_ids, position_ids=position_ids, attention_mask=attention_mask,
+                )  # (B, S_max, V)
+
+                if vocab_size is None:
+                    vocab_size = logits.size(-1)
+
+                # Extract per-item completion logprobs
+                for i, item in enumerate(chunk):
+                    completion_len = seq_lens[i] - item.prompt_len
+                    comp_logits = logits[i, item.prompt_len - 1 : item.prompt_len + completion_len - 1]
+                    log_probs = F.log_softmax(comp_logits.float(), dim=-1)
+                    blob = log_probs.cpu().to(torch.float16).numpy().tobytes()
+                    response_parts.append(struct.pack("<i", completion_len))
+                    response_parts.append(blob)
+
+        request_count += len(all_items)
+        if request_count % 50 < len(all_items):
+            logger.info(f"Served {request_count} logprob requests (batch)")
+
+        return Response(content=b"".join(response_parts), media_type="application/octet-stream")
 
     @app.post("/init_weight_sync")
     def init_weight_sync(request: NCCLInitRequest):

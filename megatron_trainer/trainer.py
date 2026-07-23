@@ -59,6 +59,7 @@ from megatron_trainer.model_utils import (
 )
 from megatron_trainer.logprob_client import (
     init_logprob_weight_engine,
+    request_teacher_log_probs_batch_http,
     request_teacher_log_probs_http,
     sync_weights_to_logprob_server,
     wait_for_logprob_server,
@@ -354,39 +355,42 @@ def train() -> None:
             # ---- Each rank slices its portion ----
             my_items = rollout_data[rank * local_accum_steps : (rank + 1) * local_accum_steps]
 
-            # ---- Gradient accumulation loop ----
+            # ---- Pre-tokenize all micro-step items ----
             optimizer.zero_grad()
             accum_loss_sum: float = 0.0
             accum_samples: int = 0
             accum_comp_len_sum: int = 0
             accum_metrics: dict[str, list[float]] = {}
-            t_teacher_sum: float = 0.0
             t_student_sum: float = 0.0
             t_loss_bwd_sum: float = 0.0
 
-            for micro_step, item_data in enumerate(my_items):
+            micro_data: list[tuple[dict, list[int], list[int]]] = []
+            for item_data in my_items:
                 completion_ids: list[int] = tokenizer.encode(
                     item_data["completion_text"], add_special_tokens=False,
                 )
                 if len(completion_ids) == 0:
-                    logger.warning(f"Empty completion, skipping micro_step {micro_step}")
+                    logger.warning("Empty completion, skipping")
                     continue
                 completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
-
-                # Teacher log-probs via HTTP (each rank independently)
-                t0 = time.monotonic()
                 cond_ids: list[int] = tokenizer.encode(
                     item_data["privileged_information_prompt"],
                     add_special_tokens=False, truncation=True, max_length=TEACHER_MAX_PROMPT_LEN,
                 )
-                teacher_log_probs = request_teacher_log_probs_http(
-                    token_ids=cond_ids + completion_ids,
-                    prompt_len=len(cond_ids),
-                    vocab_size=vocab_size,
-                    device=device,
-                )  # (C, V)
-                t_teacher_sum += time.monotonic() - t0
+                micro_data.append((item_data, completion_ids, cond_ids))
 
+            # ---- Batched teacher log-probs (one HTTP call) ----
+            t0 = time.monotonic()
+            teacher_items = [(cond + comp, len(cond)) for _, comp, cond in micro_data]
+            all_teacher_logprobs = request_teacher_log_probs_batch_http(
+                teacher_items, vocab_size, device,
+            )
+            t_teacher = time.monotonic() - t0
+
+            # ---- Gradient accumulation loop ----
+            for micro_step, ((item_data, completion_ids, _cond_ids), teacher_log_probs) in enumerate(
+                zip(micro_data, all_teacher_logprobs),
+            ):
                 # Student forward pass (use raw model — DDP hooks are on params)
                 t0 = time.monotonic()
                 student_logits = forward_student(
@@ -402,7 +406,7 @@ def train() -> None:
                 )
 
                 # no_sync on non-final micro-steps (skip allreduce)
-                is_final = (micro_step == local_accum_steps - 1)
+                is_final = (micro_step == len(micro_data) - 1)
                 ctx = nullcontext() if is_final else ddp_model.no_sync()
                 with ctx:
                     scaled_loss = loss / local_accum_steps
@@ -488,7 +492,7 @@ def train() -> None:
             if rank == 0:
                 logger.info(
                     f"TIMING step={optimizer_step} | total={t_total:.1f}s gen={t_generation:.1f}s "
-                    f"teacher={t_teacher_sum:.1f}s student={t_student_sum:.1f}s "
+                    f"teacher={t_teacher:.1f}s student={t_student_sum:.1f}s "
                     f"loss_bwd={t_loss_bwd_sum:.1f}s optim={t_optimizer:.1f}s wsync={t_weight_sync:.1f}s"
                 )
 

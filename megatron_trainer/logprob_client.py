@@ -6,6 +6,7 @@ Replaces the NCCL command protocol from nccl_comm.py. Three responsibilities:
     3. sync_weights_to_logprob_server() — push weights via NCCL (HTTP-triggered)
 """
 
+import struct
 import threading
 import time
 
@@ -65,6 +66,49 @@ def request_teacher_log_probs_http(
     log_probs_np = np.frombuffer(resp.content, dtype=np.float16).copy()
     log_probs_np = log_probs_np.reshape(completion_len, vocab_size)
     return torch.from_numpy(log_probs_np).to(device=device, dtype=torch.bfloat16)
+
+
+def request_teacher_log_probs_batch_http(
+    items: list[tuple[list[int], int]],
+    vocab_size: int,
+    device: torch.device,
+) -> list[torch.Tensor]:
+    """Batched teacher log-probs via HTTP. One round-trip for all items.
+
+    Args:
+        items: list of (token_ids, prompt_len) tuples
+        vocab_size: model vocab size
+        device: target device for output tensors
+
+    Returns: list of (C_i, vocab_size) tensors in bfloat16, one per item.
+    """
+    payload = {
+        "items": [{"token_ids": tok_ids, "prompt_len": pl} for tok_ids, pl in items],
+    }
+    resp = requests.post(
+        f"{LOGPROB_BASE_URL}/logprobs_batch",
+        json=payload,
+        timeout=300,
+    )
+    if not resp.ok:
+        logger.error(f"Logprob batch error ({resp.status_code}): {resp.text}")
+        resp.raise_for_status()
+
+    # Parse length-prefixed binary: [int32 completion_len, float16 blob] per item
+    data = resp.content
+    offset = 0
+    results: list[torch.Tensor] = []
+    for _ in items:
+        (completion_len,) = struct.unpack_from("<i", data, offset)
+        offset += 4
+        blob_size = completion_len * vocab_size * 2  # float16 = 2 bytes
+        blob = data[offset : offset + blob_size]
+        offset += blob_size
+        log_probs_np = np.frombuffer(blob, dtype=np.float16).copy()
+        log_probs_np = log_probs_np.reshape(completion_len, vocab_size)
+        results.append(torch.from_numpy(log_probs_np).to(device=device, dtype=torch.bfloat16))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
