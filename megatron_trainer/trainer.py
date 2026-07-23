@@ -41,6 +41,8 @@ from megatron_trainer.config import (
     NUM_EPOCHS,
     OUTPUT_DIR,
     SAVE_EVERY,
+    STUDENT_MAX_PROMPT_LEN,
+    TEACHER_MAX_PROMPT_LEN,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
     WANDB_PROJECT,
@@ -142,7 +144,7 @@ def forward_student(
         add_special_tokens=False,
         return_tensors="pt",
         truncation=True,
-        max_length=2048,
+        max_length=STUDENT_MAX_PROMPT_LEN,
     ).to(device)
     prompt_ids = prompt_enc["input_ids"][0]
     prompt_len = prompt_ids.size(0)
@@ -369,7 +371,7 @@ def train() -> None:
                 # Teacher log-probs via HTTP (each rank independently)
                 cond_ids: list[int] = tokenizer.encode(
                     item_data["privileged_information_prompt"],
-                    add_special_tokens=False, truncation=True, max_length=2048,
+                    add_special_tokens=False, truncation=True, max_length=TEACHER_MAX_PROMPT_LEN,
                 )
                 teacher_log_probs = request_teacher_log_probs_http(
                     token_ids=cond_ids + completion_ids,

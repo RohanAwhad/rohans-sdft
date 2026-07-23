@@ -17,6 +17,8 @@ GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", "32"))
 NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))
 MAX_GRAD_NORM = 10.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
+STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))
+TEACHER_MAX_PROMPT_LEN = int(os.environ.get("TEACHER_MAX_PROMPT_LEN", "2048"))
 
 # Generation (vLLM rollout)
 THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "512"))
