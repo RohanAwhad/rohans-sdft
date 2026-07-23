@@ -75,6 +75,14 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e VERTEXAI_PROJECT="${VERTEXAI_PROJECT:-}" \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-online_feedback}" \
     -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/train_dir/data/synthetic_algebra/train_sdft.jsonl}" \
+    -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-0.7}" \
+    -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-2048}" \
+    -e EMA_ALPHA="${EMA_ALPHA:-0.05}" \
+    -e LEARNING_RATE="${LEARNING_RATE:-5e-5}" \
+    -e STUDENT_MAX_PROMPT_LEN="${STUDENT_MAX_PROMPT_LEN:-2048}" \
+    -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
+    -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-}" \
+    -e ENV_TYPE="${ENV_TYPE:-rag}" \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \

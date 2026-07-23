@@ -13,6 +13,7 @@ Launch: torchrun --nproc_per_node=N -m megatron_trainer.trainer
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 
@@ -281,7 +282,10 @@ def train() -> None:
         data_iter = iter(dataloader) if rank == 0 else None
 
         for _step in range(steps_per_epoch):
+            t_step_start = time.monotonic()
+
             # ---- Rank 0: rollout + build broadcast data ----
+            t_gen_start = time.monotonic()
             full_pass_rate = None
             if rank == 0:
                 items = [next(data_iter) for _ in range(GRAD_ACCUM_STEPS)]
@@ -345,9 +349,12 @@ def train() -> None:
                     full_pass_rate = sum(1.0 for v in verdicts if v == "PASS") / max(len(verdicts), 1)
             else:
                 rollout_data = [None] * GRAD_ACCUM_STEPS
+            t_generation = time.monotonic() - t_gen_start
 
             # ---- Broadcast rollout data to all ranks ----
+            t_bcast_start = time.monotonic()
             dist.broadcast_object_list(rollout_data, src=0)
+            t_broadcast = time.monotonic() - t_bcast_start
 
             # ---- Each rank slices its portion ----
             my_items = rollout_data[rank * local_accum_steps : (rank + 1) * local_accum_steps]
@@ -358,6 +365,9 @@ def train() -> None:
             accum_samples: int = 0
             accum_comp_len_sum: int = 0
             accum_metrics: dict[str, list[float]] = {}
+            t_teacher_sum: float = 0.0
+            t_student_sum: float = 0.0
+            t_loss_bwd_sum: float = 0.0
 
             for micro_step, item_data in enumerate(my_items):
                 completion_ids: list[int] = tokenizer.encode(
@@ -369,6 +379,7 @@ def train() -> None:
                 completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
                 # Teacher log-probs via HTTP (each rank independently)
+                t0 = time.monotonic()
                 cond_ids: list[int] = tokenizer.encode(
                     item_data["privileged_information_prompt"],
                     add_special_tokens=False, truncation=True, max_length=TEACHER_MAX_PROMPT_LEN,
@@ -379,13 +390,17 @@ def train() -> None:
                     vocab_size=vocab_size,
                     device=device,
                 )  # (C, V)
+                t_teacher_sum += time.monotonic() - t0
 
                 # Student forward pass (use raw model — DDP hooks are on params)
+                t0 = time.monotonic()
                 student_logits = forward_student(
                     model, tokenizer, item_data["prompt_text"], completion_ids, device,
                 )  # (C, V)
+                t_student_sum += time.monotonic() - t0
 
                 # Reverse KL loss
+                t0 = time.monotonic()
                 loss, step_metrics = compute_kl(
                     student_logits, teacher_log_probs.detach(),
                     completion_ids, tokenizer.eos_token_id,
@@ -397,6 +412,7 @@ def train() -> None:
                 with ctx:
                     scaled_loss = loss / local_accum_steps
                     scaled_loss.backward()
+                t_loss_bwd_sum += time.monotonic() - t0
 
                 loss_val = loss.item()
                 accum_loss_sum += loss_val
@@ -408,16 +424,21 @@ def train() -> None:
                     accum_metrics.setdefault(k, []).append(v)
 
             # ---- Optimizer step ----
+            t0 = time.monotonic()
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
             optimizer_step += 1
+            t_optimizer = time.monotonic() - t0
 
             # ---- Aggregate loss across ranks ----
+            t0 = time.monotonic()
             loss_tensor = torch.tensor(
                 [accum_loss_sum, float(accum_samples)], device=device,
             )
             dist.all_reduce(loss_tensor)
+            t_allreduce = time.monotonic() - t0
 
+            t_weight_sync: float = 0.0
             if rank == 0:
                 total_loss = loss_tensor[0].item()
                 total_samples = max(loss_tensor[1].item(), 1)
@@ -453,8 +474,10 @@ def train() -> None:
                 logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
 
                 # ---- Sync weights (rank 0 only) ----
+                t0 = time.monotonic()
                 sync_weights_to_logprob_server(model, logprob_comm)
                 sync_weights_to_vllm(model, device, vllm_group)
+                t_weight_sync = time.monotonic() - t0
 
                 # ---- Checkpoint ----
                 if optimizer_step % SAVE_EVERY == 0:
@@ -462,7 +485,19 @@ def train() -> None:
                     save_hf_checkpoint(model, ckpt_dir, tokenizer)
 
             # All ranks wait for rank 0 weight sync before next step
+            t0 = time.monotonic()
             dist.barrier()
+            t_barrier = time.monotonic() - t0
+
+            t_total = time.monotonic() - t_step_start
+            if rank == 0:
+                logger.info(
+                    f"TIMING opt_step={optimizer_step} | "
+                    f"total={t_total:.1f}s gen={t_generation:.1f}s bcast={t_broadcast:.1f}s "
+                    f"teacher={t_teacher_sum:.1f}s student={t_student_sum:.1f}s "
+                    f"loss_bwd={t_loss_bwd_sum:.1f}s optim={t_optimizer:.1f}s "
+                    f"allreduce={t_allreduce:.1f}s wsync={t_weight_sync:.1f}s barrier={t_barrier:.1f}s"
+                )
 
         # ---- Epoch summary ----
         avg_epoch_loss = epoch_loss_sum / max(epoch_samples, 1)
