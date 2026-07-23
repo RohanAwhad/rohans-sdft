@@ -119,8 +119,9 @@ VLLM_PIDS=""
 IFS=',' read -ra PORTS <<< \"\$VLLM_PORTS\"
 for i in \$(seq 0 \$((NUM_VLLM - 1))); do
     PORT=\${PORTS[\$i]}
-    echo \"=== Starting vLLM instance \$i on internal GPU \$i, port \$PORT ===\"
-    CUDA_VISIBLE_DEVICES=\$i python /workspace/megatron_trainer/start_vllm_patched.py \\
+    DIST_PORT=\$((29500 + i * 100))
+    echo \"=== Starting vLLM instance \$i on internal GPU \$i, port \$PORT, dist_port \$DIST_PORT ===\"
+    CUDA_VISIBLE_DEVICES=\$i MASTER_PORT=\$DIST_PORT python /workspace/megatron_trainer/start_vllm_patched.py \\
         --model \"\$MODEL_NAME\" \\
         --port \"\$PORT\" \\
         --max-model-len 8192 \\
