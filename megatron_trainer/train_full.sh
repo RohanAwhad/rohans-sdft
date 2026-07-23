@@ -63,6 +63,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     --device "nvidia.com/gpu=$GPU_LOGPROB" \
     --ipc=host \
     --network=host \
+    --pids-limit=-1 \
     --add-host "$HOSTNAME_FIX:127.0.0.1" \
     -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
     -e RAYON_NUM_THREADS=1 \
