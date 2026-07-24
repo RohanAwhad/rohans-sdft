@@ -13,7 +13,7 @@ CUDA_VISIBLE_DEVICES="${GPU_VLLM:-0}" python -m vllm.entrypoints.openai.api_serv
     --port "${VLLM_PORT:-8000}" \
     --dtype bfloat16 \
     --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.5 \
+    --gpu-memory-utilization 0.9 \
     --max-model-len 8192 \
     --weight-transfer-config '{"backend":"nccl"}' \
     --no-enable-log-requests

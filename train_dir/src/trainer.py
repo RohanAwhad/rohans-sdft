@@ -9,6 +9,7 @@ Orchestrates:
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -182,9 +183,13 @@ def train():
           )
           for item in items
         ]
-        with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
+        start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=min(64, len(envs))) as executor:
           list(executor.map(lambda e: e.run(), envs))
+        end = time.monotonic()
+        logger.info(f"Rollout Time: {end-start:0.2f} secs")
 
+        start = time.monotonic()
         for micro_step, env in enumerate(envs):
           # TODO: (rohan) we only have support for BATCH_SIZE=1
           completion_ids: list[int] = tokenizer.encode(env.completion_text, add_special_tokens=False)
@@ -196,6 +201,7 @@ def train():
           completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
           # Teacher log-probs via NCCL
+          start_teacher_lp_time = time.monotonic()
           cond_ids: list[int] = tokenizer.encode(
             env.privileged_information_prompt, add_special_tokens=False, truncation=True,
             max_length=TEACHER_MAX_PROMPT_LEN,
@@ -206,8 +212,11 @@ def train():
             vocab_size=vocab_size,
             device=DEVICE,
           )  # (C, V)
+          end_teacher_lp_time = time.monotonic()
+          logger.info(f"  Teacher LogProb Gen Time: {end_teacher_lp_time - start_teacher_lp_time:0.2f} secs")
 
           # Student forward pass
+          start_stud_micro_step_time = time.monotonic()
           student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)  # (C, V)
 
           # Reverse KL loss
@@ -217,6 +226,8 @@ def train():
           )
           scaled_loss = loss / GRAD_ACCUM_STEPS
           scaled_loss.backward()
+          end_stud_micro_step_time = time.monotonic()
+          logger.info(f"  Micro Step Time: {end_stud_micro_step_time - start_stud_micro_step_time:0.2f} secs")
 
           loss_val = loss.item()
           accum_loss_sum += loss_val
@@ -238,6 +249,9 @@ def train():
         scheduler.step()
         optimizer.zero_grad()
         optimizer_step += 1
+        end = time.monotonic()
+        logger.info(f"Optimization Step Time: {end-start:0.2f} secs")
+
 
         avg_loss = accum_loss_sum / max(accum_samples, 1)
         avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)
