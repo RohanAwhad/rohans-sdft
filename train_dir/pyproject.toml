@@ -13,4 +13,5 @@ dependencies = [
     "anthropic[vertex]",
     "tenacity",
     "accelerate",
+    "bitsandbytes",
 ]

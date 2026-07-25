@@ -18,6 +18,7 @@ from loguru import logger
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import bitsandbytes as bnb
 import math
 
 import wandb
@@ -101,7 +102,8 @@ def train():
   dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True)
   logger.info(f"Dataset: {len(dataset)} examples")
 
-  optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), eps=1e-8, weight_decay=WEIGHT_DECAY)
+  # full AdamW OOMs on longer sequences; 8-bit keeps optimizer states in int8
+  optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), eps=1e-8, weight_decay=WEIGHT_DECAY)
   steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
   total_steps = steps_per_epoch * NUM_EPOCHS
   if LR_SCHEDULER == "cosine":
