@@ -18,7 +18,6 @@ from loguru import logger
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import bitsandbytes as bnb
 import math
 
 import wandb
@@ -28,9 +27,11 @@ from src.loss import compute_kl
 from src.student import forward_student
 from src.config import (
     BATCH_SIZE,
+    EMA_ALPHA,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
     LEARNING_RATE,
+    LR_SCHEDULER,
     MAX_GRAD_NORM,
     MODEL_NAME,
     NCCL_MASTER_PORT,
@@ -43,8 +44,9 @@ from src.config import (
     TEACHER_MAX_PROMPT_LEN,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
+    WARMUP_STEPS,
+    WEIGHT_DECAY,
 )
-from src.config import EMA_ALPHA
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
@@ -99,11 +101,21 @@ def train():
   dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True)
   logger.info(f"Dataset: {len(dataset)} examples")
 
-  optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
+  optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), eps=1e-8, weight_decay=WEIGHT_DECAY)
   steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
   total_steps = steps_per_epoch * NUM_EPOCHS
-  scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
-  logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
+  if LR_SCHEDULER == "cosine":
+    warmup_steps = min(WARMUP_STEPS, int(0.1 * total_steps))
+    def _cosine_with_warmup(step: int) -> float:
+      if step < warmup_steps:
+        return step / warmup_steps
+      progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+      return 0.5 * (1.0 + math.cos(math.pi * progress))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _cosine_with_warmup)
+    logger.info(f"Cosine LR: {total_steps} total steps, {warmup_steps} warmup, LR={LEARNING_RATE}")
+  else:
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
+    logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
 
   wandb.init(
       project=os.environ.get("WANDB_PROJECT", "sdft-online"),
@@ -114,13 +126,18 @@ def train():
       config={
           "model": MODEL_NAME,
           "learning_rate": LEARNING_RATE,
+          "optimizer": "AdamW",
+          "optimizer_betas": (0.9, 0.95),
+          "optimizer_eps": 1e-8,
+          "weight_decay": WEIGHT_DECAY,
           "batch_size": BATCH_SIZE,
           "grad_accum_steps": GRAD_ACCUM_STEPS,
           "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
           "num_epochs": NUM_EPOCHS,
           "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
           "loss": "reverse_kl",
-          "lr_scheduler": "constant",
+          "lr_scheduler": LR_SCHEDULER,
+          "warmup_steps": warmup_steps if LR_SCHEDULER == "cosine" else 0,
           "total_optimizer_steps": total_steps,
           "dataset": TRAIN_DATA_PATH,
           "hindsight_field": HINDSIGHT_FIELD,
