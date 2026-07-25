@@ -17,7 +17,9 @@ ONLINE_HINDSIGHT_TEMPLATES: dict[str, str] = {
         "The following is feedback from your earlier attempt:\n{feedback}"
     ),
     "reflection": (
-        "The following is feedback from your earlier attempt:\n{feedback}"
+        "The following is feedback from your earlier attempt:\n{feedback}\n"
+        "---\n"
+        "Now rewrite the correct answer."
     ),
 }
 
