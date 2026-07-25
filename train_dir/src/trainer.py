@@ -35,6 +35,7 @@ from src.config import (
     MODEL_NAME,
     NCCL_MASTER_PORT,
     NUM_EPOCHS,
+    ONLINE_HINDSIGHT_FIELDS,
     OUTPUT_DIR,
     HINDSIGHT_FIELD,
     SAVE_EVERY,
@@ -127,9 +128,9 @@ def train():
           "teacher_max_prompt_len": TEACHER_MAX_PROMPT_LEN,
       },
   )
-  if HINDSIGHT_FIELD == "online_feedback":
+  if HINDSIGHT_FIELD in ONLINE_HINDSIGHT_FIELDS:
     from src.config import REFLECTOR_MODEL
-    logger.info(f"Hindsight: online_feedback (reflector={REFLECTOR_MODEL})")
+    logger.info(f"Hindsight: {HINDSIGHT_FIELD} (reflector={REFLECTOR_MODEL})")
   else:
     logger.info(f"Hindsight: {HINDSIGHT_FIELD} (static)")
   # ---- Wait for vLLM ----
@@ -169,17 +170,17 @@ def train():
           items.append(item)
 
         # --- Rollout: generate completions + optional reflector feedback ---
-        online_feedback = HINDSIGHT_FIELD == "online_feedback"
+        is_online = HINDSIGHT_FIELD in ONLINE_HINDSIGHT_FIELDS
         envs = [
           RagEnv(
             prompt_text=item["prompt_texts"][0],
             vllm_base_url=VLLM_BASE_URL,
-            privileged_information_prompt=item["conditional_texts"][0] if not online_feedback else None,
+            privileged_information_prompt=item["conditional_texts"][0] if not is_online else None,
             raw_question=item["raw_questions"][0],
             golden_answer=item["golden_answers"][0],
             normalized_messages=item["normalized_messages"][0],
             tokenizer=tokenizer,
-            use_reflector=online_feedback,
+            hindsight_field=HINDSIGHT_FIELD if is_online else None,
           )
           for item in items
         ]

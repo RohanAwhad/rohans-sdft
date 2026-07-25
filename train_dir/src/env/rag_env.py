@@ -11,10 +11,15 @@ from src.env.base import BaseEnv
 from src.vllm_utils import vllm_generate
 
 
-ONLINE_FEEDBACK_TEMPLATE = (
-    "Correct solution:\n{golden_answer}\n\n"
-    "The following is feedback from your earlier attempt:\n{feedback}"
-)
+ONLINE_HINDSIGHT_TEMPLATES: dict[str, str] = {
+    "online_feedback": (
+        "Correct solution:\n{golden_answer}\n\n"
+        "The following is feedback from your earlier attempt:\n{feedback}"
+    ),
+    "reflection": (
+        "The following is feedback from your earlier attempt:\n{feedback}"
+    ),
+}
 
 
 class RagEnv(BaseEnv):
@@ -29,7 +34,7 @@ class RagEnv(BaseEnv):
         golden_answer: str,
         normalized_messages: list[dict],
         tokenizer,
-        use_reflector: bool = False,
+        hindsight_field: str | None = None,
     ):
         self.prompt_text = prompt_text
         self.vllm_base_url = vllm_base_url
@@ -37,7 +42,7 @@ class RagEnv(BaseEnv):
         self.golden_answer = golden_answer
         self.normalized_messages = normalized_messages
         self.tokenizer = tokenizer
-        self.use_reflector = use_reflector
+        self.hindsight_field = hindsight_field
 
         # outputs (populated by run())
         self.completion_text: str | None = None
@@ -47,15 +52,16 @@ class RagEnv(BaseEnv):
     def run(self) -> None:
         self.completion_text = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
 
-        if self.use_reflector:
+        if self.hindsight_field in ONLINE_HINDSIGHT_TEMPLATES:
             self.reflector_result = reflector.run(
                 self.raw_question, self.golden_answer, self.completion_text,
             )
             self._build_privileged_prompt_from_feedback()
 
     def _build_privileged_prompt_from_feedback(self) -> None:
+        template = ONLINE_HINDSIGHT_TEMPLATES[self.hindsight_field]
         cond_history = copy.deepcopy(self.normalized_messages)
-        cond_history[-1]["content"] += "\n\n" + ONLINE_FEEDBACK_TEMPLATE.format(
+        cond_history[-1]["content"] += "\n\n" + template.format(
             feedback=self.reflector_result["feedback"],
             golden_answer=self.golden_answer,
         )

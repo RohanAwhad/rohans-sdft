@@ -41,6 +41,7 @@ TRAIN_DATA_PATH = os.environ.get(
 
 # Collator
 HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")
+ONLINE_HINDSIGHT_FIELDS: set[str] = {"online_feedback", "reflection"}
 
 # Reflector (used when HINDSIGHT_FIELD=online_feedback)
 REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")
