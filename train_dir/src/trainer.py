@@ -23,11 +23,13 @@ import math
 import wandb
 from src.collator import SDFTCollator
 from src.env import ApiAdapterEnv
+from src.env.ifbench import IFBenchApiAdapterEnv, IFBenchCollator
 from src.loss import compute_kl
 from src.student import forward_student
 from src.config import (
     BATCH_SIZE,
     EMA_ALPHA,
+    ENV_TYPE,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
     LEARNING_RATE,
@@ -94,9 +96,12 @@ def train():
   )
 
   dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
-  collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
+  if ENV_TYPE == "ifbench":
+    collator = IFBenchCollator(tokenizer=tokenizer)
+  else:
+    collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
   dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True)
-  logger.info(f"Dataset: {len(dataset)} examples")
+  logger.info(f"Dataset: {len(dataset)} examples (env_type={ENV_TYPE})")
 
   optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
   steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
@@ -121,6 +126,7 @@ def train():
           "total_optimizer_steps": total_steps,
           "dataset": TRAIN_DATA_PATH,
           "hindsight_field": HINDSIGHT_FIELD,
+          "env_type": ENV_TYPE,
       },
   )
   if HINDSIGHT_FIELD == "online_feedback":
@@ -165,18 +171,33 @@ def train():
           item = next(data_iter)
           items.append(item)
 
-        # --- Rollout: generate completions via ApiAdapterEnv ---
-        envs = [
-          ApiAdapterEnv(
-            prompt_text=item["prompt_texts"][0],
-            vllm_base_url=VLLM_BASE_URL,
-            raw_question=item["raw_questions"][0],
-            golden_answer=item["golden_answers"][0],
-            tokenizer=tokenizer,
-            success_cache=success_cache,
-          )
-          for item in items
-        ]
+        # --- Rollout: generate completions via env ---
+        if ENV_TYPE == "ifbench":
+          envs = [
+            IFBenchApiAdapterEnv(
+              prompt_text=item["prompt_texts"][0],
+              vllm_base_url=VLLM_BASE_URL,
+              raw_question=item["raw_questions"][0],
+              instruction_id_list=item["instruction_id_lists"][0],
+              kwargs_list=item["kwargs_lists"][0],
+              constraint_description=item["constraint_descriptions"][0],
+              tokenizer=tokenizer,
+              success_cache=success_cache,
+            )
+            for item in items
+          ]
+        else:
+          envs = [
+            ApiAdapterEnv(
+              prompt_text=item["prompt_texts"][0],
+              vllm_base_url=VLLM_BASE_URL,
+              raw_question=item["raw_questions"][0],
+              golden_answer=item["golden_answers"][0],
+              tokenizer=tokenizer,
+              success_cache=success_cache,
+            )
+            for item in items
+          ]
         with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
           list(executor.map(lambda e: e.run(), envs))
 
@@ -252,9 +273,10 @@ def train():
           log_dict[k] = sum(vals) / len(vals)
 
         if optimizer_step % 10 == 0 and hasattr(env, "adapter_history"):
-          table = wandb.Table(columns=["step", "question", "golden_answer", "num_turns", "verdict", "conversation"])
+          table = wandb.Table(columns=["step", "question", "reference", "num_turns", "verdict", "conversation"])
           conversation = "\n".join(str(msg) for msg in env.adapter_history)
-          table.add_data(optimizer_step, env.raw_question, env.golden_answer, len(env.adapter_history), env.verdict, conversation)
+          reference = getattr(env, "golden_answer", env.constraint_description if ENV_TYPE == "ifbench" else "")
+          table.add_data(optimizer_step, env.raw_question, reference, len(env.adapter_history), env.verdict, conversation)
           log_dict["episode/sample"] = table
 
         wandb.log(log_dict, step=optimizer_step)

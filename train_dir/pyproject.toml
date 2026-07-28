@@ -16,4 +16,7 @@ dependencies = [
     "accelerate",
     "litellm",
     "google-cloud-aiplatform",
+    "nltk",
+    "emoji",
+    "syllapy",
 ]

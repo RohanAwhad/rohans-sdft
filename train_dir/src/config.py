@@ -20,6 +20,9 @@ llm_retry = retry(
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-0.6B")
 
+# Environment type: "api_adapter" (default) or "ifbench"
+ENV_TYPE = os.environ.get("ENV_TYPE", "api_adapter")
+
 # GPU assignment (physical GPU IDs, used in CUDA_VISIBLE_DEVICES)
 GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))
