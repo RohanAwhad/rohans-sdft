@@ -110,13 +110,15 @@ class IFBenchApiAdapterEnv(BaseEnv):
         self.episode_result: bool | None = None
         self.verdict: bool = False
         self.feedback: str = ""
+        self.api_response: str | None = None
 
     # ------------------------------------------------------------------
     # Core lifecycle
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        api_response = self.rollout(self.raw_question)
+        self.api_response = self.rollout(self.raw_question)
+        api_response = self.api_response
         if api_response is not None:
             self.evaluate(api_response)
         self.episode_result = self.verdict
@@ -311,7 +313,7 @@ class IFBenchApiAdapterEnv(BaseEnv):
         cond_history = copy.deepcopy(self.adapter_history[:-1])
         privilege_text = self.reflector_feedback
         if self.success_cache and self.raw_question in self.success_cache:
-            privilege_text += "\n\nCorrect answer from a previous successful attempt:\n" + self.success_cache[self.raw_question]
+            privilege_text += "\n\nA previously successful API LLM response for this question:\n" + self.success_cache[self.raw_question]
             logger.debug(f"Cache hit for privilege prompt: {self.raw_question[:80]!r}")
         cond_history[-1]["content"] += "\n\n" + privilege_text
         self.privileged_information_prompt = self.tokenizer.apply_chat_template(

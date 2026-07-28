@@ -12,6 +12,21 @@ from loguru import logger
 from src.config import REFLECTOR_MODEL, llm_retry
 
 
+def _extract_json(raw: str) -> dict[str, str]:
+    raw = raw.strip()
+    if "```json" in raw:
+        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+    return json.loads(raw)
+
+
+def _get_content(response) -> str:
+    content = response.choices[0].message.content
+    if content is not None:
+        return content
+    rc = getattr(response.choices[0].message, "reasoning_content", None) or ""
+    return rc or ""
+
+
 REFLECTOR_SYSTEM_PROMPT = """\
 You are a grader comparing a model's response against the correct answer.
 Output EXACTLY this JSON format and nothing else:
@@ -47,15 +62,14 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
     )
     response = litellm.completion(
         model=REFLECTOR_MODEL,
-        max_tokens=1024,
+        max_tokens=65536,
         messages=[
             {"role": "system", "content": REFLECTOR_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
     )
-    raw: str = response.choices[0].message.content.strip()
-    raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
-    parsed: dict[str, str] = json.loads(raw)
+    raw: str = _get_content(response)
+    parsed: dict[str, str] = _extract_json(raw)
     logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
     return parsed
 
@@ -160,15 +174,14 @@ def run_api_adapter(
     )
     response = litellm.completion(
         model=REFLECTOR_MODEL,
-        max_tokens=1024,
+        max_tokens=65536,
         messages=[
             {"role": "system", "content": ADAPTER_REFLECTOR_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
     )
-    raw: str = response.choices[0].message.content.strip()
-    raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
-    parsed: dict[str, str] = json.loads(raw)
+    raw: str = _get_content(response)
+    parsed: dict[str, str] = _extract_json(raw)
     feedback = parsed["feedback_for_adapter"]
     logger.debug(f"Adapter reflector: {feedback}")
     return feedback
@@ -283,15 +296,14 @@ def run_ifbench_adapter(
     )
     response = litellm.completion(
         model=REFLECTOR_MODEL,
-        max_tokens=1024,
+        max_tokens=65536,
         messages=[
             {"role": "system", "content": IFBENCH_ADAPTER_REFLECTOR_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
     )
-    raw: str = response.choices[0].message.content.strip()
-    raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
-    parsed: dict[str, str] = json.loads(raw)
+    raw: str = _get_content(response)
+    parsed: dict[str, str] = _extract_json(raw)
     feedback = parsed["feedback_for_adapter"]
     logger.debug(f"IFBench adapter reflector: {feedback}")
     return feedback

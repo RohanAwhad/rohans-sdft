@@ -151,7 +151,7 @@ def train():
 
   # === Training Loop ===
   optimizer_step = 0
-  success_cache: dict[str, str] = {}  # raw_question -> adapter verdict+feedback text
+  success_cache: dict[str, str] = {}  # raw_question -> successful API LLM response
   for epoch in range(NUM_EPOCHS):
     logger.info(f"=== Epoch {epoch + 1}/{NUM_EPOCHS} ===")
     epoch_loss_sum: float = 0.0
@@ -201,13 +201,10 @@ def train():
         with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
           list(executor.map(lambda e: e.run(), envs))
 
-        # Cache successful adapter responses for future hindsight
+        # Cache successful API LLM responses for future privilege information
         for env in envs:
           if env.episode_result and env.completion_text:
-            parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
-            if parsed_verdict:
-              cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
-              success_cache[env.raw_question] = cached_text
+            success_cache[env.raw_question] = env.api_response
 
         for micro_step, env in enumerate(envs):
           # TODO: (rohan) we only have support for BATCH_SIZE=1

@@ -47,7 +47,7 @@ class IFBenchCollator:
             parsed = ast.literal_eval(ex["ground_truth"])
             # parsed is a list with one element containing the constraint metadata
             constraint_meta = parsed[0]
-            instruction_id_lists.append(constraint_meta["instruction_id_list"])
+            instruction_id_lists.append(constraint_meta["instruction_id"])
             kwargs_lists.append(constraint_meta["kwargs"])
 
             # Human-readable constraint description

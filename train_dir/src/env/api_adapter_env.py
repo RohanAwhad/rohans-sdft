@@ -111,13 +111,15 @@ class ApiAdapterEnv(BaseEnv):
         self.episode_result: bool | None = None
         self.verdict: bool = False
         self.feedback: str = ""
+        self.api_response: str | None = None
 
     # ------------------------------------------------------------------
     # Core lifecycle
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        model_response = self.rollout(self.raw_question)
+        self.api_response = self.rollout(self.raw_question)
+        model_response = self.api_response
         model_answer = self.parse_model_answer(model_response) if model_response else None
         if model_answer is not None: self.evaluate(model_answer, self.golden_answer)
         self.episode_result = self.verdict
@@ -311,7 +313,7 @@ class ApiAdapterEnv(BaseEnv):
         cond_history = copy.deepcopy(self.adapter_history[:-1])
         privilege_text = self.reflector_feedback
         if self.success_cache and self.raw_question in self.success_cache:
-            privilege_text += "\n\nCorrect answer from a previous successful attempt:\n" + self.success_cache[self.raw_question]
+            privilege_text += "\n\nA previously successful API LLM response for this question:\n" + self.success_cache[self.raw_question]
             logger.debug(f"Cache hit for privilege prompt: {self.raw_question[:80]!r}")
         cond_history[-1]["content"] += "\n\n" + privilege_text
         self.privileged_information_prompt = self.tokenizer.apply_chat_template(

@@ -62,7 +62,8 @@ def verify_response(
         instruction = instruction_cls(instruction_id)
 
         # Filter out None-valued kwargs (same as evaluation_lib)
-        clean_kwargs = {k: v for k, v in kwargs_list[index].items() if v is not None}
+        kw = kwargs_list[index]
+        clean_kwargs = {k: v for k, v in kw.items() if v is not None} if kw is not None else {}
         instruction.build_description(**clean_kwargs)
 
         # Some checkers need the prompt injected
