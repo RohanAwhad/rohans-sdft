@@ -128,7 +128,7 @@ def train():
       config={
           "model": MODEL_NAME,
           "learning_rate": LEARNING_RATE,
-          "optimizer": "AdamW",
+          "optimizer": "AdamW8bit",
           "optimizer_betas": (0.9, 0.95),
           "optimizer_eps": 1e-8,
           "weight_decay": WEIGHT_DECAY,
