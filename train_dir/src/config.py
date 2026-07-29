@@ -15,7 +15,10 @@ BATCH_SIZE = 1  # always 1; effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
 GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", "32"))
 NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))
 MAX_GRAD_NORM = 1.0
+WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "0.01"))
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))  # teacher EMA: phi = alpha*theta + (1-alpha)*phi
+LR_SCHEDULER = os.environ.get("LR_SCHEDULER", "constant")  # "constant" | "cosine"
+WARMUP_STEPS = int(os.environ.get("WARMUP_STEPS", "100"))   # cosine only; actual = min(this, 0.1 * total_steps)
 
 # Generation (vLLM rollout)
 GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
@@ -41,6 +44,7 @@ TRAIN_DATA_PATH = os.environ.get(
 
 # Collator
 HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")
+ONLINE_HINDSIGHT_FIELDS: set[str] = {"online_feedback", "reflection"}
 
 # Reflector (used when HINDSIGHT_FIELD=online_feedback)
 REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")

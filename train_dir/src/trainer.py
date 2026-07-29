@@ -9,6 +9,7 @@ Orchestrates:
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -27,13 +28,16 @@ from src.loss import compute_kl
 from src.student import forward_student
 from src.config import (
     BATCH_SIZE,
+    EMA_ALPHA,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
     LEARNING_RATE,
+    LR_SCHEDULER,
     MAX_GRAD_NORM,
     MODEL_NAME,
     NCCL_MASTER_PORT,
     NUM_EPOCHS,
+    ONLINE_HINDSIGHT_FIELDS,
     OUTPUT_DIR,
     HINDSIGHT_FIELD,
     SAVE_EVERY,
@@ -41,8 +45,9 @@ from src.config import (
     TEACHER_MAX_PROMPT_LEN,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
+    WARMUP_STEPS,
+    WEIGHT_DECAY,
 )
-from src.config import EMA_ALPHA
 from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
@@ -97,11 +102,22 @@ def train():
   dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True)
   logger.info(f"Dataset: {len(dataset)} examples")
 
-  optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
+  # full AdamW OOMs on longer sequences; 8-bit keeps optimizer states in int8
+  optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), eps=1e-8, weight_decay=WEIGHT_DECAY)
   steps_per_epoch = math.ceil(len(dataset) / GRAD_ACCUM_STEPS)
   total_steps = steps_per_epoch * NUM_EPOCHS
-  scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
-  logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
+  if LR_SCHEDULER == "cosine":
+    warmup_steps = min(WARMUP_STEPS, int(0.1 * total_steps))
+    def _cosine_with_warmup(step: int) -> float:
+      if step < warmup_steps:
+        return step / warmup_steps
+      progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+      return 0.5 * (1.0 + math.cos(math.pi * progress))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _cosine_with_warmup)
+    logger.info(f"Cosine LR: {total_steps} total steps, {warmup_steps} warmup, LR={LEARNING_RATE}")
+  else:
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
+    logger.info(f"Constant LR: {total_steps} total steps, LR={LEARNING_RATE}")
 
   wandb.init(
       project=os.environ.get("WANDB_PROJECT", "sdft-online"),
@@ -112,13 +128,18 @@ def train():
       config={
           "model": MODEL_NAME,
           "learning_rate": LEARNING_RATE,
+          "optimizer": "AdamW8bit",
+          "optimizer_betas": (0.9, 0.95),
+          "optimizer_eps": 1e-8,
+          "weight_decay": WEIGHT_DECAY,
           "batch_size": BATCH_SIZE,
           "grad_accum_steps": GRAD_ACCUM_STEPS,
           "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
           "num_epochs": NUM_EPOCHS,
           "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
           "loss": "reverse_kl",
-          "lr_scheduler": "constant",
+          "lr_scheduler": LR_SCHEDULER,
+          "warmup_steps": warmup_steps if LR_SCHEDULER == "cosine" else 0,
           "total_optimizer_steps": total_steps,
           "dataset": TRAIN_DATA_PATH,
           "hindsight_field": HINDSIGHT_FIELD,
@@ -126,9 +147,9 @@ def train():
           "teacher_max_prompt_len": TEACHER_MAX_PROMPT_LEN,
       },
   )
-  if HINDSIGHT_FIELD == "online_feedback":
+  if HINDSIGHT_FIELD in ONLINE_HINDSIGHT_FIELDS:
     from src.config import REFLECTOR_MODEL
-    logger.info(f"Hindsight: online_feedback (reflector={REFLECTOR_MODEL})")
+    logger.info(f"Hindsight: {HINDSIGHT_FIELD} (reflector={REFLECTOR_MODEL})")
   else:
     logger.info(f"Hindsight: {HINDSIGHT_FIELD} (static)")
   # ---- Wait for vLLM ----
@@ -168,23 +189,27 @@ def train():
           items.append(item)
 
         # --- Rollout: generate completions + optional reflector feedback ---
-        online_feedback = HINDSIGHT_FIELD == "online_feedback"
+        is_online = HINDSIGHT_FIELD in ONLINE_HINDSIGHT_FIELDS
         envs = [
           RagEnv(
             prompt_text=item["prompt_texts"][0],
             vllm_base_url=VLLM_BASE_URL,
-            privileged_information_prompt=item["conditional_texts"][0] if not online_feedback else None,
+            privileged_information_prompt=item["conditional_texts"][0] if not is_online else None,
             raw_question=item["raw_questions"][0],
             golden_answer=item["golden_answers"][0],
             normalized_messages=item["normalized_messages"][0],
             tokenizer=tokenizer,
-            use_reflector=online_feedback,
+            hindsight_field=HINDSIGHT_FIELD if is_online else None,
           )
           for item in items
         ]
-        with ThreadPoolExecutor(max_workers=min(16, len(envs))) as executor:
+        start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=min(64, len(envs))) as executor:
           list(executor.map(lambda e: e.run(), envs))
+        end = time.monotonic()
+        logger.info(f"Rollout Time: {end-start:0.2f} secs")
 
+        start = time.monotonic()
         for micro_step, env in enumerate(envs):
           # TODO: (rohan) we only have support for BATCH_SIZE=1
           completion_ids: list[int] = tokenizer.encode(env.completion_text, add_special_tokens=False)
@@ -196,6 +221,7 @@ def train():
           completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
           # Teacher log-probs via NCCL
+          start_teacher_lp_time = time.monotonic()
           cond_ids: list[int] = tokenizer.encode(
             env.privileged_information_prompt, add_special_tokens=False, truncation=True,
             max_length=TEACHER_MAX_PROMPT_LEN,
@@ -206,8 +232,11 @@ def train():
             vocab_size=vocab_size,
             device=DEVICE,
           )  # (C, V)
+          end_teacher_lp_time = time.monotonic()
+          logger.info(f"  Teacher LogProb Gen Time: {end_teacher_lp_time - start_teacher_lp_time:0.2f} secs")
 
           # Student forward pass
+          start_stud_micro_step_time = time.monotonic()
           student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)  # (C, V)
 
           # Reverse KL loss
@@ -217,6 +246,8 @@ def train():
           )
           scaled_loss = loss / GRAD_ACCUM_STEPS
           scaled_loss.backward()
+          end_stud_micro_step_time = time.monotonic()
+          logger.info(f"  Micro Step Time: {end_stud_micro_step_time - start_stud_micro_step_time:0.2f} secs")
 
           loss_val = loss.item()
           accum_loss_sum += loss_val
@@ -238,6 +269,9 @@ def train():
         scheduler.step()
         optimizer.zero_grad()
         optimizer_step += 1
+        end = time.monotonic()
+        logger.info(f"Optimization Step Time: {end-start:0.2f} secs")
+
 
         avg_loss = accum_loss_sum / max(accum_samples, 1)
         avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)

@@ -10,6 +10,8 @@ from typing import Any, Dict, List
 
 from transformers import PreTrainedTokenizerBase
 
+from src.config import ONLINE_HINDSIGHT_FIELDS
+
 
 HINDSIGHT_TEMPLATES = {
     "user_response": (
@@ -81,7 +83,7 @@ class SDFTCollator:
             # --- Teacher prompt (x, o) — append privileged info ---
             # online_feedback: conditional_text is built dynamically in the trainer
             # after vLLM generation + reflector call, so we skip it here.
-            if self.hindsight_field == "online_feedback":
+            if self.hindsight_field in ONLINE_HINDSIGHT_FIELDS:
                 conditional_texts.append(None)
             else:
                 template = HINDSIGHT_TEMPLATES[self.hindsight_field]
