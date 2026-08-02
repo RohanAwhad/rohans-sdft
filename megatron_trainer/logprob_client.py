@@ -16,6 +16,7 @@ import torch
 from loguru import logger
 
 from megatron_trainer.config import LOGPROB_BASE_URL
+from megatron_trainer.model_utils import gather_raw_params_iter
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,7 @@ def init_logprob_weight_engine(device: torch.device):
 def sync_weights_to_logprob_server(
     model: torch.nn.Module,
     logprob_comm,
+    rank: int = 0,
 ) -> None:
     """Push trainer weights to logprob server via standalone NCCL.
 
@@ -172,17 +174,24 @@ def sync_weights_to_logprob_server(
     Both sides iterate model.parameters() in the same order (both are
     Megatron models loaded via the same AutoBridge path).
 
+    Under FSDP all trainer ranks must enter gather_raw_params_iter() in
+    lockstep (collective all-gather); only rank 0 broadcasts on the logprob
+    NCCL group. Under DDP this is equivalent to the old rank-0-only behavior.
+
     EMA blending happens on the server side (in the /sync_weights handler).
     """
 
     def _trigger_recv():
         requests.post(f"{LOGPROB_BASE_URL}/sync_weights", timeout=300).raise_for_status()
 
-    t = threading.Thread(target=_trigger_recv)
-    t.start()
+    if rank == 0:
+        t = threading.Thread(target=_trigger_recv)
+        t.start()
 
-    for param in model.parameters():
-        logprob_comm.broadcast(param.data, src=0)
+    for full in gather_raw_params_iter(model):
+        if rank == 0:
+            logprob_comm.broadcast(full, src=0)
 
-    t.join()
-    logger.debug("Weights synced to logprob server.")
+    if rank == 0:
+        t.join()
+        logger.debug("Weights synced to logprob server.")

@@ -82,6 +82,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e VLLM_SERVER_DEV_MODE=1 \
     -e BNB_CUDA_VERSION=130 \
     -e WANDB_PROJECT="${WANDB_PROJECT:-sdft-online}" \
+    -e WANDB_MODE="${WANDB_MODE:-}" \
     -e WANDB_NAME="${WANDB_NAME:-sdft-ddp-$(basename $MODEL_NAME)-t${NUM_TRAINERS}-e${NUM_EPOCHS:-10}}" \
     -e WANDB_ENTITY="${WANDB_ENTITY:-}" \
     -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
@@ -97,9 +98,11 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
     -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-}" \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
+    -e TRAINER_BACKEND="${TRAINER_BACKEND:-ddp}" \
     -e LOGPROB_BATCH_SIZE="${LOGPROB_BATCH_SIZE:-4}" \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
+    -v /mnt/nvme5n1/rohan_patched_ckpts:/mnt/nvme5n1/rohan_patched_ckpts:z \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.netrc:/root/.netrc:ro" \
     -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
@@ -108,6 +111,8 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     bash -c "
 set -e
 pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
+pip uninstall -y triton_kernels 2>/dev/null || true
+pip install --quiet "humming-kernels[cu13]==0.1.4" 2>/dev/null
 pip install --quiet litellm google-cloud-aiplatform tenacity fastapi uvicorn 2>/dev/null
 
 NUM_GPUS=\$(nvidia-smi -L | wc -l)
@@ -129,7 +134,7 @@ for i in \$(seq 0 \$((NUM_VLLM - 1))); do
         --master-port \$DIST_PORT \\
         --max-model-len 8192 \\
         --dtype bfloat16 \\
-        --gpu-memory-utilization 0.5 \\
+        --gpu-memory-utilization 0.8 \\
         --weight-transfer-config '{\"backend\":\"nccl\"}' \\
         --enforce-eager \\
         --no-enable-log-requests \\

@@ -10,6 +10,9 @@ GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))
 GPU_LOGPROB_SERVER = int(os.environ.get("GPU_LOGPROB_SERVER", "2"))
 
+# Training backend: "ddp" (bitsandbytes AdamW8bit) or "fsdp" (torch AdamW)
+TRAINER_BACKEND = os.environ.get("TRAINER_BACKEND", "ddp")
+
 # Training hyperparams
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-5"))
 BATCH_SIZE = 1  # always 1; effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS

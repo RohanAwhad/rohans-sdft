@@ -21,6 +21,21 @@ try:
 except ImportError:
     pass
 
+# Monkey-patch layerwise reload to a no-op: gpt-oss's fused params (w13_weight)
+# break the placeholder re-registration ("attribute already exists"). The NCCL
+# receive path loads into existing params via model.load_weights, so the
+# placeholder pass (a memory optimization) is optional. Patch both the
+# layerwise submodule and the reload package re-export (gpu_worker imports
+# from the package).
+try:
+    import vllm.model_executor.model_loader.reload as _reload
+    import vllm.model_executor.model_loader.reload.layerwise as _lw
+    _noop = lambda model: None
+    _lw.initialize_layerwise_reload = _noop
+    _reload.initialize_layerwise_reload = _noop
+except ImportError:
+    pass
+
 import runpy
 if __name__ == "__main__":
     runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")

@@ -129,6 +129,28 @@ def load_model(hf_model_path: str) -> torch.nn.Module:
     return model
 
 
+def register_fsdp_module_mappings() -> None:
+    """Register MCore FSDP-wrapped module classes with the bridge's AutoMapping.
+
+    torch's fully_shard() dynamically replaces wrapped module classes with
+    FSDP-prefixed subclasses (FSDPColumnParallelLinear, FSDPTransformerLayer,
+    ...). The bridge's parallelism detection matches on exact class name, so
+    register the FSDP variants with the same parallelism types as their
+    originals (the subclasses preserve all module attributes/weights).
+    """
+    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+    for name, ptype in (
+        ("FSDPColumnParallelLinear", "column"),
+        ("FSDPRowParallelLinear", "row"),
+        ("FSDPLanguageModelEmbedding", "replicated"),
+        ("FSDPRotaryEmbedding", "replicated"),
+        ("FSDPFloat16Module", "replicated"),
+    ):
+        AutoMapping.register_module_type(name, ptype)
+    logger.info("Registered FSDP-wrapped module types with AutoMapping")
+
+
 def get_bridge():
     """Return the cached AutoBridge instance."""
     if _bridge_instance is None:
@@ -141,10 +163,32 @@ def export_hf_weights_iter(model: torch.nn.Module) -> Iterator[tuple[str, torch.
 
     Handles QKV unfusing, gate+up unfusing, and parameter renaming.
     Tensors stay on their original device (GPU).
+
+    NOTE: under FSDP this is a COLLECTIVE — every trainer rank must consume
+    the iterator in lockstep (the bridge all-gathers sharded DTensors).
     """
     bridge = get_bridge()
     for hf_tuple in bridge.export_hf_weights(model, cpu=False):
         yield (hf_tuple.param_name, hf_tuple.weight)
+
+
+def gather_raw_params_iter(model: torch.nn.Module) -> Iterator[torch.Tensor]:
+    """Yield full (unsharded) parameter tensors in raw model.parameters() order.
+
+    Used for the logprob-server weight sync, which is order-indexed against
+    the server's own model.parameters() iteration.
+
+    COLLECTIVE under FSDP: every trainer rank must consume in lockstep
+    (full_tensor() all-gathers on the FSDP device mesh). Under DDP this is a
+    plain pass-through of param.data.
+    """
+    from torch.distributed.tensor import DTensor
+
+    for param in model.parameters():
+        if isinstance(param, DTensor):
+            yield param.full_tensor()
+        else:
+            yield param.data
 
 
 def get_hf_weight_metadata(model: torch.nn.Module) -> tuple[list[str], list[str], list[list[int]]]:
@@ -167,44 +211,49 @@ def get_hf_weight_metadata(model: torch.nn.Module) -> tuple[list[str], list[str]
     return _hf_weight_meta_cache
 
 
-def save_hf_checkpoint(model: torch.nn.Module, save_dir: str, tokenizer=None) -> None:
+def save_hf_checkpoint(model: torch.nn.Module, save_dir: str, tokenizer=None, rank: int = 0) -> None:
     """Export Megatron model to HuggingFace format for eval compatibility.
 
     Avoids bridge.save_hf_pretrained() which uses distributed barriers —
     the logprob server (rank 1) is in its command loop and can't participate.
     Instead, manually exports weights via export_hf_weights + safetensors.
+
+    Under FSDP the export pass is collective — ALL ranks must call this.
+    Only rank 0 performs file writes.
     """
     import json
     from safetensors.torch import save_file
 
     bridge = get_bridge()
-    os.makedirs(save_dir, exist_ok=True)
+    if rank == 0:
+        os.makedirs(save_dir, exist_ok=True)
 
     weights = {}
     for hf_name, weight in export_hf_weights_iter(model):
-        weights[hf_name] = weight.contiguous().cpu()
+        if rank == 0:
+            weights[hf_name] = weight.contiguous().cpu()
 
-    save_file(weights, os.path.join(save_dir, "model.safetensors"))
+    if rank == 0:
+        save_file(weights, os.path.join(save_dir, "model.safetensors"))
 
-    hf_config = getattr(bridge.hf_pretrained, "config", bridge.hf_pretrained)
-    if hf_config is not None:
-        hf_config.save_pretrained(save_dir)
+        hf_config = getattr(bridge.hf_pretrained, "config", bridge.hf_pretrained)
+        if hf_config is not None:
+            hf_config.save_pretrained(save_dir)
 
-    if tokenizer is not None:
-        tokenizer.save_pretrained(save_dir)
-        # Fix tokenizer_config.json: the NeMo container's transformers saves
-        # extra_special_tokens as a list, but host transformers expects a dict.
-        import json
-        tc_path = os.path.join(save_dir, "tokenizer_config.json")
-        if os.path.exists(tc_path):
-            with open(tc_path) as f:
-                tc = json.load(f)
-            if isinstance(tc.get("extra_special_tokens"), list):
-                tc["extra_special_tokens"] = {}
-                with open(tc_path, "w") as f:
-                    json.dump(tc, f, indent=2)
+        if tokenizer is not None:
+            tokenizer.save_pretrained(save_dir)
+            # Fix tokenizer_config.json: the NeMo container's transformers saves
+            # extra_special_tokens as a list, but host transformers expects a dict.
+            tc_path = os.path.join(save_dir, "tokenizer_config.json")
+            if os.path.exists(tc_path):
+                with open(tc_path) as f:
+                    tc = json.load(f)
+                if isinstance(tc.get("extra_special_tokens"), list):
+                    tc["extra_special_tokens"] = {}
+                    with open(tc_path, "w") as f:
+                        json.dump(tc, f, indent=2)
 
-    logger.info(f"HF checkpoint saved: {save_dir} ({len(weights)} tensors)")
+        logger.info(f"HF checkpoint saved: {save_dir} ({len(weights)} tensors)")
 
 
 def cleanup() -> None:

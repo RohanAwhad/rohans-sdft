@@ -1,0 +1,381 @@
+=== SDFT DDP Full Training ===
+GPUs: vLLM=2 GPUs (ports=8001,8101), Trainers=2,3,4,5, Logprob=6
+NUM_TRAINERS=4, NUM_VLLM_GPUS=2, Model=unsloth/gpt-oss-20b-BF16
+time="2026-08-02T22:48:15Z" level=warning msg="The storage 'driver' option should be set in /home/rohan/.config/containers/storage.conf. A driver was picked automatically."
+
+====================
+== NeMo Framework ==
+====================
+
+NVIDIA Release  (build 366706436)
+Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Copyright (c) 2014-2024 Facebook Inc.
+Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+Copyright (c) 2015      Google Inc.
+Copyright (c) 2015      Yangqing Jia
+Copyright (c) 2013-2016 The Caffe contributors
+All rights reserved.
+
+Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+
+GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+and the Product-Specific Terms for NVIDIA AI Products
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+
+Found existing installation: triton_kernels 1.0.0+git5d72932fc5.nv26.4
+Uninstalling triton_kernels-1.0.0+git5d72932fc5.nv26.4:
+  Successfully uninstalled triton_kernels-1.0.0+git5d72932fc5.nv26.4
+=== Starting vLLM instance 0 on internal GPU 0, port 8001, dist_port 29500 ===
+=== Starting vLLM instance 1 on internal GPU 1, port 8101, dist_port 29600 ===
+=== Starting logprob server on internal GPU 6 ===
+=== Waiting for all vLLM instances... ===
+vLLM on port 8001 ready
+vLLM on port 8101 ready
+=== Starting 4-rank trainer via torchrun on internal GPUs 2..5 ===
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W0802 22:51:12.328000 1800 torch/distributed/run.py:862] 
+W0802 22:51:12.328000 1800 torch/distributed/run.py:862] *****************************************
+W0802 22:51:12.328000 1800 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0802 22:51:12.328000 1800 torch/distributed/run.py:862] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+2026-08-02 22:51:22.301 | INFO     | __main__:train:181 - === SDFT Megatron Trainer Starting ===
+2026-08-02 22:51:22.336 | INFO     | __main__:train:181 - === SDFT Megatron Trainer Starting ===
+2026-08-02 22:51:22.620 | INFO     | __main__:train:181 - === SDFT Megatron Trainer Starting ===
+2026-08-02 22:51:22.840 | INFO     | megatron_trainer.model_utils:init_distributed_trainer:40 - torch.distributed initialized (trainer DDP, rank=2, world_size=4, local_rank=2)
+2026-08-02 22:51:22.841 | INFO     | __main__:train:195 - DDP/FSDP: rank=2/4, local_rank=2, local_accum_steps=8 backend=fsdp
+2026-08-02 22:51:22.841 | INFO     | __main__:train:199 - Loading model: unsloth/gpt-oss-20b-BF16
+2026-08-02 22:51:22.869 | INFO     | __main__:train:181 - === SDFT Megatron Trainer Starting ===
+2026-08-02 22:51:22.945 | INFO     | megatron_trainer.model_utils:init_distributed_trainer:40 - torch.distributed initialized (trainer DDP, rank=1, world_size=4, local_rank=1)
+2026-08-02 22:51:22.945 | INFO     | __main__:train:195 - DDP/FSDP: rank=1/4, local_rank=1, local_accum_steps=8 backend=fsdp
+2026-08-02 22:51:22.945 | INFO     | __main__:train:199 - Loading model: unsloth/gpt-oss-20b-BF16
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-08-02 22:51:23.210 | INFO     | megatron_trainer.model_utils:init_distributed_trainer:40 - torch.distributed initialized (trainer DDP, rank=0, world_size=4, local_rank=0)
+2026-08-02 22:51:23.210 | INFO     | __main__:train:195 - DDP/FSDP: rank=0/4, local_rank=0, local_accum_steps=8 backend=fsdp
+2026-08-02 22:51:23.210 | INFO     | __main__:train:199 - Loading model: unsloth/gpt-oss-20b-BF16
+2026-08-02 22:51:23.267 | INFO     | megatron_trainer.model_utils:init_distributed_trainer:40 - torch.distributed initialized (trainer DDP, rank=3, world_size=4, local_rank=3)
+2026-08-02 22:51:23.267 | INFO     | __main__:train:195 - DDP/FSDP: rank=3/4, local_rank=3, local_accum_steps=8 backend=fsdp
+2026-08-02 22:51:23.267 | INFO     | __main__:train:199 - Loading model: unsloth/gpt-oss-20b-BF16
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+/opt/venv/lib/python3.12/site-packages/comet_ml/error_tracking/api.py:51: UserWarning: We won't be continuing development on SDK 3.0. Please use the last stable version of the SDK to get access to the newest features and fixes. See https://github.com/getsentry/sentry-python/discussions/4955
+  sentry_sdk.init(
+/opt/venv/lib/python3.12/site-packages/comet_ml/error_tracking/api.py:51: UserWarning: We won't be continuing development on SDK 3.0. Please use the last stable version of the SDK to get access to the newest features and fixes. See https://github.com/getsentry/sentry-python/discussions/4955
+  sentry_sdk.init(
+WARNING:bitsandbytes.cextension:WARNING: BNB_CUDA_VERSION=130 environment variable detected; loading libbitsandbytes_cuda130.so.
+This overrides automatic CUDA version selection.
+If this was unintended clear the variable and retry: unset BNB_CUDA_VERSION
+
+[WARNING] Field "span" in type "ir.TupleType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.FuncType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.TensorMapType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "binding_blocks" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+[WARNING] Field "output" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TupleType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.FuncType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TensorMapType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'name' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'tag' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'attrs' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'shape' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'dtype' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+[WARNING] Field "policy_type" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "m_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "n_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'policy_type' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'm_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'n_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+WARNING:bitsandbytes.cextension:WARNING: BNB_CUDA_VERSION=130 environment variable detected; loading libbitsandbytes_cuda130.so.
+This overrides automatic CUDA version selection.
+If this was unintended clear the variable and retry: unset BNB_CUDA_VERSION
+
+[WARNING] Field "span" in type "ir.TupleType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.FuncType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.TensorMapType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "binding_blocks" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+[WARNING] Field "output" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TupleType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.FuncType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TensorMapType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'name' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'tag' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'attrs' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'shape' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'dtype' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+[WARNING] Field "policy_type" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "m_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "n_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'policy_type' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'm_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'n_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/comet_ml/error_tracking/api.py:51: UserWarning: We won't be continuing development on SDK 3.0. Please use the last stable version of the SDK to get access to the newest features and fixes. See https://github.com/getsentry/sentry-python/discussions/4955
+  sentry_sdk.init(
+/opt/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:53: UserWarning: transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized checkpoints may not work for some models yet.
+  _warnings.warn(
+2026-08-02T22:51:35.068290+0000 | load_model | INFO - Loading model via AutoBridge: unsloth/gpt-oss-20b-BF16
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2191: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2504: UserWarning: Using a large number of experts (e.g. >=32) without fp32 routing. Consider enabling moe_router_dtype for better numerical stability.
+  warnings.warn(
+Model parallel not initialized, initializing...
+WARNING:bitsandbytes.cextension:WARNING: BNB_CUDA_VERSION=130 environment variable detected; loading libbitsandbytes_cuda130.so.
+This overrides automatic CUDA version selection.
+If this was unintended clear the variable and retry: unset BNB_CUDA_VERSION
+
+WARNING:bitsandbytes.cextension:WARNING: BNB_CUDA_VERSION=130 environment variable detected; loading libbitsandbytes_cuda130.so.
+This overrides automatic CUDA version selection.
+If this was unintended clear the variable and retry: unset BNB_CUDA_VERSION
+
+[WARNING] Field "span" in type "ir.TupleType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.FuncType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.TensorMapType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "binding_blocks" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+[WARNING] Field "output" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TupleType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.FuncType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TensorMapType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'name' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'tag' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'attrs' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'shape' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'dtype' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+[WARNING] Field "span" in type "ir.TupleType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.FuncType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "span" in type "ir.TensorMapType" duplicates an ancestor field in "ir.Type". Child types should not re-register inherited fields.
+[WARNING] Field "binding_blocks" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+[WARNING] Field "output" in type "script.ir_builder.relax.FunctionFrame" duplicates an ancestor field in "script.ir_builder.relax.SeqExprFrame". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TupleType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.FuncType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'span' in 'ir.TensorMapType' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'name' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'tag' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'attrs' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'shape' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'dtype' in 'relax.TEPlaceholderOp' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:53: UserWarning: transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized checkpoints may not work for some models yet.
+  _warnings.warn(
+[WARNING] Field "policy_type" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "m_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "n_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'policy_type' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'm_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'n_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+[WARNING] Field "policy_type" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "m_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+[WARNING] Field "n_warp" in type "tl.GemmSPWarpPolicy" duplicates an ancestor field in "tl.GemmWarpPolicy". Child types should not re-register inherited fields.
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'policy_type' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'm_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+/opt/venv/lib/python3.12/site-packages/tvm_ffi/registry.py:85: UserWarning: Field 'n_warp' in 'tl.GemmSPWarpPolicy' duplicates an ancestor field. Child types should not re-register inherited fields.
+  info = core._register_object_by_index(type_index, cls)
+2026-08-02T22:51:37.131027+0000 | load_model | INFO - Loading model via AutoBridge: unsloth/gpt-oss-20b-BF16
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2191: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2504: UserWarning: Using a large number of experts (e.g. >=32) without fp32 routing. Consider enabling moe_router_dtype for better numerical stability.
+  warnings.warn(
+Model parallel not initialized, initializing...
+/opt/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:53: UserWarning: transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized checkpoints may not work for some models yet.
+  _warnings.warn(
+/opt/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:53: UserWarning: transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized checkpoints may not work for some models yet.
+  _warnings.warn(
+2026-08-02T22:51:40.168318+0000 | load_model | INFO - Loading model via AutoBridge: unsloth/gpt-oss-20b-BF16
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2191: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2504: UserWarning: Using a large number of experts (e.g. >=32) without fp32 routing. Consider enabling moe_router_dtype for better numerical stability.
+  warnings.warn(
+Model parallel not initialized, initializing...
+2026-08-02T22:51:40.236106+0000 | load_model | INFO - Loading model via AutoBridge: unsloth/gpt-oss-20b-BF16
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2191: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/transformer_config.py:2504: UserWarning: Using a large number of experts (e.g. >=32) without fp32 routing. Consider enabling moe_router_dtype for better numerical stability.
+  warnings.warn(
+Model parallel not initialized, initializing...
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/models/gpt/gpt_layer_specs.py:216: UserWarning: The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated and will be removed soon. Please update your code accordingly.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/models/gpt/gpt_layer_specs.py:216: UserWarning: The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated and will be removed soon. Please update your code accordingly.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/models/gpt/gpt_layer_specs.py:216: UserWarning: The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated and will be removed soon. Please update your code accordingly.
+  warnings.warn(
+/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/models/gpt/gpt_layer_specs.py:216: UserWarning: The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated and will be removed soon. Please update your code accordingly.
+  warnings.warn(
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 126334.46it/s]
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 19737.90it/s]
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 118149.41it/s]
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 18682.87it/s]
+2026-08-02T22:52:55.219381+0000 | load_model | INFO - HF model moved to CPU to free GPU memory.
+2026-08-02T22:52:55.223064+0000 | load_model | INFO - Model loaded. Parameters: 20,914,757,184
+2026-08-02T22:52:55.224836+0000 | train | INFO - Model loaded. vocab_size=201088 (tokenizer=199998) GPU mem after load: 42.27 GB
+2026-08-02T22:52:55.224973+0000 | register_fsdp_module_mappings | INFO - Registered FSDP-wrapped module types with AutoMapping
+Loading from unsloth/gpt-oss-20b-BF16 ━━━━━ 100% 0:00:… (3291/3291) GPTOSSBridge
+2026-08-02T22:52:55.707393+0000 | load_model | INFO - HF model moved to CPU to free GPU memory.
+2026-08-02T22:52:55.710691+0000 | load_model | INFO - Model loaded. Parameters: 20,914,757,184
+2026-08-02T22:52:55.712015+0000 | train | INFO - Model loaded. vocab_size=201088 (tokenizer=199998) GPU mem after load: 42.27 GB
+2026-08-02T22:52:55.712128+0000 | register_fsdp_module_mappings | INFO - Registered FSDP-wrapped module types with AutoMapping
+2026-08-02T22:52:55.714742+0000 | load_model | INFO - HF model moved to CPU to free GPU memory.
+2026-08-02T22:52:55.718051+0000 | load_model | INFO - Model loaded. Parameters: 20,914,757,184
+2026-08-02T22:52:55.719506+0000 | train | INFO - Model loaded. vocab_size=201088 (tokenizer=199998) GPU mem after load: 42.27 GB
+2026-08-02T22:52:55.719639+0000 | register_fsdp_module_mappings | INFO - Registered FSDP-wrapped module types with AutoMapping
+ > number of parameters on (tensor, pipeline) model parallel rank (0, 0): 20914757184
+2026-08-02T22:52:56.175945+0000 | load_model | INFO - HF model moved to CPU to free GPU memory.
+2026-08-02T22:52:56.179241+0000 | load_model | INFO - Model loaded. Parameters: 20,914,757,184
+2026-08-02T22:52:56.180597+0000 | train | INFO - Model loaded. vocab_size=201088 (tokenizer=199998) GPU mem after load: 42.27 GB
+2026-08-02T22:52:56.180703+0000 | register_fsdp_module_mappings | INFO - Registered FSDP-wrapped module types with AutoMapping
+2026-08-02T22:52:56.572508+0000 | train | INFO - MCore FSDP wrapping complete.
+2026-08-02T22:52:56.578945+0000 | train | INFO - torch AdamW optimizer ready. LR=5e-05
+2026-08-02T22:52:56.579080+0000 | train | INFO - Loading dataset: /workspace/data/maas_raft_v3.1/smoke_sdft.jsonl
+2026-08-02T22:52:56.806504+0000 | train | INFO - MCore FSDP wrapping complete.
+2026-08-02T22:52:56.812099+0000 | train | INFO - torch AdamW optimizer ready. LR=5e-05
+2026-08-02T22:52:56.812217+0000 | train | INFO - Loading dataset: /workspace/data/maas_raft_v3.1/smoke_sdft.jsonl
+2026-08-02T22:52:56.833734+0000 | train | INFO - MCore FSDP wrapping complete.
+2026-08-02T22:52:56.839354+0000 | train | INFO - torch AdamW optimizer ready. LR=5e-05
+2026-08-02T22:52:56.839476+0000 | train | INFO - Loading dataset: /workspace/data/maas_raft_v3.1/smoke_sdft.jsonl
+2026-08-02T22:52:56.930722+0000 | train | INFO - Dataset: 64 examples, 2 steps/epoch
+2026-08-02T22:52:57.285004+0000 | train | INFO - MCore FSDP wrapping complete.
+2026-08-02T22:52:57.290888+0000 | train | INFO - torch AdamW optimizer ready. LR=5e-05
+2026-08-02T22:52:57.291000+0000 | train | INFO - Loading dataset: /workspace/data/maas_raft_v3.1/smoke_sdft.jsonl
+2026-08-02T22:52:57.349721+0000 | train | INFO - Dataset: 64 examples, 2 steps/epoch
+2026-08-02T22:52:57.357862+0000 | train | INFO - Waiting for vLLM server...
+2026-08-02T22:52:57.361066+0000 | wait_for_vllm | INFO - vLLM server healthy: http://localhost:8001
+2026-08-02T22:52:57.363589+0000 | wait_for_vllm | INFO - vLLM server healthy: http://localhost:8101
+2026-08-02T22:52:57.363724+0000 | train | INFO - Initializing vLLM weight transfer engine...
+INFO 08-02 22:52:57 [network_utils.py:205] Port 8001 is already in use, trying port 8002
+INFO 08-02 22:52:57 [network_utils.py:205] Port 8002 is already in use, trying port 8003
+INFO 08-02 22:52:57 [network_utils.py:205] Port 8003 is already in use, trying port 8004
+2026-08-02T22:52:57.374090+0000 | _init_single_vllm_weight_engine | INFO - Initializing vLLM NCCL group for http://localhost:8001: 10.241.128.21:8004 (world_size=2)
+INFO 08-02 22:52:57 [pynccl.py:113] vLLM is using nccl==2.30.4
+2026-08-02T22:52:58.093565+0000 | _init_single_vllm_weight_engine | INFO - vLLM NCCL group initialized for http://localhost:8001.
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8001 is already in use, trying port 8002
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8002 is already in use, trying port 8003
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8003 is already in use, trying port 8004
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8004 is already in use, trying port 8005
+2026-08-02T22:52:58.100499+0000 | _init_single_vllm_weight_engine | INFO - Initializing vLLM NCCL group for http://localhost:8101: 10.241.128.21:8005 (world_size=2)
+2026-08-02T22:52:58.861330+0000 | _init_single_vllm_weight_engine | INFO - vLLM NCCL group initialized for http://localhost:8101.
+2026-08-02T22:52:58.861736+0000 | init_vllm_weight_engine | INFO - All 2 vLLM weight engines initialized.
+2026-08-02T22:52:58.861809+0000 | train | INFO - vLLM weight engine ready.
+2026-08-02T22:52:58.861857+0000 | train | INFO - Waiting for logprob server...
+2026-08-02T22:52:58.887604+0000 | wait_for_logprob_server | INFO - Logprob server is healthy.
+2026-08-02T22:52:58.887927+0000 | train | INFO - Initializing logprob weight transfer engine...
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8001 is already in use, trying port 8002
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8002 is already in use, trying port 8003
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8003 is already in use, trying port 8004
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8004 is already in use, trying port 8005
+INFO 08-02 22:52:58 [network_utils.py:205] Port 8005 is already in use, trying port 8006
+2026-08-02T22:52:58.888439+0000 | init_logprob_weight_engine | INFO - Initializing logprob NCCL group: 10.241.128.21:8006 (world_size=2)
+2026-08-02T22:52:59.254924+0000 | init_logprob_weight_engine | INFO - Logprob NCCL weight engine initialized.
+2026-08-02T22:52:59.255198+0000 | train | INFO - Logprob weight engine ready.
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W802 22:52:59.240680844 ProcessGroupNCCL.cpp:5238] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+2026-08-02T22:53:01.641950+0000 | train | INFO - Dataset: 64 examples, 2 steps/epoch
+2026-08-02T22:53:01.859695+0000 | train | INFO - Dataset: 64 examples, 2 steps/epoch
+2026-08-02T22:53:02.453949+0000 | train | INFO - === Epoch 1/1 ===
+2026-08-02T22:53:02.453981+0000 | train | INFO - === Epoch 1/1 ===
+2026-08-02T22:53:02.454265+0000 | train | INFO - === Epoch 1/1 ===
+2026-08-02T22:53:02.454907+0000 | train | INFO - === Epoch 1/1 ===
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+2026-08-02T22:55:04.328604+0000 | train | INFO - opt_step=1 loss=0.1881 comp_len=1239
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:55:14.856320+0000 | get_hf_weight_metadata | INFO - HF weight metadata cached: 411 tensors
+2026-08-02T22:55:14.858511+0000 | get_hf_weight_metadata | INFO - HF weight metadata cached: 411 tensors
+2026-08-02T22:55:14.860286+0000 | get_hf_weight_metadata | INFO - HF weight metadata cached: 411 tensors
+2026-08-02T22:55:14.860787+0000 | get_hf_weight_metadata | INFO - HF weight metadata cached: 411 tensors
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/weight_transfer/packed_tensor.py:171: UserWarning: Tensor 'model.embed_tokens.weight' has size 1158266880 bytes, which exceeds buffer_size_bytes=1073741824.
+  chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes)
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/weight_transfer/packed_tensor.py:171: UserWarning: Tensor 'lm_head.weight' has size 1158266880 bytes, which exceeds buffer_size_bytes=1073741824.
+  chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes)
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:55:20.050558+0000 | _sync_weights_to_single_vllm | INFO - Weights synced to vLLM http://localhost:8001.
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:55:24.213578+0000 | _sync_weights_to_single_vllm | INFO - Weights synced to vLLM http://localhost:8101.
+2026-08-02T22:55:24.213836+0000 | sync_weights_to_vllm | INFO - Weights synced to all 2 vLLM instances.
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+2026-08-02T22:55:24.214751+0000 | train | INFO - TIMING step=1 | total=141.8s gen=42.4s teacher=34.0s student=23.5s loss_bwd=12.6s optim=9.2s wsync=19.9s
+2026-08-02T22:56:55.594427+0000 | train | INFO - opt_step=2 loss=1.9021 comp_len=1843
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:57:00.510519+0000 | _sync_weights_to_single_vllm | INFO - Weights synced to vLLM http://localhost:8001.
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:57:04.747970+0000 | _sync_weights_to_single_vllm | INFO - Weights synced to vLLM http://localhost:8101.
+2026-08-02T22:57:04.748370+0000 | sync_weights_to_vllm | INFO - Weights synced to all 2 vLLM instances.
+2026-08-02T22:57:04.748891+0000 | train | INFO - TIMING step=2 | total=100.5s gen=42.0s teacher=29.4s student=11.9s loss_bwd=6.1s optim=1.8s wsync=9.2s
+2026-08-02T22:57:04.748988+0000 | train | INFO - Epoch 1/1 done. avg_loss=1.0768 samples=16
+2026-08-02T22:57:04.748934+0000 | train | INFO - Epoch 1/1 done. avg_loss=1.0910 samples=16
+2026-08-02T22:57:04.748928+0000 | train | INFO - Epoch 1/1 done. avg_loss=1.0470 samples=16
+2026-08-02T22:57:04.748977+0000 | train | INFO - Epoch 1/1 done. avg_loss=0.9655 samples=16
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:57:53.075391+0000 | save_hf_checkpoint | INFO - HF checkpoint saved: /mnt/nvme5n1/rohan_patched_ckpts/sdft_gptoss_20b_smoke/epoch_1 (411 tensors)
+Converting to HuggingFace ━━━━━━━━━━━━━━━━ 100% 0:00:00 (3291/3291) GPTOSSBridge
+2026-08-02T22:58:48.613232+0000 | save_hf_checkpoint | INFO - HF checkpoint saved: /mnt/nvme5n1/rohan_patched_ckpts/sdft_gptoss_20b_smoke/step_2 (411 tensors)
+2026-08-02T22:58:49.490298+0000 | train | INFO - Training complete.
+2026-08-02T22:58:49.832051+0000 | train | INFO - Training complete.
+2026-08-02T22:58:49.889902+0000 | train | INFO - Training complete.
+2026-08-02T22:58:49.892568+0000 | train | INFO - Training complete.
+=== Training complete ===
+=== Done ===

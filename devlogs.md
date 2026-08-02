@@ -248,3 +248,52 @@ All at: `/home/lab/rawhad/sdg-ki-eval/data/eshwar_datasets/`
 - Eval set available: `eval_rag_knowledge.jsonl`
 - opt_step=1 loss=0.1385, 26 total steps
 - Checkpoints: `output_run_16/step_{N}/` (steps 10, 20, final at 26)
+
+## 2026-08-02 — Phase 1: FSDP backend for gpt-oss-20b (verified)
+
+### Problem
+DDP+bnb on openai/gpt-oss-20b OOM'd (~250 GB/rank needed vs 80 GB). Moved trainer to MCore-native FSDP (torch AdamW, no bnb, 4 trainers, GRAD_ACCUM_STEPS=32).
+
+### Implementation (TRAINER_BACKEND=fsdp, default stays ddp)
+- `trainer.py`: wrap via `TorchFullyShardedDataParallel(config, DistributedDataParallelConfig(use_distributed_optimizer=False), model)`; `finish_grad_sync()` before clip; torch AdamW instead of bnb.
+- Weight sync became collective: FSDP export/gather passes are NCCL collectives on the 4-rank mesh → **all ranks** must enter them; rank 0 keeps/sends/writes.
+  - vLLM sync: rank 0 runs existing path; ranks 1-3 consume the same export passes.
+  - logprob sync: new `gather_raw_params_iter()` (raw `model.parameters()` order, `param.full_tensor()` lockstep, rank 0 broadcasts on the separate 2-rank logprob NCCL group). Server code unchanged (order-indexed protocol).
+  - `save_hf_checkpoint(..., rank=rank)`: export on all ranks, file writes only on rank 0.
+- `train_full.sh`: `-e TRAINER_BACKEND` passthrough.
+
+### Blockers found & fixed (important for future runs)
+1. **Bridge deadlock was a misuse, not a bug**: `bridge.export_hf_weights` already all-gathers DTensors per-tensor (`uneven_dtensor_to_full_tensor`); it's a collective — must be called on ALL ranks ("All ranks get full tensors").
+2. **`fully_shard` replaces module classes** (FSDPColumnParallelLinear etc.) → bridge `_detect_parallelism_type` fails on unknown names. Fix: `register_fsdp_module_mappings()` (model_utils.py) registers the 5 FSDP-prefixed classes into `AutoMapping`.
+3. **Qwen3 tied-embedding + FSDP gap (MCore bug, production-safe)**: tied output_layer owns no weight; `shared_embedding_or_output_weight()` returns the at-rest embedding DTensor → native matmul gets mixed Tensor/DTensor. gpt-oss-20b (untied) unaffected. Workaround for tests: patch `GPTModel.shared_embedding_or_output_weight` to `full_tensor()`.
+4. DDP on 20b impossible even for fwd-only: `_ddp_init_helper` eagerly allocates 38.96 GB fp32 grad buffer.
+
+### Verification (T1 + T1b, all PASSED)
+- T1 (`test_fsdp_t1.py`, gpt-oss-20b, 4 ranks): FSDP wrap → 1 micro-step (no_sync+finish_grad_sync+AdamW) → collective `save_hf_checkpoint` → export-pass hashes == checkpoint hashes (6 tensors) → raw-order gather == checkpoint embed/lm_head (34 hashes) → **peak 53.51 GB/rank**.
+- T1b (`test_ddp_fsdp_parity.py`, Qwen3-0.6B, 4 ranks): DDP vs FSDP forward loss **bit-identical (diff=0.0)**.
+- Launchers: `test_fsdp_t1.sh` / `test_ddp_fsdp_parity.sh` (podman, HF_CACHE=/mnt/nvme5n1/rohan_patched_ckpts/hf-cache, no `:z` on cache mounts).
+
+### Next
+- T2 smoke: full loop 1 epoch (vLLM ×2 GPUs + FSDP trainer ×4 + logprob ×1), SAVE_EVERY=9999, wandb off, GPUs 0-1/2-5/6. Validates NCCL group interleaving (FSDP mesh + vLLM group + logprob group) in production flow.
+- Then full 10-epoch gpt-oss-20b run.
+
+## 2026-08-02 — T2 smoke PASSED (gpt-oss-20b, FSDP + bf16 vLLM)
+
+### vLLM bf16 fix (unblocks weight updates on gpt-oss)
+- `openai/gpt-oss-20b` config.json declares `quantization_config.quant_method=mxfp4` → vLLM 0.23 auto-serves `gpt_oss_mxfp4` and `_load_weights_mxfp4` rejects bf16 HF tensors: `/update_weights` → 500 `KeyError: 'layers.0.mlp.experts.w13_weight'`.
+- Fix: serve **`unsloth/gpt-oss-20b-BF16`** (pure bf16 conversion, no `quantization_config` in config.json, same arch/names, untied). Trainer still loads `openai/gpt-oss-20b` (identical weights).
+- `train_full.sh`: `--gpu-memory-utilization 0.5 → 0.8` (bf16 weights = 42GB vs 13.6GB mxfp4; 0.8 → 65GB budget, fits).
+- Download: `HF_HOME=/mnt/nvme5n1/rohan_patched_ckpts/hf-cache huggingface-cli download unsloth/gpt-oss-20b-BF16` (~42GB, cached at `models--unsloth--gpt-oss-20b-BF16`).
+- Earlier fix in this run series: `start_vllm_patched.py` no-ops `initialize_layerwise_reload` on both `reload.layerwise` and `reload` bindings (`start_weight_update` was 500 `w13_weight already exists`).
+
+### T2 result (2 optimizer steps, 64-example slice, 1 epoch)
+- Layout `train_full.sh 0 4 2`: vLLM GPUs 0-1 (ports 8001/8101, 65.6GB ea), trainers 2-5 (~70-75GB), logprob GPU 6.
+- `TRAINER_BACKEND=fsdp HINDSIGHT_FIELD=user_response NUM_EPOCHS=1 GRAD_ACCUM_STEPS=32 SAVE_EVERY=9999 WANDB_MODE=disabled OUTPUT_DIR=/mnt/nvme5n1/rohan_patched_ckpts/sdft_gptoss_20b_smoke`
+- opt_step=1 loss=2.07, opt_step=2 loss=1.90; epoch avg_loss 0.97-1.09 across ranks.
+- **Both vLLM syncs (steps 1+2) succeeded**: `POST /start_weight_update`/`/update_weights`/`/finish_weight_update` all 200 OK on 8001 and 8101. Logprob sync OK. No deadlocks — NCCL group interleaving validated end-to-end.
+- Checkpoints: `epoch_1` + `step_2` (411 tensors each) → `/mnt/nvme5n1/rohan_patched_ckpts/sdft_gptoss_20b_smoke/`.
+- Timing step 2: total=100.5s (gen=42.0 teacher=29.4 student=11.9 loss_bwd=6.1 optim=1.8 wsync=9.2).
+- Logs: `logs/training.log`, `logs/t2_bf16.log`, `logs/vllm_{0,1}.log`.
+
+### Next
+- Full 10-epoch gpt-oss-20b run (same env, full train set `data/maas_raft_v3.1/train_sdft.jsonl`), then eval checkpoints on host via transformers.

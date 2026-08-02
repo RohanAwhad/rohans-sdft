@@ -188,8 +188,23 @@ def sync_weights_to_vllm(
     model: torch.nn.Module,
     device: torch.device,
     model_update_groups: list,
+    rank: int = 0,
 ) -> None:
-    """Push model weights to all vLLM instances sequentially."""
-    for url, group in zip(VLLM_BASE_URLS, model_update_groups):
-        _sync_weights_to_single_vllm(model, device, url, group)
-    logger.info(f"Weights synced to all {len(model_update_groups)} vLLM instances.")
+    """Push model weights to all vLLM instances sequentially.
+
+    Under FSDP the HF-format export passes are collectives — non-zero ranks
+    must consume them in lockstep with rank 0 (which does the actual NCCL
+    send + HTTP orchestration). Under DDP only rank 0 runs.
+    """
+    if rank == 0:
+        for url, group in zip(VLLM_BASE_URLS, model_update_groups):
+            _sync_weights_to_single_vllm(model, device, url, group)
+        logger.info(f"Weights synced to all {len(model_update_groups)} vLLM instances.")
+        return
+
+    # Consume the same export passes rank 0 performs: one metadata pass per
+    # instance (cached after the first call) + one send-pass export each.
+    for _ in VLLM_BASE_URLS:
+        get_hf_weight_metadata(model)
+        for _ in export_hf_weights_iter(model):
+            pass
