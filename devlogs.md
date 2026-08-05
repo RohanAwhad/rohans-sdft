@@ -238,6 +238,23 @@ All at: `/home/lab/rawhad/sdg-ki-eval/data/eshwar_datasets/`
 - **`HINDSIGHT_FIELD` env var**: configurable collator field (default `enriched_user_response`, set to `user_response` for non-enriched data)
 - **vLLM max-model-len**: 4096→8192 (sdg_hub prompts can be ~2100 tokens)
 
+## 2026-08-03 - Fixed 8192-Token FSDP Reproduction
+
+### Goal
+Reproduce the gpt-oss-20b backward OOM with a deterministic 2048-token prompt and 6144-token completion.
+
+### Result
+- Added `megatron_trainer/repro_fixed_8192.py` with four-rank MCore FSDP, Adam state warmup, and eight fixed accumulation microsteps.
+- All eight reverse-KL backward passes completed on four H100 80GB GPUs.
+- Peak allocated memory was 71.66 GiB per rank; recompute was active (`full/uniform/1`).
+- Student logits are fp32 with shape `(1, 8192, 201088)`.
+- The earlier 6.14 GiB OOM came from allowing an 8192-token completion in addition to the prompt, not an 8192-token total sequence.
+
+### Decision
+- Cap training sequences at 8192 total tokens: 2048 prompt + 6144 generation.
+- Validate the cap in config so overlength launches fail before model loading.
+- CP=2 is not required for this sequence length.
+
 ### Run 15 (sdg_hub non-enriched, 2 epochs, SAVE_EVERY=10)
 - 3000 samples, `sdg_hub_sft_sdft.jsonl` (no `enriched_user_response`)
 - `HINDSIGHT_FIELD=user_response` (teacher sees correct answer only, no docs)
@@ -297,3 +314,179 @@ DDP+bnb on openai/gpt-oss-20b OOM'd (~250 GB/rank needed vs 80 GB). Moved traine
 
 ### Next
 - Full 10-epoch gpt-oss-20b run (same env, full train set `data/maas_raft_v3.1/train_sdft.jsonl`), then eval checkpoints on host via transformers.
+
+## 2026-08-04 - Smoke 8192-fix: v1 OOM (fragmentation) → v2 PASSED; run 21 launched
+
+### Context
+- Reproduced the exact t2 smoke shape (64-sample `smoke_sdft.jsonl`, `GRAD_ACCUM_STEPS=32`, 4-rank FSDP, `unsloth/gpt-oss-20b-BF16`, 1 epoch = 2 optimizer steps) with the 8192-total cap fix (2048 prompt + 6144 gen).
+
+### Smoke v1 (OOM, `logs/smoke_8192fix.log`)
+- Step 1 passed (226.6s), step 2 OOM'd at `scaled_loss.backward()` (trainer.py:432).
+- `Tried to allocate 4.60 GiB`, 4.24 GiB free, 74.93 in use; 65.15 allocated + **5.75 reserved-but-unallocated** (fragmentation).
+- Needed 69.75 GiB < 71.66 GiB repro peak → NOT a capacity problem; allocator fragmentation from variable-length completions.
+- Cause: `PYTORCH_CUDA_ALLOC_CONF` was empty (train_full.sh:100 defaults it empty); previous smokes passed it explicitly.
+
+### Smoke v2 (PASSED, `logs/smoke_8192fix_v2.log`)
+- Only change: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+- step 1: 191.9s, loss=0.2483, comp_len=1954 · step 2: 277.0s, loss=0.2257, **comp_len=6143 (worst case exercised)**.
+- Epoch 1 done, `epoch_1` ckpt saved (411 tensors). `expandable_segments` is REQUIRED for this stack — treat as a permanent launch default.
+
+### Run 21 (launched 2026-08-04, 10 epochs, in progress)
+- Full train set `data/maas_raft_v3.1/train_sdft.jsonl` (399 samples → 12 steps/epoch → 120 steps), `SAVE_EVERY=12` (= every epoch) + epoch-end ckpts.
+- Env: run 20 base + `MAX_TOTAL_LEN=8192 GEN_MAX_NEW_TOKENS=6144 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; `OUTPUT_DIR=/mnt/nvme5n1/rohan_patched_ckpts/sdft_gptoss_20b_run21`; WANDB run 21 (amortize-maas).
+- Expected ~8-12h (run 20 was 3h40m at 2048-gen; 6144-gen steps measured 200-280s).
+
+## Known Issues / Landmines (tracked, NOT yet fixed)
+
+Consolidated list of latent issues that will break the trainer under dataset/config changes. Fix later.
+
+| # | Issue | Where | Bites when |
+|---|-------|-------|------------|
+| 1 | **vLLM prompt not pre-truncated**: collator passes full prompt text to vLLM gen; truncation to `STUDENT_MAX_PROMPT_LEN` only happens in trainer forwards (trainer.py:153, 403). vLLM rejects prompt > `max-model-len − max_tokens` (8192−6144=2048). | collator.py / rag_env.py | Dataset with prompts > 2048 tok |
+| 2 | **Logprob server has no length guard**: bounded only by trainer-side caps; a too-long request OOMs it silently. | logprob_server.py | Any change in teacher-side caps |
+| 3 | **Dataset field contract unvalidated**: collator needs `prompt`/`user_response`/`enriched_user_response` (or `HINDSIGHT_FIELD` override); wrong schema = KeyError 8h into a run. | collator.py:83-115 | Switching datasets |
+| 4 | **Dataset size % GRAD_ACCUM_STEPS silently dropped** (`drop_last=True`, steps_per_epoch = len//accum). No warning. | trainer.py:246 | Small/new datasets |
+| 5 | **No `MAX_STEPS` support** — 2-step smoke on real data requires a code patch. | trainer.py:295-302 | Smoke on non-64-sample data |
+| 6 | **Node-specific paths hardcoded**: HF cache (`/mnt/nvme5n1/rohan_patched_ckpts/hf-cache`), data (`/workspace/data/maas_raft_v3.1/`, `/home/lab/rawhad/...`). | train_full.sh, config.py, AGENTS.md | Running on another node |
+| 7 | **`cp_test.py` lives only in /tmp** — CP experiment not reproducible from repo. | — | Revisiting CP work |
+| 8 | **Recompute ON/OFF A/B never run** — recompute proven active by inference (config_identity=True + fits), not by direct comparison. | — | If long-seq headroom ever questioned |
+| 9 | **No config audit dump per run** — effective limits only recoverable from logs/env, not a file in OUTPUT_DIR. | trainer.py | Comparing runs |
+| 10 | **`recompute_granularity` on provider is a no-op** — must be set on `model.config` (already the case; comment in model_utils.py). Trap for future edits. | model_utils.py:118-120 | Refactors touching load_model |
+| 11 | **Per-request multi-GB python allocations stall loopback throughput**: zero-fill runs under the GIL and starves the peer's send loop (measured: 10.7 GB/s -> 1.4 GB/s). Affects logprob_client.py:67 (`np.frombuffer(...).copy()`). Preallocate + reuse buffers for big transfers. | logprob_client.py | Any large-response HTTP client |
+
+## 2026-08-04 - Teacher logprobs bottleneck: HTTP stack, not compute (TCP queue fix validated)
+
+### Symptom
+- Run 21 (10 epochs) stopped early: `teacher=135-153s` of every ~330s step (~43%). TIMING breakdown (steps 3-7): gen ~120s, teacher ~135-153s, student ~40-60s, loss_bwd ~13s, optim ~2-3s, wsync ~9s.
+- Teacher path: 32 requests/step (4 DP ranks x 8 microsteps), each response = (C,V) fp16, up to 6144x201088x2B = 2.47 GB.
+
+### Investigation timeline (hypotheses tested and killed)
+1. **Blamed server compute** (32 serial batch=1 forwards). Challenged: student fwd+bwd is ~5s/microstep on 4-rank FSDP.
+2. **Measured single-GPU forward** (fwd_bench.py, 8192 tok, gpt-oss-20b): **0.19s**, peak 58.6 GB, fp32 log_softmax over V=201088 ~0.00s. → compute is NOT the bottleneck.
+3. **Benchmarked transports** at real payload (hbench.py, 2.47 GB response):
+   - Full HTTP stack (uvicorn+starlette+requests): **0.35-0.5 GB/s** → 6.57s per response
+   - Raw loopback TCP: **9.4-10.7 GB/s** → 0.24s per response (20-25x faster)
+   - Client `np.frombuffer(resp.content).copy()`: **1.38s** (1.8 GB/s)
+4. **Per-request production budget**: compute 0.19s (2%) + HTTP transfer ~5s (75%) + numpy parse 1.4s (18%). The python HTTP stack is the bottleneck, not the forward and not the network.
+5. **Git history**: the batch endpoint existed (`8d2659c`) and was reverted (`1b55cae`, "slower due to padding overhead ~15s vs ~10s"). Revert was right (batching didn't help) but the diagnosis was wrong — batching changes compute, not transport.
+6. **NCCL transport considered and rejected**: needs 4 comm channels or rank-tagged protocol (vLLM deps); saves transport but the TCP route is 10x less complexity.
+
+### TCP+queue experiments (validated the fix)
+Play server: `job queue -> GPU worker (compute) -> chunked send`. Client: 4 threads x 8 sequential requests (mirrors 4 DP ranks x 8 microsteps), worst-case C=6144.
+
+| Variant | Wall (32 x 2.47 GB) | Effective |
+|---|---|---|
+| HTTP baseline (matches production) | 226.2s | 0.35 GB/s |
+| TCP queue, serial worker compute+send | 52.4s | 1.51 GB/s (4.3x) |
+| TCP queue, per-request sender threads | 42.1s | 1.88 GB/s (5.4x) |
+| TCP queue, send-pool sweep (1/4/8 x 1/4/16MB) | 41-47s | ~1.8 GB/s — pool/chunk size DON'T matter |
+| TCP queue, mixed lengths (real step shape) | 22.1s | 1.90 GB/s (6.5-10x) |
+
+### Root cause of residual slowness (why not 10 GB/s)
+- `iso_compare.py` (client recv's 1MB chunks, no big allocation): **10.7 GB/s** on py3.9, py3.12, and container — identical in all.
+- `iso_send.py` (client allocates `bytearray(2.47GB)` per request): **1.4-1.9 GB/s**.
+- **Per-request multi-GB zero-fill (calloc) runs under the GIL and stalls the peer's send loop** — kills the pipeline. This is why play runs capped at ~1.9 GB/s regardless of threads/queues.
+- Preallocate+reuse recv buffer: recovered to **3.4-3.5 GB/s**; `recv(1MB)`+discard was fastest (10.7).
+- Note: production client `np.frombuffer(resp.content).copy()` (logprob_client.py:67) has the same per-request multi-GB alloc pattern — 1.38s/req measured.
+- Also noted: python interpreter version does NOT matter (3.9 host == 3.12 container == ~10.7 GB/s in the clean test).
+
+### Hardware ceiling (final numbers, recv_variants.py + memcpy bench)
+Single-threaded memory bandwidth on this box is the real ceiling, NOT the socket:
+- `memcpy(2.47GB)`: **1.56 GB/s** (1.59s)
+- `bytearray(2.47GB)` zero-fill: **2.66 GB/s** (0.93s) — the per-request poison in play/prod clients
+- recv into preallocated cold 2.47GB buffer (recv_into full-len, or recv+slice-assign): **~3.4-3.5 GB/s** (0.70s/req)
+- recv 1MB chunks + discard: **10.7 GB/s** (1MB temp stays cache-hot, never touches cold DRAM)
+- → realistic TCP transfer target: **~0.7s per 2.47GB response** (vs 6.6s HTTP). 10 GB/s is unreachable for transfers that must land in a big buffer.
+- Optional further wins (not planned): parallel recv threads into disjoint buffer regions (memory BW scales with threads), recv directly into a pinned tensor for fast async H2D.
+
+### Decision (validated, pending implementation)
+- **TCP + queue replaces HTTP `/logprobs`**; FastAPI stays for `/health` + weight-sync handshake (unchanged NCCL weight sync).
+- Protocol: length-prefixed binary, keepalive per rank: `[int32 prompt_len][int32 seq_len][int32 ids]` → `[int32 C][fp16 C*V]`.
+- Server: bounded job queue + single GPU worker (serial compute + chunked send); 4 connections = 4 ranks.
+- Client: one persistent socket per rank; **preallocated recv buffer reused across microsteps** (no per-request multi-GB alloc), `torch.frombuffer` direct to GPU.
+- Expected: teacher 140s -> **~25-35s** (server: 32 x (0.19 compute + 0.70 send) serial ≈ 28s; compute hides under sends); step 330s -> ~220-240s; run 21 ~11h -> ~7.5-8h. Plus client parse 1.4s/req -> ~0.
+
+### Artifacts
+`/tmp/opencode/`: `hbench.py` (transport rates), `fwd_bench.py` (forward timing), `play_tcp_server.py`/`play_tcp_server_v3.py` (queue server), `play_tcp_client.py` (concurrent client), `iso_send.py`/`iso_compare.py` (isolation), `recv_variants.py`, `bench_out.txt`.
+
+## 2026-08-04 - TCP logprob path IMPLEMENTED + smoke PASSED (`logs/smoke_tcp_v1.log`)
+
+### Implementation (per-connection handler threads + model_lock around compute only)
+- `config.py`: `LOGPROB_TCP_PORT` (default 8011). HTTP 8010 stays for `/health` + weight-sync handshake.
+- `logprob_server.py`: extracted `compute_logprobs_fp16()` (fp16 cast on GPU before D2H); TCP listener thread + one handler thread per connection; `model_lock` wraps compute only — 0.7s sends happen outside the lock so other ranks' forwards overlap. Zero-copy send: `sendall(memoryview(lp.numpy()).cast("B"))`. HTTP `/logprobs` kept as debug fallback.
+- `logprob_client.py`: `request_teacher_log_probs_tcp()` — drop-in for the HTTP fn; lazy persistent per-rank socket (blocking, fail-fast on server death); ONE preallocated 2.47GB `bytearray` recv buffer reused across all microsteps; `recv_into` full-len loop; `torch.frombuffer(memoryview(buf)[:nbytes])` zero-copy → single H2D.
+- `trainer.py`: import + call-site swap only (line ~405). `train_full.sh`: `LOGPROB_TCP_PORT` env passthrough.
+
+### Smoke results (2 steps, same shape as v2: 64-sample, 4-rank FSDP, 8192-total)
+| | v2 (HTTP) | TCP |
+|---|---|---|
+| step 1 teacher | ~140s | **30.4s** (total 177.5s, comp_len=1628, loss=0.2346) |
+| step 2 teacher (worst case comp_len=6144, 32×2.47GB) | ~150s | **53.9s** (total 225.0s vs 277.0s, loss=0.2097) |
+- Losses same sane range as v2 (rollouts differ — vLLM not deterministic across restarts). Both ckpts saved (411 tensors), "Training complete."
+- Worst-case teacher = 1.68s/req (not the ~0.9s estimate): 4 concurrent 2.47GB sends share the ~3.5 GB/s memory-write ceiling, plus client H2D (~0.3-0.5s pageable, fp16→bf16). Matches the known hardware ceiling — further squeezing = pinned recv buffer + async H2D (not done).
+- Run 21 projection: step ~330s → ~225s worst case → 120 steps ≈ **6.5-7.5h** (was ~11h).
+
+## 2026-08-04 - Chunked LM head IMPLEMENTED + smoke PASSED (run-22 OOM fix)
+
+### Problem
+Run 22 crashed at step 34: cuDNN workspace cudaMalloc OOM at 74-78 GiB/79.17 GiB during backward (recompute re-forward). Fix: remove the ~13 GB student-side transient at the loss+backward peak.
+
+### Final design (chunked_head.py + trainer.py)
+- Hook via MCore `output_processor` (gpt_model.py:690, all-kwargs) runs the LM head ONCE on completion hidden states `hidden[prompt_len-1 : prompt_len+C-1]` → (C, V) bf16 (skips the prompt-prefix rows, saves ~25% head flops).
+- `ChunkedRowKL` (autograd.Function): loss math chunked per row-chunk (128 rows) over the full vocab with an **analytic backward** `grad_z = p·(A − K_row)/C` — the exact total derivative (a detached-denominator softmax would leave a spurious `+p` error). Retains only per-row scalars — kills the old (C, V) fp32 log-softmax retention (~4.9 GB at C=6144).
+- Parity: CPU tests — loss exact (0.0 diff), gradients match the old autograd path to the bf16 rounding floor (~1.5e-3 rel at V=201088). play.py.
+
+### Smoke results (64-sample, 4-rank FSDP, unsloth/gpt-oss-20b-BF16, logs/smoke_chunked.log)
+| | smoke_tcp (old path) | chunked head |
+|---|---|---|
+| step 1 | loss=0.2346, comp_len=1628, 177.5s | **loss=0.1834, comp_len=1377, 149.2s** |
+| step 2 (worst case C=6144) | loss=0.2097, 225.0s | **loss=0.1772, 226.4s, NO OOM** |
+| trainer peak mem | 74-78 GiB (crash zone) | **58-66 GiB** |
+- Losses in the sane range (rollouts differ per run — vLLM nondeterministic); per-rank epoch avgs 0.13-0.28. Both ckpts saved (411 tensors), "Training complete."
+
+### Gotchas discovered (the hard way — 4 dead-ends)
+1. **FSDPColumnParallelLinear ALWAYS returns the gathered full-vocab logits** — `runtime_gather_output=False` is ignored (probe-verified). Memory savings must come from the loss side, not from sharding the head GEMM.
+2. **Calling the FSDP-wrapped output layer in a loop deadlocks**: each call issues collectives on the default group; inter-rank drift across 48 sync points = collective mismatch (py-spy: stuck in `linear_with_grad_accumulation_and_async_allreduce`; 100%-GPU NCCL spin). Single call per microstep only.
+3. **Cross-rank vocab-shard coupling is impossible with per-rank data**: each rank computes its own data's shard columns; other ranks' shards belong to DIFFERENT rows. Any cross-rank loss reduce (NCCL: silent hang; gloo: loud `collective mismatch`) mixes rows. The loss must be full-vocab per rank, computed locally. (The probe validated shard-loss math only when ALL ranks process IDENTICAL data — never true in the trainer.)
+4. **Local-max mixing**: a chunked logsumexp whose terms use different per-rank maxes is not shift-invariant (`Σ_r Σ_local exp(z−m_r)` ≠ global) — needs a global max reduce first. Caught by a 4-shard CPU simulation (0.84 loss error). Only bites when shard maxes differ (identical-data tests miss it).
+- bf16 inputs: autograd bf16-rounds grads at `.float()` cast boundaries — the analytic fp32 backward is strictly MORE accurate; parity tolerances must use the reference's own rounding floor (~1e-2 rel max).
+
+### Files
+- `megatron_trainer/chunked_head.py` (new): ChunkedRowKL + make_kl_processor (ROWS chunked 128, KL_CHUNK 2048)
+- `megatron_trainer/trainer.py`: forward_student + compute_kl replaced by the hook; rest unchanged
+- `play.py`: parity suite (4 cases, incl. production V=201088)
+
+### Next
+- Launch the real run (run-21/22 base) with the chunked head — expected to complete without the cuDNN OOM; verify loss curve matches prior runs (~0.19-0.27).
+
+## 2026-08-04 - Loss 0.18-vs-0.23 investigation: code exonerated, draws explain it
+
+### Trigger
+Chunked-head smokes landed at step-1 loss ~0.17-0.18 while four old-path runs clustered at 0.23-0.27 — user rightly challenged the "rollout nondeterminism" hand-wave.
+
+### Historical step-1 losses (all same data, same base checkpoint)
+| run | step1 loss | step2 loss |
+|---|---|---|
+| smoke 8192fix v2 (old path) | 0.2483 (C=1954) | 0.2257 |
+| smoke_tcp (old path) | 0.2346 (C=1628) | 0.2097 |
+| run 21 (old path) | 0.2505 (C=2485) | — |
+| run 22 (old path) | 0.2664 (C=1356) | 0.1999 |
+| smoke_chunked (new) | 0.1834 (C=1377) | 0.1772 |
+| smoke_chunked2 (new) | 0.1680 (C=1700) | 0.1079 |
+| smoke_dual (new, debug log) | 0.1717 (C=1998) | 0.1338 |
+
+Two tight clusters 0.05-0.08 apart — sampling-luck alone strained. Evidence chain:
+
+1. **Replay** (`/tmp/opencode/replay_loss.py`, 1 GPU, real items from smoke_sdft.jsonl): old full-forward path vs the new hook path on identical tensors → loss diff **~1e-6** across items. Same-GPU; the smokes always ran the same GPU layout (vLLM 0-1, trainers 2-5, logprob 6).
+2. **Per-item loss sensitivity** (16 items, fixed completion): losses 0.98-2.65, **std 0.56** — an item's loss swings ±0.5 with the completion text.
+3. **Live dual-loss log** (temporary `[DUAL]` debug in chunked_head.py, smoke_dual run): for every real sampled microstep (C=552..6144), `loss_new` vs old compute_kl math on the same z/teacher → **diff ≤ 1.2e-7** (most 0.0). The two loss computations are numerically identical on the actual data.
+4. **Per-item spread inside one real step**: 0.026 (C=6144) to 0.286 (C=755) — 10x spread, length-correlated (longer completions → lower per-token KL). The step-1 mean over 32 such items is very draw-sensitive.
+
+### Conclusion
+- Loss math: old and new identical to 1e-7 on the same completions (live-verified).
+- The 0.17-0.18 vs 0.23-0.27 cluster shift = which 32 items land in step 1 (unseeded DataLoader shuffle) × which completions vLLM samples (temp 0.7, unseeded) — NOT the code, NOT GPUs, NOT fp errors (same GPU layout; fp noise ~1e-7).
+- Correctness of the chunked head stands on: parity suite (play.py), live dual-loss (1e-7), probe A/B (loss + grads), 3 clean smokes incl. C=6144 worst case at 58-66 GiB peak.
+
+### Pending
+- Remove the temporary `[DUAL]` debug block from `megatron_trainer/chunked_head.py` before the real run.
+- Launch the real 10-epoch run (run-21/22 base); watch the loss curve vs historical (~0.19-0.27 decaying) and survival past step 34 (run 22's crash point).

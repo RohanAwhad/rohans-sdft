@@ -1,0 +1,5 @@
+logs/
+wandb/
+__pycache__/
+*.pyc
+data/analyze_research/
