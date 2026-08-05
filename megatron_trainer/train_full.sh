@@ -98,6 +98,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e LEARNING_RATE="${LEARNING_RATE:-5e-5}" \
     -e STUDENT_MAX_PROMPT_LEN="${STUDENT_MAX_PROMPT_LEN:-2048}" \
     -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
+    -e TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-}" \
     -e MAX_TOTAL_LEN="${MAX_TOTAL_LEN:-8192}" \
     -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-}" \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
@@ -110,6 +111,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.netrc:/root/.netrc:ro" \
     -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
+    -v /mnt/nvme5n1/rohan_patched_ckpts/triton_cache:/root/.triton:z \
     -w /workspace \
     nvcr.io/nvidia/nemo:26.06 \
     bash -c "
@@ -118,6 +120,7 @@ pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
 pip uninstall -y triton_kernels 2>/dev/null || true
 pip install --quiet "humming-kernels[cu13]==0.1.4" 2>/dev/null
 pip install --quiet litellm google-cloud-aiplatform tenacity fastapi uvicorn 2>/dev/null
+pip install --quiet kernels==0.14.1 2>/dev/null
 
 NUM_GPUS=\$(nvidia-smi -L | wc -l)
 LOGPROB_GPU=\$((NUM_GPUS - 1))

@@ -5,6 +5,13 @@ import os
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B")
 HF_MODEL_PATH = os.environ.get("HF_MODEL_PATH", MODEL_NAME)
 
+# Optional frozen teacher. When set, the logprob server loads THIS model via
+# plain HF transformers (mxfp4 checkpoints like openai/gpt-oss-120b auto-load
+# in 4-bit) and the per-step student->teacher weight sync (NCCL + EMA) is
+# disabled. When empty, current behavior: teacher = student (HF_MODEL_PATH,
+# EMA-blended each step).
+TEACHER_MODEL_PATH = os.environ.get("TEACHER_MODEL_PATH", "")
+
 # gpt-oss models use a channel-based chat protocol (analysis/commentary/final).
 # When True, the collator appends an explicit analysis-channel suffix to
 # generation prompts and vLLM must return special tokens (skip_special_tokens=False).

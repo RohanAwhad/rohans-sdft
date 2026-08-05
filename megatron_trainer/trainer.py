@@ -46,6 +46,7 @@ from megatron_trainer.config import (
     SAVE_EVERY,
     STUDENT_MAX_PROMPT_LEN,
     TEACHER_MAX_PROMPT_LEN,
+    TEACHER_MODEL_PATH,
     TRAINER_BACKEND,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
@@ -190,9 +191,12 @@ def train() -> None:
 
         logger.info("Waiting for logprob server...")
         wait_for_logprob_server()
-        logger.info("Initializing logprob weight transfer engine...")
-        logprob_comm = init_logprob_weight_engine(device)
-        logger.info("Logprob weight engine ready.")
+        # External frozen teacher (TEACHER_MODEL_PATH set): no NCCL weight sync —
+        # the teacher keeps its downloaded weights.
+        if not TEACHER_MODEL_PATH:
+            logger.info("Initializing logprob weight transfer engine...")
+            logprob_comm = init_logprob_weight_engine(device)
+            logger.info("Logprob weight engine ready.")
 
     # Barrier: all ranks wait for rank 0 to finish setup
     dist.barrier()
@@ -426,7 +430,8 @@ def train() -> None:
             #      passes are collectives; rank 0 only for DDP) ----
             if rank == 0 or TRAINER_BACKEND == "fsdp":
                 t0 = time.monotonic()
-                sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
+                if not TEACHER_MODEL_PATH:
+                    sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
                 sync_weights_to_vllm(model, device, vllm_group, rank=rank)
                 t_weight_sync = time.monotonic() - t0
 
