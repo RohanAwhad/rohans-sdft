@@ -5,6 +5,11 @@ import os
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B")
 HF_MODEL_PATH = os.environ.get("HF_MODEL_PATH", MODEL_NAME)
 
+# gpt-oss models use a channel-based chat protocol (analysis/commentary/final).
+# When True, the collator appends an explicit analysis-channel suffix to
+# generation prompts and vLLM must return special tokens (skip_special_tokens=False).
+IS_GPT_OSS = "gpt-oss" in MODEL_NAME.lower()
+
 # GPU assignment (physical GPU IDs, used in CUDA_VISIBLE_DEVICES)
 GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))
@@ -22,12 +27,21 @@ MAX_GRAD_NORM = 10.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
 STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))
 TEACHER_MAX_PROMPT_LEN = int(os.environ.get("TEACHER_MAX_PROMPT_LEN", "2048"))
+MAX_TOTAL_LEN = int(os.environ.get("MAX_TOTAL_LEN", "8192"))
 
 # Generation (vLLM rollout)
 THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "512"))
-GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
+GEN_MAX_NEW_TOKENS = int(
+    os.environ.get("GEN_MAX_NEW_TOKENS", str(MAX_TOTAL_LEN - STUDENT_MAX_PROMPT_LEN))
+)
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
+
+if STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS > MAX_TOTAL_LEN:
+    raise ValueError(
+        "STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS must be <= MAX_TOTAL_LEN "
+        f"({STUDENT_MAX_PROMPT_LEN} + {GEN_MAX_NEW_TOKENS} > {MAX_TOTAL_LEN})"
+    )
 
 # vLLM server
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
@@ -45,6 +59,8 @@ VLLM_BASE_URLS: list[str] = (
 # Logprob server (HTTP)
 LOGPROB_PORT = int(os.environ.get("LOGPROB_PORT", "8010"))
 LOGPROB_BASE_URL = f"http://localhost:{LOGPROB_PORT}"
+# Logprob server (TCP — teacher logprob data plane; HTTP stays for health/weight-sync)
+LOGPROB_TCP_PORT = int(os.environ.get("LOGPROB_TCP_PORT", "8011"))
 
 # Dataset
 TRAIN_DATA_PATH = os.environ.get(

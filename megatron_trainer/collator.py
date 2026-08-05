@@ -10,6 +10,24 @@ from typing import Any, Dict, List
 
 from transformers import PreTrainedTokenizerBase
 
+from megatron_trainer.config import IS_GPT_OSS
+
+
+ANALYSIS_CHANNEL_SUFFIX = "<|channel|>analysis<|message|>"
+
+
+def _append_analysis_channel(text: str) -> str:
+    """Force gpt-oss generation into the analysis (thinking) channel.
+
+    The gpt-oss chat template ends the generation prompt on a bare
+    '<|start|>assistant' and the model picks a channel on its own; an explicit
+    analysis channel start makes it deterministic. Trailing whitespace is
+    stripped so the suffix attaches directly to the assistant start token.
+    """
+    if not text.rstrip().endswith(ANALYSIS_CHANNEL_SUFFIX):
+        return text.rstrip() + ANALYSIS_CHANNEL_SUFFIX
+    return text
+
 
 HINDSIGHT_TEMPLATES = {
     "user_response": (
@@ -76,6 +94,8 @@ class SDFTCollator:
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
+            if IS_GPT_OSS:
+                p_text = _append_analysis_channel(p_text)
             prompt_texts.append(p_text)
 
             # --- Teacher prompt (x, o) — append privileged info ---
@@ -106,6 +126,8 @@ class SDFTCollator:
                     add_generation_prompt=True,
                     enable_thinking=False,
                 )
+                if IS_GPT_OSS:
+                    xo_text = _append_analysis_channel(xo_text)
                 conditional_texts.append(xo_text)
 
         return {

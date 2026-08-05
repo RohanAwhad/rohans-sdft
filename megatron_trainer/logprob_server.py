@@ -1,18 +1,23 @@
-"""Teacher logprob server — HTTP (FastAPI) version.
+"""Teacher logprob server — TCP data plane + HTTP control plane.
 
 Standalone process with its own torch.distributed world_size=1 (for Megatron
-model loading only). Serves teacher log-probs via HTTP and accepts weight
-sync via PyNcclCommunicator (initialized by trainer via HTTP handshake).
+model loading only). Serves teacher log-probs via a persistent-TCP binary
+protocol (fast path, replaces the HTTP /logprobs data plane) and accepts
+weight sync via PyNcclCommunicator (initialized by trainer via HTTP handshake).
 
 Endpoints:
+    TCP  LOGPROB_TCP_PORT  — teacher log-probs (length-prefixed binary, keepalive)
+                             Request:  [int32 prompt_len][int32 seq_len][int32 x seq_len ids]
+                             Response: [int32 completion_len][fp16 x C*V logprobs]
     GET  /health          — readiness probe
-    POST /logprobs        — compute log-probs, return binary (float16)
-    POST /logprobs_batch  — batched log-probs, return binary (length-prefixed)
+    POST /logprobs        — compute log-probs, return binary (float16) [debug fallback]
+    POST /logprobs_batch  — batched log-probs, return binary (length-prefixed) [unused]
     POST /init_weight_sync — NCCL communicator init handshake
     POST /sync_weights     — receive weights via NCCL + EMA blend
 """
 
 import os
+import socket
 import struct
 import threading
 
@@ -25,7 +30,7 @@ from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel
 
-from megatron_trainer.config import EMA_ALPHA, HF_MODEL_PATH, LOGPROB_PORT
+from megatron_trainer.config import EMA_ALPHA, HF_MODEL_PATH, LOGPROB_PORT, LOGPROB_TCP_PORT
 from megatron_trainer.model_utils import init_distributed_standalone, load_model
 
 DEVICE = torch.device("cuda:0")
@@ -71,6 +76,75 @@ def main() -> None:
     # and Megatron's global RNG state tracker is not thread-safe.
     model_lock = threading.Lock()
 
+    # ---- Shared compute: forward → completion log-probs as CPU fp16 (C, V) ----
+    # Caller must hold model_lock. fp16 cast happens on GPU (halves D2H vs
+    # casting on CPU). Returns a contiguous CPU tensor suitable for zero-copy
+    # sends via memoryview.
+    def compute_logprobs_fp16(token_ids: list[int], prompt_len: int) -> torch.Tensor:
+        seq_len = len(token_ids)
+        completion_len = seq_len - prompt_len
+        ids = torch.tensor(token_ids, device=DEVICE, dtype=torch.long)
+
+        input_ids = ids.unsqueeze(0)
+        position_ids = torch.arange(seq_len, device=DEVICE, dtype=torch.long).unsqueeze(0)
+        logits = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
+        logits = logits[0]  # (S, V)
+
+        comp_logits = logits[prompt_len - 1 : prompt_len + completion_len - 1]
+        log_probs = F.log_softmax(comp_logits.float(), dim=-1)
+        return log_probs.to(torch.float16).cpu()  # (C, V) contiguous CPU fp16
+
+    # ---- TCP data plane ----
+    # One handler thread per connection (one per trainer rank). model_lock is
+    # held only around compute — the ~0.7s socket send happens outside the
+    # lock so other ranks' forwards overlap with sends.
+    def recv_exact(conn: socket.socket, n: int) -> bytes:
+        chunks = []
+        rem = n
+        while rem > 0:
+            d = conn.recv(min(1 << 20, rem))
+            if not d:
+                raise ConnectionError("client closed connection")
+            chunks.append(d)
+            rem -= len(d)
+        return b"".join(chunks)
+
+    def handle_tcp_conn(conn: socket.socket) -> None:
+        nonlocal request_count
+        while True:
+            try:
+                hdr = recv_exact(conn, 8)
+                prompt_len, seq_len = struct.unpack("<ii", hdr)
+                ids_bytes = recv_exact(conn, seq_len * 4)
+            except ConnectionError:
+                break
+            token_ids = list(struct.unpack(f"<{seq_len}i", ids_bytes))
+
+            with model_lock, torch.no_grad():
+                lp = compute_logprobs_fp16(token_ids, prompt_len)  # (C, V) cpu fp16
+
+            completion_len = seq_len - prompt_len
+            conn.sendall(struct.pack("<i", completion_len))
+            conn.sendall(memoryview(lp.numpy()).cast("B"))
+
+            request_count += 1
+            if request_count % 50 == 0:
+                logger.info(f"Served {request_count} logprob requests (tcp)")
+        conn.close()
+
+    def tcp_listener() -> None:
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", LOGPROB_TCP_PORT))
+        srv.listen(8)
+        logger.info(f"TCP logprob listener on port {LOGPROB_TCP_PORT}")
+        while True:
+            conn, addr = srv.accept()
+            logger.info(f"TCP logprob client connected: {addr}")
+            threading.Thread(target=handle_tcp_conn, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=tcp_listener, daemon=True).start()
+
     # ---- FastAPI app ----
     app = FastAPI()
 
@@ -82,21 +156,11 @@ def main() -> None:
     def compute_logprobs(request: LogprobRequest):
         nonlocal request_count
 
-        seq_len = len(request.token_ids)
-        completion_len = seq_len - request.prompt_len
-        token_ids = torch.tensor(request.token_ids, device=DEVICE, dtype=torch.long)
-
         with model_lock, torch.no_grad():
-            input_ids = token_ids.unsqueeze(0)
-            position_ids = torch.arange(seq_len, device=DEVICE, dtype=torch.long).unsqueeze(0)
-            logits = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
-            logits = logits[0]  # (S, V)
-
-            comp_logits = logits[request.prompt_len - 1 : request.prompt_len + completion_len - 1]
-            log_probs = F.log_softmax(comp_logits.float(), dim=-1)
+            lp = compute_logprobs_fp16(request.token_ids, request.prompt_len)
 
         # Binary response: float16 numpy bytes — ~145 MB for C=500, V=151936
-        response_bytes = log_probs.cpu().to(torch.float16).numpy().tobytes()
+        response_bytes = lp.numpy().tobytes()
 
         request_count += 1
         if request_count % 50 == 0:

@@ -61,6 +61,7 @@ def vllm_generate(
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": top_p,
+            "skip_special_tokens": False,
         },
         timeout=180,
     )

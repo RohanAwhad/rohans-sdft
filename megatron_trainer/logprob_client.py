@@ -1,11 +1,14 @@
-"""HTTP client + PyNcclCommunicator for logprob server communication.
+"""TCP + HTTP client + PyNcclCommunicator for logprob server communication.
 
 Replaces the NCCL command protocol from nccl_comm.py. Three responsibilities:
-    1. request_teacher_log_probs_http() — get teacher log-probs via HTTP
+    1. request_teacher_log_probs_tcp() — get teacher log-probs via persistent TCP
     2. init_logprob_weight_engine() — set up standalone NCCL for weight sync
     3. sync_weights_to_logprob_server() — push weights via NCCL (HTTP-triggered)
+
+HTTP logprob functions are kept as debug fallbacks.
 """
 
+import socket
 import struct
 import threading
 import time
@@ -15,7 +18,7 @@ import requests
 import torch
 from loguru import logger
 
-from megatron_trainer.config import LOGPROB_BASE_URL
+from megatron_trainer.config import GEN_MAX_NEW_TOKENS, LOGPROB_BASE_URL, LOGPROB_TCP_PORT
 from megatron_trainer.model_utils import gather_raw_params_iter
 
 
@@ -36,6 +39,80 @@ def wait_for_logprob_server(timeout: int = 300) -> None:
             pass
         time.sleep(2)
     raise TimeoutError(f"Logprob server not healthy after {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# Teacher log-probs via TCP (fast path)
+# ---------------------------------------------------------------------------
+# Persistent per-rank connection (each trainer rank is its own process, so
+# module state is naturally per-rank) + ONE preallocated recv buffer reused
+# across all calls. Per-request multi-GB allocations zero-fill under the GIL
+# and stall the peer's send loop (devlogs Known Issues #11) — do NOT allocate
+# per request here.
+
+_tcp_sock: socket.socket | None = None
+_recv_buf: bytearray | None = None
+
+
+def _get_tcp_connection(vocab_size: int) -> tuple[socket.socket, bytearray]:
+    global _tcp_sock, _recv_buf
+    if _tcp_sock is None:
+        sock = socket.create_connection(("127.0.0.1", LOGPROB_TCP_PORT), timeout=60)
+        sock.settimeout(None)  # blocking; server death surfaces as ConnectionError
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _recv_buf = bytearray(GEN_MAX_NEW_TOKENS * vocab_size * 2)  # fp16, ~2.5 GB
+        logger.info(
+            f"TCP logprob connection established (port {LOGPROB_TCP_PORT}, "
+            f"recv buf {len(_recv_buf)/1e9:.2f} GB)"
+        )
+        _tcp_sock = sock
+    return _tcp_sock, _recv_buf
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    chunks = []
+    rem = n
+    while rem > 0:
+        d = sock.recv(rem)
+        if not d:
+            raise ConnectionError("logprob server closed connection")
+        chunks.append(d)
+        rem -= len(d)
+    return b"".join(chunks)
+
+
+def request_teacher_log_probs_tcp(
+    token_ids: list[int],
+    prompt_len: int,
+    vocab_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Request teacher log-probs via TCP from logprob server.
+
+    Drop-in replacement for request_teacher_log_probs_http — same contract.
+    Returns: (completion_len, vocab_size) tensor in bfloat16 on device.
+    """
+    sock, buf = _get_tcp_connection(vocab_size)
+
+    seq_len = len(token_ids)
+    ids_bytes = struct.pack(f"<{seq_len}i", *token_ids)
+    sock.sendall(struct.pack("<ii", prompt_len, seq_len) + ids_bytes)
+
+    (completion_len,) = struct.unpack("<i", _recv_exact(sock, 4))
+    nbytes = completion_len * vocab_size * 2
+
+    mv = memoryview(buf)
+    got = 0
+    while got < nbytes:
+        n = sock.recv_into(mv[got:nbytes], nbytes - got)
+        if n == 0:
+            raise ConnectionError("logprob server closed connection")
+        got += n
+
+    # Zero-copy view into buf, single H2D copy (buf reuse next call is safe —
+    # .to(device) has already copied out by then).
+    lp = torch.frombuffer(mv[:nbytes], dtype=torch.float16).reshape(completion_len, vocab_size)
+    return lp.to(device=device, dtype=torch.bfloat16)
 
 
 # ---------------------------------------------------------------------------

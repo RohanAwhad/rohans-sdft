@@ -73,6 +73,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e MODEL_NAME="$MODEL_NAME" \
     -e HF_MODEL_PATH="$MODEL_NAME" \
     -e LOGPROB_PORT=8010 \
+    -e LOGPROB_TCP_PORT="${LOGPROB_TCP_PORT:-8011}" \
     -e VLLM_PORT="$VLLM_PORT_BASE" \
     -e VLLM_PORTS="$VLLM_PORTS_LIST" \
     -e OUTPUT_DIR="$OUTPUT_DIR" \
@@ -81,6 +82,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e SAVE_EVERY="${SAVE_EVERY:-200}" \
     -e VLLM_SERVER_DEV_MODE=1 \
     -e BNB_CUDA_VERSION=130 \
+    -e WANDB_BASE_URL="${WANDB_BASE_URL:-}" \
     -e WANDB_PROJECT="${WANDB_PROJECT:-sdft-online}" \
     -e WANDB_MODE="${WANDB_MODE:-}" \
     -e WANDB_NAME="${WANDB_NAME:-sdft-ddp-$(basename $MODEL_NAME)-t${NUM_TRAINERS}-e${NUM_EPOCHS:-10}}" \
@@ -91,11 +93,12 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-online_feedback}" \
     -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/train_dir/data/synthetic_algebra/train_sdft.jsonl}" \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-0.7}" \
-    -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-2048}" \
+    -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-6144}" \
     -e EMA_ALPHA="${EMA_ALPHA:-0.05}" \
     -e LEARNING_RATE="${LEARNING_RATE:-5e-5}" \
     -e STUDENT_MAX_PROMPT_LEN="${STUDENT_MAX_PROMPT_LEN:-2048}" \
     -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
+    -e MAX_TOTAL_LEN="${MAX_TOTAL_LEN:-8192}" \
     -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-}" \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
     -e TRAINER_BACKEND="${TRAINER_BACKEND:-ddp}" \
@@ -103,6 +106,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /mnt/nvme5n1/rohan_patched_ckpts:/mnt/nvme5n1/rohan_patched_ckpts:z \
+    -v /mnt/nvme5n1/rawhad:/mnt/nvme5n1/rawhad:z \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.netrc:/root/.netrc:ro" \
     -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \

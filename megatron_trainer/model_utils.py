@@ -105,13 +105,19 @@ def load_model(hf_model_path: str) -> torch.nn.Module:
         provider.finalize()
 
     provider.gradient_accumulation_fusion = False
-    provider.async_tensor_model_parallel_allreduce = False
-    provider.recompute_granularity = 'full'
-    provider.recompute_method = 'uniform'
-    provider.recompute_num_layers = 1
+    provider.async_tensor_parallel_allreduce = False
 
     models = provider.provide_distributed_model(wrap_with_ddp=False)
     model = models[0]
+
+    # Activation recompute: required for long-completion backward (gpt-oss
+    # thinking sequences hit 4k-8k tokens). NOTE: setting these on the
+    # provider is a no-op (the bridge LLM builder never maps them into the
+    # TransformerConfig) — they must be set on the built model's config, which
+    # MCore's TransformerLayer reads at forward time.
+    model.config.recompute_granularity = 'full'
+    model.config.recompute_method = 'uniform'
+    model.config.recompute_num_layers = 1
 
     # Ensure model-parallel RNG state is initialized (required by
     # TransformerEngine attention's dropout context even in eval mode)
