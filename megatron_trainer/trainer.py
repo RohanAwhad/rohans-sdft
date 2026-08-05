@@ -5,8 +5,9 @@ Orchestrates:
        - ENV_TYPE=rag: RagEnv (vLLM generation + optional reflector)
        - ENV_TYPE=api_adapter: ApiAdapterEnv (multi-turn adapter loop)
     2. Student forward pass (Megatron-Core GPTModel via DDP or MCore FSDP)
-    3. Teacher log-probs (HTTP from logprob server, each rank independently)
-    4. Reverse KL loss + backward (with gradient accumulation + no_sync)
+    3. Teacher log-probs (TCP from logprob server, each rank independently)
+    4. Chunked reverse KL loss + backward (via MCore output_processor hook,
+       with gradient accumulation + no_sync)
     5. Step-level weight sync to both servers (all ranks for FSDP,
        rank 0 only for DDP — FSDP export/gather passes are collectives)
 
@@ -20,7 +21,6 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from datasets import load_dataset
 from loguru import logger
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -30,6 +30,7 @@ from transformers import AutoTokenizer
 
 import wandb
 from megatron_trainer.collator import SDFTCollator
+from megatron_trainer.chunked_head import make_kl_processor
 from megatron_trainer.config import (
     BATCH_SIZE,
     ENV_TYPE,
@@ -64,7 +65,7 @@ from megatron_trainer.model_utils import (
 from megatron_trainer.logprob_client import (
     init_logprob_weight_engine,
     request_teacher_log_probs_batch_http,
-    request_teacher_log_probs_http,
+    request_teacher_log_probs_tcp,
     sync_weights_to_logprob_server,
     wait_for_logprob_server,
 )
@@ -73,99 +74,6 @@ from megatron_trainer.vllm_utils import (
     sync_weights_to_vllm,
     wait_for_vllm,
 )
-
-# ---------------------------------------------------------------------------
-# Core computations
-# ---------------------------------------------------------------------------
-
-KL_CHUNK = 128
-
-
-def compute_kl(
-    student_logits: torch.Tensor,
-    teacher_log_probs: torch.Tensor,
-    completion_ids: list[int],
-    eos_token_id: int | None,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    """Chunked reverse KL(student || teacher) averaged over token positions."""
-    C = student_logits.size(0)
-    device = student_logits.device
-    token_ids = torch.tensor(completion_ids, device=device, dtype=torch.long)
-
-    per_token_kl = torch.zeros(C, device=device, dtype=torch.float32)
-    policy_logp = torch.zeros(C, device=device, dtype=torch.float32)
-    critic_logp = torch.zeros(C, device=device, dtype=torch.float32)
-
-    for i in range(0, C, KL_CHUNK):
-        j = min(i + KL_CHUNK, C)
-        s_chunk = student_logits[i:j].float()
-        t_chunk = teacher_log_probs[i:j].float()
-
-        s_log = F.log_softmax(s_chunk, dim=-1)
-        s_prob = s_log.exp()
-        per_token_kl[i:j] = (s_prob * (s_log - t_chunk)).sum(dim=-1)
-
-        chunk_ids = token_ids[i:j]
-        idx = torch.arange(j - i, device=device)
-        policy_logp[i:j] = s_log[idx, chunk_ids].detach()
-        critic_logp[i:j] = t_chunk[idx, chunk_ids]
-
-    loss = per_token_kl.mean()
-
-    with torch.no_grad():
-        signal = critic_logp - policy_logp
-        metrics = {
-            "sdpo/signal_mean": signal.mean().item(),
-            "sdpo/signal_std": signal.std().item(),
-            "sdpo/len_signal_mean": signal.sum().item() / C,
-            "sdpo/policy_logp": policy_logp.mean().item(),
-            "sdpo/critic_logp": critic_logp.mean().item(),
-        }
-        if eos_token_id is not None:
-            eos_mask = token_ids == eos_token_id
-            if eos_mask.any():
-                metrics["sdpo/eos_signal_mean"] = signal[eos_mask].mean().item()
-                metrics["sdpo/eos_logp_mean"] = policy_logp[eos_mask].mean().item()
-                metrics["sdpo/eos_logratio_mean"] = signal[eos_mask].mean().item()
-
-    return loss, metrics
-
-
-def forward_student(
-    model: torch.nn.Module,
-    tokenizer,
-    prompt_text: str,
-    completion_ids: list[int],
-    device: torch.device,
-) -> torch.Tensor:
-    """Student forward pass with Megatron-Core GPTModel.
-
-    Calls model(input_ids, position_ids, attention_mask=None, labels=None)
-    to get full logits, then slices at completion positions.
-
-    Returns: (C, V) tensor with gradient attached.
-    """
-    prompt_enc = tokenizer(
-        prompt_text,
-        add_special_tokens=False,
-        return_tensors="pt",
-        truncation=True,
-        max_length=STUDENT_MAX_PROMPT_LEN,
-    ).to(device)
-    prompt_ids = prompt_enc["input_ids"][0]
-    prompt_len = prompt_ids.size(0)
-    C = len(completion_ids)
-
-    comp_ids_t = torch.tensor(completion_ids, device=device, dtype=torch.long)
-    input_ids = torch.cat([prompt_ids, comp_ids_t]).unsqueeze(0)
-    seq_len = input_ids.size(1)
-    position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
-
-    logits = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
-
-    completion_logits = logits[0, prompt_len - 1 : prompt_len + C - 1, :]
-    return completion_logits
-
 
 # ---------------------------------------------------------------------------
 # Training loop
@@ -396,13 +304,13 @@ def train() -> None:
                     continue
                 completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
-                # Teacher log-probs via HTTP (each rank independently)
+                # Teacher log-probs via TCP (each rank independently)
                 t0 = time.monotonic()
                 cond_ids: list[int] = tokenizer.encode(
                     item_data["privileged_information_prompt"],
                     add_special_tokens=False, truncation=True, max_length=TEACHER_MAX_PROMPT_LEN,
                 )
-                teacher_log_probs = request_teacher_log_probs_http(
+                teacher_log_probs = request_teacher_log_probs_tcp(
                     token_ids=cond_ids + completion_ids,
                     prompt_len=len(cond_ids),
                     vocab_size=vocab_size,
@@ -410,20 +318,41 @@ def train() -> None:
                 )  # (C, V)
                 t_teacher_sum += time.monotonic() - t0
 
-                # Student forward pass (use raw model — DDP hooks are on params)
+                # Student forward + chunked reverse-KL loss via MCore
+                # output_processor hook (head GEMM on local vocab shard only)
                 t0 = time.monotonic()
-                student_logits = forward_student(
-                    model, tokenizer, item_data["prompt_text"], completion_ids, device,
-                )  # (C, V)
+                prompt_enc = tokenizer(
+                    item_data["prompt_text"],
+                    add_special_tokens=False,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=STUDENT_MAX_PROMPT_LEN,
+                ).to(device)
+                prompt_ids = prompt_enc["input_ids"][0]
+                prompt_len = prompt_ids.size(0)
+                comp_ids_t = torch.tensor(completion_ids, device=device, dtype=torch.long)
+                input_ids = torch.cat([prompt_ids, comp_ids_t]).unsqueeze(0)
+                position_ids = torch.arange(
+                    input_ids.size(1), device=device, dtype=torch.long
+                ).unsqueeze(0)
+
+                kl_processor = make_kl_processor(
+                    prompt_len=prompt_len,
+                    completion_ids=completion_ids,
+                    teacher_log_probs=teacher_log_probs,
+                    eos_token_id=tokenizer.eos_token_id,
+                    device=device,
+                )
+                loss, step_metrics = model(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attention_mask=None,
+                    output_processor=kl_processor,
+                )
                 t_student_sum += time.monotonic() - t0
 
-                # Reverse KL loss
+                # Reverse-KL loss backward
                 t0 = time.monotonic()
-                loss, step_metrics = compute_kl(
-                    student_logits, teacher_log_probs.detach(),
-                    completion_ids, tokenizer.eos_token_id,
-                )
-
                 # no_sync on non-final micro-steps (skip allreduce)
                 is_final = (micro_step == local_accum_steps - 1)
                 ctx = nullcontext() if is_final else ddp_model.no_sync()
