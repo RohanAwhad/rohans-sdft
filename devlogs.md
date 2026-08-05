@@ -490,3 +490,57 @@ Two tight clusters 0.05-0.08 apart — sampling-luck alone strained. Evidence ch
 ### Pending
 - Remove the temporary `[DUAL]` debug block from `megatron_trainer/chunked_head.py` before the real run.
 - Launch the real 10-epoch run (run-21/22 base); watch the loss curve vs historical (~0.19-0.27 decaying) and survival past step 34 (run 22's crash point).
+
+---
+
+## 2026-08-05 — Frozen 120b teacher (TEACHER_MODEL_PATH + mxfp4)
+
+### Goal
+Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a different
+(frozen) model than the student. Target: `openai/gpt-oss-120b` native mxfp4 4-bit
+(~62 GB download, fits ONE 80GB GPU — verified: 63.7 GB weights on GPU).
+
+### mxfp4 stack (verified in NeMo 26.06 container)
+- transformers 5.8.1 has `Mxfp4Config` quantizer; auto-detected via `quant_method: mxfp4` in config.json.
+- Requires `kernels` pip package (kernels-community): **`pip install kernels==0.14.1`** — transformers 5.8.1's
+  `hub_kernels` integration crashes on import with kernels ≥0.15 (LayerRepository now REQUIRES revision/version;
+  transformers calls it without). 0.14.1 is the latest import-compatible.
+- Without `kernels` installed, transformers silently DEQUANTIZES mxfp4 → bf16 (226 GB — OOM).
+- torchao 0.17 + triton 3.6 already in container; H100 CC 9.0 ✓. Kernels compile into `~/.triton` (JIT, ~10 min cold).
+- **Persistent triton cache**: `/mnt/nvme5n1/rohan_patched_ckpts/triton_cache` mounted at `/root/.triton`
+  (train_full.sh + smoke containers) → first forward fast after the first run.
+
+### Memory: 8192-token forward OOM'd at 83.1 GB peak (79.17 usable) — three fixes
+1. **Chunked lm log_softmax** (compute_logprobs_fp16): rows in 1024-chunks → fp32 softmax transient 4.9→0.8 GiB.
+2. **Chunked exact attention** (monkey-patched `eager_attention_forward` in external-teacher mode only):
+   gpt-oss eager attention materializes (H=64, S, S) bf16 scores = 8.6 GiB at S=8192. Blockwise two-pass
+   row-max trick (chunks of 1024 query rows; fp32 exp-sums; sink column handled exactly). Verified vs the
+   original full-row math: my offline reproduction of the original is BIT-EXACT; chunked differs only by
+   bf16-vs-fp32 softmax arithmetic (mean |Δlogprob| ~0.015 — chunked is the MORE accurate one).
+   Gotchas hit: GQA repeat_kv needed; value needs NO transpose; `torch.maximum` broadcasts → block maxima
+   must be collected+cat'd, not maxed incrementally.
+3. `_model_logits` normalization: HF returns (1,S,V) ModelOutput (batch dim) vs bridge's (S,V) tuple —
+   squeeze(0) at the single-request call site; batch endpoint keeps 3-D.
+4. `.contiguous()` on the fp16 result (mxfp4 kernel outputs can be strided → memoryview.cast("B") fails).
+
+**Result: 8192-token 120b forward = 74.2 GiB peak, 6.5 s** (full 2048+6144 teacher request; bitwise deterministic).
+
+### Code changes
+- config.py: `TEACHER_MODEL_PATH` (default "" = current same-model teacher + EMA sync).
+- logprob_server.py: external-teacher mode = plain HF `AutoModelForCausalLM.from_pretrained(bf16)`
+  (mxfp4 auto), skips `init_distributed_standalone` + `/init_weight_sync` + `/sync_weights` (both return "disabled").
+- trainer.py: `init_logprob_weight_engine` + `sync_weights_to_logprob_server` gated on `not TEACHER_MODEL_PATH`.
+- train_full.sh: `TEACHER_MODEL_PATH` passthrough + `kernels==0.14.1` install + triton cache mount.
+- Teacher stays on the existing LOGPROB_GPU slot (GPU 6) — NO layout change. GPU 7 remains free.
+
+### Smoke evidence (GPU 7, standalone container)
+- Model load ~40 s (cache-warm), weights 63.7 GiB.
+- seq=64/256/1024: 3.5 s / 1.0 s / 0.4 s (warm).
+- 2048+6144: **6.5 s**, peak 74.2 GiB, logprobs finite, mean ≈ -16.6, repeat → bitwise identical.
+- `openai/gpt-oss-120b` fully cached at `/mnt/nvme5n1/rohan_patched_ckpts/hf-cache` (~62 GB, mxfp4 shards only).
+
+### Notes / gotchas
+- gpt-oss-120b: 36 layers, 128 experts, **64 attention heads**, 8 KV heads (GQA), head_dim 64, same 201088 vocab/tokenizer as 20b.
+- HF keeps layernorms + RoPE fp32 by design; attention ends up bf16 anyway (sink cat is bf16 — no fp32 upcast at H=64).
+- Sliding-window layers exist; full attention is used (attention_mask=None, matches the old 20b teacher path).
+- Teacher latency 6.5 s/request vs 20b's ~0.4 s → per-step time will rise; LOGPROB_BATCH_SIZE batching is the lever if needed.
