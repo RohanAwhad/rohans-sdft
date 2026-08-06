@@ -1,0 +1,16 @@
+[1] tool defs loaded + stripped: 28 defs, 0 descriptions
+[1b] truncation: 1 items dropped messages (max 2 msgs); normalized_messages = truncated
+[2] prompt tokens: 2382-13887, median 9541 — 0/31 > 14336 (0 after truncation), 0/31 > 16384
+[3] conditional tokens: 2490-14966, median 9632 — 0/31 > 15360 (0 after truncation), 0/31 > 16384
+[2b] completeness: system 31/31, hint 31/31, questions dropped 0/31
+[4] targets: all non-empty; tool-call lines = 88 (expect 88)
+[5] hint placement: 5 merged into last user msg, 26 appended as new user turn
+[6] tool_response body present in prompt render
+[7] family guard fires for gpt-oss + OLS shape: ValueError — New-format path (tools/tool_calls/tool_results) is not validated for model family openai/gpt-oss-20b; Qwen only
+[8] gpt-oss + old format (no tool shape): no guard fire, renders
+[9] old-format regression: renders, no tools block, hint merged into last user msg
+[10] _append_hint helper: merge path ok
+[11] init assert fires on tiny STUDENT_MAX_PROMPT_LEN: ValueError — Protected-set render (system + tools (init)) is 2306 tokens, exceeding budget 10...
+[12] per-example teacher assert fires on tiny TEACHER_MAX_PROMPT_LEN: ValueError — Protected-set render (system + tools + hint) is 2466 tokens, exceeding budget 30...
+
+ALL CHECKS PASSED

@@ -12,7 +12,14 @@ from typing import Any, Dict, List, Optional
 
 from transformers import PreTrainedTokenizerBase
 
-from megatron_trainer.config import IS_GPT_OSS, IS_QWEN, MODEL_NAME, TRAIN_DATA_PATH
+from megatron_trainer.config import (
+    IS_GPT_OSS,
+    IS_QWEN,
+    MODEL_NAME,
+    STUDENT_MAX_PROMPT_LEN,
+    TEACHER_MAX_PROMPT_LEN,
+    TRAIN_DATA_PATH,
+)
 
 
 ANALYSIS_CHANNEL_SUFFIX = "<|channel|>analysis<|message|>"
@@ -98,6 +105,64 @@ def _append_hint(messages: List[Dict[str, Any]], hint: str) -> List[Dict[str, An
     return history
 
 
+def _render_tokens(
+    messages: List[Dict[str, Any]],
+    tokenizer: PreTrainedTokenizerBase,
+    render_kwargs: Dict[str, Any],
+) -> tuple[int, str]:
+    """Render a trajectory and count tokens exactly like the trainer does
+    (add_special_tokens=False, truncation applied by the caller's budget).
+    """
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+        **render_kwargs,
+    )
+    return len(tokenizer.encode(text, add_special_tokens=False)), text
+
+
+def _truncate_to_budget(
+    messages: List[Dict[str, Any]],
+    tokenizer: PreTrainedTokenizerBase,
+    budget: int,
+    protect_last: bool,
+    render_kwargs: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], str]:
+    """Drop the earliest messages (after the system message) until the rendered
+    token count fits the budget. Mutates the passed list.
+
+    Message-level only — no partial-message cuts, no token-level slicing of the
+    rendered text. The system message (index 0) is never dropped; with
+    protect_last=True the last message (the privileged hint) is never dropped
+    either. Drop order: oldest turns first, and the last user message (the
+    question) is dropped only when every other message is gone. The protected
+    set is asserted to fit the budget upstream, so the loop always terminates
+    in budget (or with only the protected set left).
+    """
+    while True:
+        n_tokens, text = _render_tokens(messages, tokenizer, render_kwargs)
+        if n_tokens <= budget:
+            return messages, text
+        protected_last = len(messages) - 1 if protect_last else None
+        last_user = max(
+            (i for i, m in enumerate(messages) if m["role"] == "user"),
+            default=None,
+        )
+        candidates = [
+            i for i in range(1, len(messages))
+            if i != protected_last and i != last_user
+        ]
+        if not candidates:
+            candidates = [
+                i for i in range(1, len(messages)) if i != protected_last
+            ]
+        if not candidates:
+            return messages, text
+        del messages[min(candidates)]
+
+
 def _load_tool_defs() -> Optional[List[Dict[str, Any]]]:
     """Load tool defs from tool_defs.json next to the train dataset.
 
@@ -121,6 +186,23 @@ def _load_tool_defs() -> Optional[List[Dict[str, Any]]]:
 TOOL_DEFS = _load_tool_defs()
 
 
+def _assert_protected_fits(
+    messages: List[Dict[str, Any]],
+    tokenizer: PreTrainedTokenizerBase,
+    budget: int,
+    render_kwargs: Dict[str, Any],
+    label: str,
+) -> None:
+    """Assert a protected-only render fits the budget (config invariant)."""
+    n_tokens, _ = _render_tokens(messages, tokenizer, render_kwargs)
+    if n_tokens > budget:
+        raise ValueError(
+            f"Protected-set render ({label}) is {n_tokens} tokens, exceeding "
+            f"budget {budget}; max lengths must exceed system/hint renders "
+            "(config error — raise the max length)"
+        )
+
+
 @dataclass
 class SDFTCollator:
     """Collator for on-policy SDFT.
@@ -132,6 +214,16 @@ class SDFTCollator:
 
     tokenizer: PreTrainedTokenizerBase
     hindsight_field: str = "enriched_user_response"
+
+    def __post_init__(self) -> None:
+        render_kwargs = {"tools": TOOL_DEFS} if TOOL_DEFS is not None else {}
+        _assert_protected_fits(
+            [{"role": "system", "content": ""}],
+            self.tokenizer,
+            STUDENT_MAX_PROMPT_LEN,
+            render_kwargs,
+            "system + tools (init)",
+        )
 
     def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         prompt_texts: list[str] = []
@@ -159,24 +251,35 @@ class SDFTCollator:
                     f"validated for model family {MODEL_NAME}; Qwen only"
                 )
 
-            # Raw data for env: full messages, last question, golden answer
-            normalized_messages.append(clean_prompt)
-            raw_questions.append(
-                next(m["content"] for m in reversed(clean_prompt) if m["role"] == "user")
-            )
             golden_answers.append(_target_text(ex["user_response"]))
 
+            # Per-example protected-set assert (system always complete).
+            if clean_prompt and clean_prompt[0]["role"] == "system":
+                _assert_protected_fits(
+                    clean_prompt[:1],
+                    self.tokenizer,
+                    STUDENT_MAX_PROMPT_LEN,
+                    render_kwargs,
+                    "system + tools",
+                )
+
             # --- Student prompt (x) ---
-            p_text = self.tokenizer.apply_chat_template(
-                clean_prompt,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-                **render_kwargs,
+            student_prompt, p_text = _truncate_to_budget(
+                copy.deepcopy(clean_prompt),
+                self.tokenizer,
+                STUDENT_MAX_PROMPT_LEN,
+                protect_last=False,
+                render_kwargs=render_kwargs,
             )
             if IS_GPT_OSS:
                 p_text = _append_analysis_channel(p_text)
             prompt_texts.append(p_text)
+
+            # Raw data for env: truncated trajectory, last question, golden answer
+            normalized_messages.append(student_prompt)
+            raw_questions.append(
+                next(m["content"] for m in reversed(student_prompt) if m["role"] == "user")
+            )
 
             # --- Teacher prompt (x, o) — append privileged info ---
             # online_feedback: conditional_text is built dynamically by the env
@@ -196,13 +299,26 @@ class SDFTCollator:
                     o = _target_text(ex[self.hindsight_field])
                     hint = template.format(o=o)
 
+                # Per-example protected-set assert (system + hint always complete).
+                assert_msgs: list[dict] = []
+                if clean_prompt and clean_prompt[0]["role"] == "system":
+                    assert_msgs.append(clean_prompt[0])
+                assert_msgs.append({"role": "user", "content": hint})
+                _assert_protected_fits(
+                    assert_msgs,
+                    self.tokenizer,
+                    TEACHER_MAX_PROMPT_LEN,
+                    render_kwargs,
+                    "system + tools + hint",
+                )
+
                 conditional_history = _append_hint(clean_prompt, hint)
-                xo_text = self.tokenizer.apply_chat_template(
+                _, xo_text = _truncate_to_budget(
                     conditional_history,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
-                    **render_kwargs,
+                    self.tokenizer,
+                    TEACHER_MAX_PROMPT_LEN,
+                    protect_last=True,
+                    render_kwargs=render_kwargs,
                 )
                 if IS_GPT_OSS:
                     xo_text = _append_analysis_channel(xo_text)

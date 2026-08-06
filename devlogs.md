@@ -566,3 +566,22 @@ Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a differ
 - 88/88 tool-call lines in targets; hint placement: 5 merged, 26 appended (clean `<|im_start|>user` turn after tool results).
 - Family guard: fires for gpt-oss + OLS shape; not for gpt-oss + old format; old-format enriched regression passes.
 - HINDSIGHT_FIELD=user_response needed for OLS runs (no enriched field in that dataset).
+
+## 2026-08-06 - Collator truncation (budget enforcement) + vLLM context fix
+
+### Why
+- vLLM launched with --max-model-len 8192 hard-rejects OLS prompts (400: 7,169 input + 1,024 gen = 8,193 > 8,192).
+- Trainer-side tokenizer tail-chops oversize prompts silently — which cuts exactly the privileged hint.
+- Collator now enforces budgets at render time (message-level), per spec update (docs/megatron_trainer/collator.md).
+
+### Code changes
+- collator.py: `_render_tokens` (renders + counts with add_special_tokens=False, matching trainer.py:328); `_truncate_to_budget(messages, tokenizer, budget, protect_last, render_kwargs)` — greedy drop of earliest messages until rendered tokens fit; system (index 0) never dropped; question (last user msg) dropped only after all other messages; protect_last shields the hint; `_assert_protected_fits` (ValueError on config violation); asserts: init (system+tools <= STUDENT_MAX_PROMPT_LEN) + per-example (system <= student budget; system+hint <= TEACHER_MAX_PROMPT_LEN); normalized_messages/raw_questions now from the truncated student trajectory; both paths truncate (no-op within budget).
+- train_full.sh:142: --max-model-len 8192 -> 16384 (14,336 + 1,024 = 15,360 < 16,384).
+
+### Verification (play.py, tokenizer only)
+- 0/31 prompts > 14,336 after truncation (1 item dropped 2 tool-turn messages: 14,727 -> 13,887); 0/31 conditionals > 15,360 (max 14,966); system 31/31 complete; hint 31/31 complete; questions 0/31 dropped.
+- Old-format regression unchanged; family guard unchanged; init + per-example asserts fire with clear ValueError messages.
+
+### Gotcha
+- Drop order matters: for OLS the question is message index 1 — naive "drop from front" killed the question first (StopIteration on raw_questions). Fixed: oldest turns first, question last-droppable, hint never.
+- Init assert uses STUDENT_MAX_PROMPT_LEN: default 2048 fails on OLS (system+tools = 2,306) — correct; runs must pass STUDENT_MAX_PROMPT_LEN=14336.

@@ -16,7 +16,7 @@ Completions are generated on-the-fly by vLLM, so the collator never touches targ
     "conditional_texts": list[str],   # teacher context (x + privileged o)
     "raw_questions": list[str],       # last user message content (logging/reflector only)
     "golden_answers": list[str],      # plain-text target (logging/reflector only)
-    "normalized_messages": list[list[dict]],  # normalized trajectory (logging/reflector only)
+    "normalized_messages": list[list[dict]],  # truncated normalized trajectory (logging/reflector only)
 }
 ```
 
@@ -48,6 +48,18 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 4. **`golden_answers`** — same helper output; **`normalized_messages`** — the normalized trajectory.
 5. **Privileged hint placement** — the correct-answer hint is appended as a **new `user` message** at the end of the trajectory when the last message is not a user message (new format: last message is a `tool` message → renders as its own clean `<|im_start|>user` block right before the generation prompt, after all tool results); when the last message **is** a user message, the hint merges into its content (old WildChat format — unchanged behavior).
 
+### Prompt truncation (budget enforcement)
+
+- **Why**: vLLM hard-rejects prompts over the server context length (HTTP 400, prompt + gen > `--max-model-len`), and the trainer-side tokenizer silently tail-chops oversize prompts (`truncation=True` in `trainer.py`) — which cuts exactly the privileged hint. The collator enforces the budgets at render time instead, so the rendered strings always fit.
+- **Budgets**: `prompt_texts` → `STUDENT_MAX_PROMPT_LEN`; `conditional_texts` → `TEACHER_MAX_PROMPT_LEN`. Measured on the **rendered** text (post-template, via the tokenizer with `add_special_tokens=False`) — the same tokenization the trainer and vLLM see.
+- **Mechanism**: message-level only. Drop the **earliest** messages (after the system message) until the rendered token count fits. No partial-message cuts, no token-level slicing of rendered text (would risk breaking special tokens or the generation prompt). Overshoot on this dataset is small (≤ ~700 tokens), so 1–2 message drops on the few oversize items; no-op for the rest.
+- **Protected — never dropped or truncated**:
+  - **System message** — always complete (includes the `<tools>` block when tool defs are present).
+  - **Privileged hint** (conditional only) — appended *after* body truncation, then a second pass protects it; the hint is always complete.
+  - Everything else is droppable — **including the last user message (the question)**, dropped only if truly needed.
+- **Invariant (asserted, not warned)**: max lengths must always be greater than the system-prompt render and the system + hindsight render — `render(system + tools) ≤ STUDENT_MAX_PROMPT_LEN` (asserted at collator init) and `render(system + tools + hint) ≤ TEACHER_MAX_PROMPT_LEN` (asserted per example). Truncation therefore always fits by construction; exceeding the protected set is a config error and **raises**.
+- Applies to **both paths** (Qwen + gpt-oss, and old + new format) — it is a no-op for old-format data, whose prompts are far below budget.
+
 ### Validation evidence (data/ols/train_sdft_mini.jsonl, 31 items)
 
 | Check | Result |
@@ -59,14 +71,20 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 | Multi-call assistant messages | up to 9 calls/message render fully |
 | Tool results | `json.dumps`'d list renders inside `<tool_response>` |
 | Privileged append (new user turn when last msg isn't user; merge when it is) | renders cleanly, positioned after tool results, before generation prompt |
+| Truncation: prompts > 14,336 | 0/31 after truncation (1 item drops tool-result messages) |
+| Truncation: conditionals > 15,360 | 0/31 after truncation (2 items drop messages) |
+| System message complete after truncation | 31/31 |
+| Privileged hint complete after truncation | 31/31 |
+| Budget asserts (init system render; per-example system+hint render) | pass on all 31 |
 | Reference: full (unstripped) tools block | +7,214 tokens/prompt → 17/31 > 14,336, 8/31 > 16,384 (rejected) |
 
-**Budget note:** stripped defs fit the current limits (`STUDENT_MAX_PROMPT_LEN=14336`, `MAX_TOTAL_LEN=16384`) with a small tail — 1/31 prompts and 2/31 conditionals slightly exceed 14,336, none exceed 16,384. Options: skip/truncate the few long items, or nudge limits to ~15k/17k pending teacher forward-pass validation.
+**Budget note:** stripped defs fit the budgets (`STUDENT_MAX_PROMPT_LEN=14336`, `TEACHER_MAX_PROMPT_LEN=15360`) — 1/31 prompts and 2/31 conditionals slightly exceed and are handled by collator truncation (message-level drop, system + hint protected). None exceed 16,384 pre-truncation. The server side must be launched with `--max-model-len ≥ budget + GEN_MAX_NEW_TOKENS` (e.g. 16,384 for 14,336 + 1,024), or vLLM hard-rejects (400).
 
 ## Constraints
 
 - **No thinking hardcoded, except for oss.** The gpt-oss path may force the analysis channel (`_append_analysis_channel`); the Qwen path must not hardcode thinking — `enable_thinking` stays config-driven (default `False`).
 - **New-format paths are Qwen-only.** Tool defs (`tools != None`), `tool_calls`, and `tool_results` are only validated for Qwen-family models. If any of these are present and the model is not Qwen, **raise an error** stating this path is not validated — gpt-oss currently fails silently or with obscure jinja errors on this shape (drops calls 2..N, crashes on `content|tojson`).
+- **Truncation invariant.** Max lengths must always exceed the system-prompt render and the system + hindsight renders — `render(system + tools) ≤ STUDENT_MAX_PROMPT_LEN` and `render(system + tools + hint) ≤ TEACHER_MAX_PROMPT_LEN`, asserted at collator init and per example. Violation is a config error and raises.
 
 ## Proposed changes to `megatron_trainer/collator.py`
 
@@ -77,3 +95,6 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 - Load `tool_defs.json` from `dirname(TRAIN_DATA_PATH)` (absent → `None`), strip descriptions, pass `tools=` on both renders (Qwen path)
 - Add family guard: `tools is not None` OR any `tool_calls`/`tool_results` present AND model not Qwen → `ValueError` ("path not validated for this model family")
 - Privileged hint placement: merge into last message's content if `role == "user"`, else append a new `user` message (used for `conditional_texts`)
+- Add `_truncate_to_budget(messages, budget, protect_last=False) -> list`: message-level drop from the front (after system) until the rendered token count fits; greedy re-render per drop; `protect_last=True` for conditional (hint never dropped); applies to both paths, no-op within budget
+- Assertions: system-only render (with tools block) ≤ `STUDENT_MAX_PROMPT_LEN` at collator init; per-example system+hint render ≤ `TEACHER_MAX_PROMPT_LEN` (raise on violation — config error)
+- `normalized_messages` returns the **truncated** trajectory (what was actually rendered)
