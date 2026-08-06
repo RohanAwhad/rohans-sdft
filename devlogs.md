@@ -544,3 +544,25 @@ Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a differ
 - HF keeps layernorms + RoPE fp32 by design; attention ends up bf16 anyway (sink cat is bf16 — no fp32 upcast at H=64).
 - Sliding-window layers exist; full attention is used (attention_mask=None, matches the old 20b teacher path).
 - Teacher latency 6.5 s/request vs 20b's ~0.4 s → per-step time will rise; LOGPROB_BATCH_SIZE batching is the lever if needed.
+
+## 2026-08-06 - Collator: Qwen3-8B path + new-format OLS tool-trajectory support
+
+### Goal
+- Render the new OpenAI-style OLS tool-trajectory dataset (data/ols/train_sdft_mini.jsonl) for on-policy SDFT, with Qwen3-8B as the default model. Spec lives in `docs/megatron_trainer/collator.md`.
+
+### Key findings (validated earlier, recorded in spec)
+- gpt-oss templates hardcode `tool_calls[0]` (drop calls 2..N); Qwen3 renders all N `<tool_call>` blocks inline.
+- Raw `{'role':'tool','tool_results':[...]}` renders an EMPTY `<tool_response>` on Qwen3 (silent loss) → normalize to `content=json.dumps(tool_results)`.
+- Full OLS tool defs = 7,214 tok/prompt (17/31 > 14,336); stripped (descriptions dropped) = 2,332 tok → 1/31 prompt, 2/31 conditional > 14,336, 0 > 16,384.
+- Dataset shape gotchas: `tool_calls` = `{name, arguments(dict)}` (NOT OpenAI function format); `user_response` has no `content` in 10/31 items and no `value` ever → old golden-answer code would crash; last prompt message is tool (21), user (5), or assistant (5).
+
+### Code changes
+- collator.py: `_normalize_messages` tool branch; `_target_text` (hand-format `name(args_json)` + content, handles value/content/None); `_append_hint` (merge into last user msg / append fresh user turn); `_load_tool_defs` (dirname(TRAIN_DATA_PATH)/tool_defs.json, strip descriptions, cached in `TOOL_DEFS`); family guard (`IS_QWEN`, ValueError for non-Qwen + tools/tool_calls/tool_results); `raw_questions` → last user message; `tools=` kwarg on both renders.
+- config.py: `IS_QWEN` flag.
+- rag_env.py: comment only — `_build_privileged_prompt_from_feedback` assumes last msg is user; OLS last msg is tool → hint would land inside `<tool_response>`; fix = reuse `_append_hint` when online_feedback + OLS runs.
+
+### Verification (play.py, tokenizer only, no training)
+- 31/31 render, 0 errors; prompt toks 2,382–14,727 (median 9,541, 1>14,336); conditional 2,490–16,025 (median 9,632, 2>14,336); 0 > 16,384.
+- 88/88 tool-call lines in targets; hint placement: 5 merged, 26 appended (clean `<|im_start|>user` turn after tool results).
+- Family guard: fires for gpt-oss + OLS shape; not for gpt-oss + old format; old-format enriched regression passes.
+- HINDSIGHT_FIELD=user_response needed for OLS runs (no enriched field in that dataset).

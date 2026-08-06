@@ -17,6 +17,10 @@ TEACHER_MODEL_PATH = os.environ.get("TEACHER_MODEL_PATH", "")
 # generation prompts and vLLM must return special tokens (skip_special_tokens=False).
 IS_GPT_OSS = "gpt-oss" in MODEL_NAME.lower()
 
+# Qwen-family models are the only ones validated for the new-format path
+# (tools / tool_calls / tool_results). Non-Qwen models with that shape raise.
+IS_QWEN = "qwen" in MODEL_NAME.lower()
+
 # GPU assignment (physical GPU IDs, used in CUDA_VISIBLE_DEVICES)
 GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))

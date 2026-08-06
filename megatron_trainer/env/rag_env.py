@@ -56,6 +56,11 @@ class RagEnv(BaseEnv):
 
     def _build_privileged_prompt_from_feedback(self) -> None:
         cond_history = copy.deepcopy(self.normalized_messages)
+        # NOTE: assumes the last message is a user message. With the new OLS
+        # format the last message is a `tool` message, so this hint would land
+        # inside the <tool_response> body instead of as a fresh user turn
+        # before the generation prompt. Fix (when online_feedback + OLS runs):
+        # reuse collator._append_hint.
         cond_history[-1]["content"] += "\n\n" + ONLINE_FEEDBACK_TEMPLATE.format(
             feedback=self.reflector_result["feedback"],
             golden_answer=self.golden_answer,
