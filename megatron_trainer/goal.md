@@ -433,7 +433,6 @@ CUDA_VISIBLE_DEVICES=7 .venv_vllm/bin/python scripts/eval_maas_sdft.py \
 - `megatron_trainer/vllm_utils.py` — vLLM HTTP client + NCCL weight sync (Megatron→HF conversion)
 - `megatron_trainer/trainer.py` — main training loop
 - `megatron_trainer/logprob_server.py` — teacher model NCCL command loop
-- `megatron_trainer/run.sh` — launcher (deprecated, cross-container NCCL doesn't work)
 - `megatron_trainer/smoke_all_in_container.sh` — smoke test launcher (1 epoch, grad_accum=2)
 - `megatron_trainer/train_full.sh` — PRODUCTION launcher (10 epochs, grad_accum=32)
 - `megatron_trainer/start_vllm_patched.py` — vLLM launcher with prometheus fix
