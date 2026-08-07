@@ -138,11 +138,11 @@ def train() -> None:
 
     # ---- Optimizer (FSDP: torch AdamW; DDP: 8-bit Adam) ----
     if TRAINER_BACKEND == "fsdp":
-        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
         logger.info(f"torch AdamW optimizer ready. LR={LEARNING_RATE}")
     else:
         import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE)
+        optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
         logger.info(f"8-bit Adam optimizer ready. LR={LEARNING_RATE}")
 
     # ---- Dataset (all ranks load, only rank 0 iterates) ----
