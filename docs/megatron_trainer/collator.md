@@ -57,7 +57,7 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
   - **System message** — always complete (includes the `<tools>` block when tool defs are present).
   - **Privileged hint** (conditional only) — appended *after* body truncation, then a second pass protects it; the hint is always complete.
   - Everything else is droppable — **including the last user message (the question)**, dropped only if truly needed.
-- **Invariant (asserted, not warned)**: max lengths must always be greater than the system-prompt render and the system + hindsight render — `render(system + tools) ≤ STUDENT_MAX_PROMPT_LEN` (asserted at collator init) and `render(system + tools + hint) ≤ TEACHER_MAX_PROMPT_LEN` (asserted per example). Truncation therefore always fits by construction; exceeding the protected set is a config error and **raises**.
+- **Invariant (drop, don't raise)**: max lengths must always be greater than the system-prompt render and the system + hindsight render — `render(system + tools) ≤ STUDENT_MAX_PROMPT_LEN` and `render(system + tools + hint) ≤ TEACHER_MAX_PROMPT_LEN`. Truncation therefore always fits by construction. A violation does **not** raise: the offending example is **dropped from the dataset** at load time (one-time startup filter before the DataLoader is built) and **never trained on**, with a `logger.warning` per drop plus a summary. No example is ever rendered over budget; examples that fit are guaranteed to be truncatable to budget. If the filter leaves the dataset empty, training cannot proceed — log an error and raise.
 - Applies to **both paths** (Qwen + gpt-oss, and old + new format) — it is a no-op for old-format data, whose prompts are far below budget.
 
 ### Validation evidence (data/ols/train_sdft_mini.jsonl, 31 items)
@@ -75,7 +75,7 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 | Truncation: conditionals > 15,360 | 0/31 after truncation (2 items drop messages) |
 | System message complete after truncation | 31/31 |
 | Privileged hint complete after truncation | 31/31 |
-| Budget asserts (init system render; per-example system+hint render) | pass on all 31 |
+| Protected-set drop filter (system ≤ 14,336; system+hint ≤ 15,360) | 0/31 dropped, 0 warnings at OLS budgets |
 | Reference: full (unstripped) tools block | +7,214 tokens/prompt → 17/31 > 14,336, 8/31 > 16,384 (rejected) |
 
 **Budget note:** stripped defs fit the budgets (`STUDENT_MAX_PROMPT_LEN=14336`, `TEACHER_MAX_PROMPT_LEN=15360`) — 1/31 prompts and 2/31 conditionals slightly exceed and are handled by collator truncation (message-level drop, system + hint protected). None exceed 16,384 pre-truncation. The server side must be launched with `--max-model-len ≥ budget + GEN_MAX_NEW_TOKENS` (e.g. 16,384 for 14,336 + 1,024), or vLLM hard-rejects (400).
@@ -84,7 +84,7 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 
 - **No thinking hardcoded, except for oss.** The gpt-oss path may force the analysis channel (`_append_analysis_channel`); the Qwen path must not hardcode thinking — `enable_thinking` stays config-driven (default `False`).
 - **New-format paths are Qwen-only.** Tool defs (`tools != None`), `tool_calls`, and `tool_results` are only validated for Qwen-family models. If any of these are present and the model is not Qwen, **raise an error** stating this path is not validated — gpt-oss currently fails silently or with obscure jinja errors on this shape (drops calls 2..N, crashes on `content|tojson`).
-- **Truncation invariant.** Max lengths must always exceed the system-prompt render and the system + hindsight renders — `render(system + tools) ≤ STUDENT_MAX_PROMPT_LEN` and `render(system + tools + hint) ≤ TEACHER_MAX_PROMPT_LEN`, asserted at collator init and per example. Violation is a config error and raises.
+- **Protected-set budgets are enforced by dropping, never by raising.** If `render(system + tools) > STUDENT_MAX_PROMPT_LEN` or `render(system + tools + hint) > TEACHER_MAX_PROMPT_LEN`, the example is dropped at dataset load with a warning and not trained on; a fully-dropped dataset is an error. This keeps runs alive on datasets with a few oversized hints (e.g. legacy WildChat/enriched data where the hint alone can exceed a small `TEACHER_MAX_PROMPT_LEN`).
 
 ## Proposed changes to `megatron_trainer/collator.py`
 
@@ -96,5 +96,6 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 - Add family guard: `tools is not None` OR any `tool_calls`/`tool_results` present AND model not Qwen → `ValueError` ("path not validated for this model family")
 - Privileged hint placement: merge into last message's content if `role == "user"`, else append a new `user` message (used for `conditional_texts`)
 - Add `_truncate_to_budget(messages, budget, protect_last=False) -> list`: message-level drop from the front (after system) until the rendered token count fits; greedy re-render per drop; `protect_last=True` for conditional (hint never dropped); applies to both paths, no-op within budget
-- Assertions: system-only render (with tools block) ≤ `STUDENT_MAX_PROMPT_LEN` at collator init; per-example system+hint render ≤ `TEACHER_MAX_PROMPT_LEN` (raise on violation — config error)
-- `normalized_messages` returns the **truncated** trajectory (what was actually rendered)
+- Replace the init/per-example budget asserts with a **drop filter**: `filter_dataset(dataset, rank)` runs once at load, `_drop_reason(ex) -> str | None` checks the protected-set renders against `STUDENT_MAX_PROMPT_LEN` / `TEACHER_MAX_PROMPT_LEN`, drops violating examples via `dataset.select(valid_indices)` and `logger.warning`s each drop (rank 0) plus a summary; empty filtered dataset → `logger.error` + raise
+- Factor hint building into `_hint_for(ex) -> str | None` (None for `online_feedback`), reused by the drop filter and `__call__`
+- `__post_init__` system+tools check → `logger.warning` (no crash); `normalized_messages` returns the **truncated** trajectory (what was actually rendered)

@@ -1,4 +1,43 @@
+2026-08-07 14:16:37.900 | WARNING  | megatron_trainer.collator:__post_init__:211 - system + tools render is 2306 tokens, exceeding STUDENT_MAX_PROMPT_LEN=100; every example will be dropped by the protected-set filter
+2026-08-07 14:16:37.903 | WARNING  | megatron_trainer.collator:__post_init__:211 - system + tools render is 2306 tokens, exceeding STUDENT_MAX_PROMPT_LEN=100; every example will be dropped by the protected-set filter
+2026-08-07 14:16:37.943 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=0: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.946 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=1: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.949 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=2: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.953 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=3: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.956 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=4: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.959 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=5: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.962 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=6: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.965 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=7: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.969 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=8: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.972 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=9: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.976 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=10: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.979 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=11: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.983 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=12: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.987 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=13: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.991 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=14: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.995 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=15: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:37.998 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=16: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.001 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=17: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.004 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=18: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.008 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=19: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.011 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=20: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.014 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=21: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.017 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=22: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.020 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=23: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.023 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=24: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.026 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=25: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.030 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=26: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.033 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=27: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.036 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=28: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.039 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=29: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.043 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=30: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-07 14:16:38.043 | WARNING  | megatron_trainer.collator:filter_dataset:285 - Dropped 31/31 examples (protected-set over budget)
+2026-08-07 14:16:38.043 | ERROR    | megatron_trainer.collator:filter_dataset:287 - All examples dropped by the protected-set filter; cannot train
+2026-08-07 14:16:38.052 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=0: system + hint render 3036 > TEACHER_MAX_PROMPT_LEN 2048
+2026-08-07 14:16:38.056 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=2: system + hint render 3036 > TEACHER_MAX_PROMPT_LEN 2048
+2026-08-07 14:16:38.056 | WARNING  | megatron_trainer.collator:filter_dataset:285 - Dropped 2/3 examples (protected-set over budget)
 [1] tool defs loaded + stripped: 28 defs, 0 descriptions
+[1c] protected-set drop filter: 0/31 dropped at OLS budgets
 [1b] truncation: 1 items dropped messages (max 2 msgs); normalized_messages = truncated
 [2] prompt tokens: 2382-13887, median 9541 — 0/31 > 14336 (0 after truncation), 0/31 > 16384
 [3] conditional tokens: 2490-14966, median 9632 — 0/31 > 15360 (0 after truncation), 0/31 > 16384
@@ -10,7 +49,8 @@
 [8] gpt-oss + old format (no tool shape): no guard fire, renders
 [9] old-format regression: renders, no tools block, hint merged into last user msg
 [10] _append_hint helper: merge path ok
-[11] init assert fires on tiny STUDENT_MAX_PROMPT_LEN: ValueError — Protected-set render (system + tools (init)) is 2306 tokens, exceeding budget 10...
-[12] per-example teacher assert fires on tiny TEACHER_MAX_PROMPT_LEN: ValueError — Protected-set render (system + tools + hint) is 2466 tokens, exceeding budget 30...
+[11] init budget check warns (no raise) on tiny STUDENT_MAX_PROMPT_LEN
+[12] empty filtered dataset raises: ValueError — All examples dropped by protected-set filter; raise STUDENT_MAX_PROMPT...
+[13] drop filter: 2 over-budget hints dropped (warned), 1 kept
 
 ALL CHECKS PASSED

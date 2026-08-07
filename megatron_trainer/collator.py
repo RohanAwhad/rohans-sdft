@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from transformers import PreTrainedTokenizerBase
 
+from loguru import logger
+
 from megatron_trainer.config import (
     IS_GPT_OSS,
     IS_QWEN,
@@ -81,7 +83,7 @@ def _target_text(user_response: Dict[str, Any]) -> str:
     stripping artifacts).
     """
     parts = []
-    for tc in user_response.get("tool_calls", []):
+    for tc in user_response.get("tool_calls") or []:
         parts.append(f"{tc['name']}({json.dumps(tc['arguments'])})")
     content = (user_response.get("content") or user_response.get("value") or "").strip()
     if content:
@@ -186,23 +188,6 @@ def _load_tool_defs() -> Optional[List[Dict[str, Any]]]:
 TOOL_DEFS = _load_tool_defs()
 
 
-def _assert_protected_fits(
-    messages: List[Dict[str, Any]],
-    tokenizer: PreTrainedTokenizerBase,
-    budget: int,
-    render_kwargs: Dict[str, Any],
-    label: str,
-) -> None:
-    """Assert a protected-only render fits the budget (config invariant)."""
-    n_tokens, _ = _render_tokens(messages, tokenizer, render_kwargs)
-    if n_tokens > budget:
-        raise ValueError(
-            f"Protected-set render ({label}) is {n_tokens} tokens, exceeding "
-            f"budget {budget}; max lengths must exceed system/hint renders "
-            "(config error — raise the max length)"
-        )
-
-
 @dataclass
 class SDFTCollator:
     """Collator for on-policy SDFT.
@@ -215,15 +200,98 @@ class SDFTCollator:
     tokenizer: PreTrainedTokenizerBase
     hindsight_field: str = "enriched_user_response"
 
+    def _render_kwargs(self) -> Dict[str, Any]:
+        return {"tools": TOOL_DEFS} if TOOL_DEFS is not None else {}
+
     def __post_init__(self) -> None:
-        render_kwargs = {"tools": TOOL_DEFS} if TOOL_DEFS is not None else {}
-        _assert_protected_fits(
-            [{"role": "system", "content": ""}],
-            self.tokenizer,
-            STUDENT_MAX_PROMPT_LEN,
-            render_kwargs,
-            "system + tools (init)",
+        n_tokens, _ = _render_tokens(
+            [{"role": "system", "content": ""}], self.tokenizer, self._render_kwargs()
         )
+        if n_tokens > STUDENT_MAX_PROMPT_LEN:
+            logger.warning(
+                f"system + tools render is {n_tokens} tokens, exceeding "
+                f"STUDENT_MAX_PROMPT_LEN={STUDENT_MAX_PROMPT_LEN}; every example "
+                "will be dropped by the protected-set filter"
+            )
+
+    def _hint_for(self, ex: Dict[str, Any]) -> Optional[str]:
+        """Build the privileged hint for an example, or None for online_feedback."""
+        if self.hindsight_field == "online_feedback":
+            return None
+        template = HINDSIGHT_TEMPLATES[self.hindsight_field]
+        if self.hindsight_field == "enriched_user_response":
+            doc_data = ex["enriched_user_response"]
+            doc = (doc_data.get("value") or doc_data.get("content") or "").strip()
+            answer_data = ex["user_response"]
+            answer = (answer_data.get("value") or answer_data.get("content") or "").strip()
+            return template.format(doc=doc, answer=answer)
+        o = _target_text(ex[self.hindsight_field])
+        return template.format(o=o)
+
+    def _drop_reason(self, ex: Dict[str, Any]) -> Optional[str]:
+        """Reason to drop an example (protected set over budget), or None.
+
+        The protected set — system + tools, and (unless online_feedback) the
+        privileged hint — is never truncated, so an example whose protected
+        render exceeds its budget cannot fit. Such examples are dropped at
+        dataset load instead of raising.
+        """
+        clean_prompt = _normalize_messages(ex["prompt"])
+        system_msgs: list[dict] = []
+        if clean_prompt and clean_prompt[0]["role"] == "system":
+            system_msgs.append(clean_prompt[0])
+            n_tokens, _ = _render_tokens(
+                system_msgs, self.tokenizer, self._render_kwargs()
+            )
+            if n_tokens > STUDENT_MAX_PROMPT_LEN:
+                return (
+                    f"system render {n_tokens} > STUDENT_MAX_PROMPT_LEN "
+                    f"{STUDENT_MAX_PROMPT_LEN}"
+                )
+        hint = self._hint_for(ex)
+        if hint is None:
+            return None
+        n_tokens, _ = _render_tokens(
+            system_msgs + [{"role": "user", "content": hint}],
+            self.tokenizer,
+            self._render_kwargs(),
+        )
+        if n_tokens > TEACHER_MAX_PROMPT_LEN:
+            return (
+                f"system + hint render {n_tokens} > TEACHER_MAX_PROMPT_LEN "
+                f"{TEACHER_MAX_PROMPT_LEN}"
+            )
+        return None
+
+    def filter_dataset(self, dataset, rank: int = 0):
+        """Drop examples whose protected set exceeds a budget, at load time.
+
+        One-time startup pass before the DataLoader is built. Dropped examples
+        are logged as warnings and never trained on. A fully-dropped dataset
+        cannot train — log an error and raise.
+        """
+        total = len(dataset)
+        valid_indices = []
+        dropped = 0
+        for idx in range(total):
+            reason = self._drop_reason(dataset[idx])
+            if reason is None:
+                valid_indices.append(idx)
+            else:
+                dropped += 1
+                if rank == 0:
+                    logger.warning(f"Dropping example idx={idx}: {reason}")
+        if rank == 0 and dropped:
+            logger.warning(f"Dropped {dropped}/{total} examples (protected-set over budget)")
+        if not valid_indices:
+            logger.error(
+                "All examples dropped by the protected-set filter; cannot train"
+            )
+            raise ValueError(
+                "All examples dropped by protected-set filter; raise "
+                "STUDENT_MAX_PROMPT_LEN / TEACHER_MAX_PROMPT_LEN"
+            )
+        return dataset.select(valid_indices)
 
     def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         prompt_texts: list[str] = []
@@ -232,7 +300,7 @@ class SDFTCollator:
         golden_answers: list[str] = []
         normalized_messages: list[list[dict[str, str]]] = []
 
-        render_kwargs = {"tools": TOOL_DEFS} if TOOL_DEFS is not None else {}
+        render_kwargs = self._render_kwargs()
 
         for ex in examples:
             clean_prompt = _normalize_messages(ex["prompt"])
@@ -252,16 +320,6 @@ class SDFTCollator:
                 )
 
             golden_answers.append(_target_text(ex["user_response"]))
-
-            # Per-example protected-set assert (system always complete).
-            if clean_prompt and clean_prompt[0]["role"] == "system":
-                _assert_protected_fits(
-                    clean_prompt[:1],
-                    self.tokenizer,
-                    STUDENT_MAX_PROMPT_LEN,
-                    render_kwargs,
-                    "system + tools",
-                )
 
             # --- Student prompt (x) ---
             student_prompt, p_text = _truncate_to_budget(
@@ -287,30 +345,7 @@ class SDFTCollator:
             if self.hindsight_field == "online_feedback":
                 conditional_texts.append(None)
             else:
-                template = HINDSIGHT_TEMPLATES[self.hindsight_field]
-
-                if self.hindsight_field == "enriched_user_response":
-                    doc_data = ex["enriched_user_response"]
-                    doc = (doc_data.get("value") or doc_data.get("content") or "").strip()
-                    answer_data = ex["user_response"]
-                    answer = (answer_data.get("value") or answer_data.get("content") or "").strip()
-                    hint = template.format(doc=doc, answer=answer)
-                else:
-                    o = _target_text(ex[self.hindsight_field])
-                    hint = template.format(o=o)
-
-                # Per-example protected-set assert (system + hint always complete).
-                assert_msgs: list[dict] = []
-                if clean_prompt and clean_prompt[0]["role"] == "system":
-                    assert_msgs.append(clean_prompt[0])
-                assert_msgs.append({"role": "user", "content": hint})
-                _assert_protected_fits(
-                    assert_msgs,
-                    self.tokenizer,
-                    TEACHER_MAX_PROMPT_LEN,
-                    render_kwargs,
-                    "system + tools + hint",
-                )
+                hint = self._hint_for(ex)
 
                 conditional_history = _append_hint(clean_prompt, hint)
                 _, xo_text = _truncate_to_budget(

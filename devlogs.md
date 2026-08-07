@@ -585,3 +585,21 @@ Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a differ
 ### Gotcha
 - Drop order matters: for OLS the question is message index 1 — naive "drop from front" killed the question first (StopIteration on raw_questions). Fixed: oldest turns first, question last-droppable, hint never.
 - Init assert uses STUDENT_MAX_PROMPT_LEN: default 2048 fails on OLS (system+tools = 2,306) — correct; runs must pass STUDENT_MAX_PROMPT_LEN=14336.
+
+## 2026-08-07 - Collator: budget violations drop examples instead of raising
+
+### Why
+- The per-example protected-set assert crashed a legacy gpt-oss/analyze_research run (run_5): enriched hint render 2,171 > default TEACHER_MAX_PROMPT_LEN 2048, ValueError at step 0, torchrun SIGTERM'd all ranks.
+- Decision: budget violations must NOT raise — drop the offending example at dataset load (never trained on) and log a warning. Only a fully-dropped dataset raises.
+
+### Code changes
+- collator.py: deleted `_assert_protected_fits`; added `_hint_for(ex)` (hint build factored out, None for online_feedback), `_drop_reason(ex)` (protected-set renders vs STUDENT_MAX_PROMPT_LEN / TEACHER_MAX_PROMPT_LEN), `filter_dataset(dataset, rank)` (one-time load pass, `dataset.select(valid_indices)`, per-drop + summary warnings on rank 0, raises if all dropped); `__post_init__` system+tools check is now a warning (no crash); `__call__` per-example asserts removed, uses `_hint_for`; loguru import.
+- trainer.py: `dataset = collator.filter_dataset(dataset, rank=rank)` inserted after collator construction, before DataLoader — steps_per_epoch auto-adjusts.
+- Also fixed latent bug: `_target_text` crashed on explicit `tool_calls: null` (HF datasets normalize missing keys to None); now `user_response.get("tool_calls") or []`.
+
+### Verification (play.py, 15 checks)
+- OLS at 14,336/15,360: 0/31 dropped by filter; truncation/completeness/hint-placement unchanged.
+- Init budget check warns (no raise); empty filtered dataset raises ValueError; partial drop: 2 over-budget hints dropped (warned), 1 kept; family guard unchanged.
+
+### Note
+- The analyze_research run_5 crash is now resolved by the drop filter: over-budget hints are skipped with warnings instead of killing the run. If TEACHER_MAX_PROMPT_LEN=2048 drops too many, raise the budget.

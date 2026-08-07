@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from datasets import Dataset
+
 TOKENIZER_PATH = "/mnt/nvme5n1/rohan_patched_ckpts/hf-cache/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
 OLS_DATA = "data/ols/train_sdft_mini.jsonl"
 STUDENT_LIMIT = 14336
@@ -47,6 +49,10 @@ def main():
 
     c = collator.SDFTCollator(tokenizer=tok, hindsight_field="user_response")
     out = c(examples)
+
+    kept_ds = c.filter_dataset(Dataset.from_list(examples))
+    assert len(kept_ds) == 31, "drop filter removed valid OLS examples"
+    print("[1c] protected-set drop filter: 0/31 dropped at OLS budgets")
 
     assert len(out["prompt_texts"]) == len(out["conditional_texts"]) == 31
     assert all(x is not None for x in out["conditional_texts"])
@@ -177,26 +183,39 @@ def main():
     assert h[-1]["role"] == "user" and h[-1]["content"].endswith("hint")
     print("[10] _append_hint helper: merge path ok")
 
-    # ---------------- Phase 4: budget asserts (config errors) ----------------
+    # ---------------- Phase 4: drop filter (no raises on budgets) ----------------
+    # [11] init budget check warns (no crash); [12] empty dataset is a hard error
     collator4 = reset({"TRAIN_DATA_PATH": OLS_DATA, "MODEL_NAME": "Qwen/Qwen3-8B",
                        "STUDENT_MAX_PROMPT_LEN": "100"})
+    collator4.SDFTCollator(tokenizer=tok, hindsight_field="user_response")  # must not raise
+    print("[11] init budget check warns (no raise) on tiny STUDENT_MAX_PROMPT_LEN")
     try:
-        collator4.SDFTCollator(tokenizer=tok, hindsight_field="user_response")
-        raise AssertionError("init assert did not fire")
+        collator4.SDFTCollator(tokenizer=tok, hindsight_field="user_response").filter_dataset(
+            Dataset.from_list(examples)
+        )
+        raise AssertionError("empty-dataset did not raise")
     except ValueError as e:
-        assert "exceeding budget" in str(e)
-        print(f"[11] init assert fires on tiny STUDENT_MAX_PROMPT_LEN: ValueError — {str(e)[:80]}...")
+        assert "All examples dropped" in str(e)
+        print(f"[12] empty filtered dataset raises: ValueError — {str(e)[:70]}...")
 
-    collator5 = reset({"TRAIN_DATA_PATH": OLS_DATA, "MODEL_NAME": "Qwen/Qwen3-8B",
+    # [13] partial drop: over-budget hints dropped, rest kept, warnings logged
+    collator5 = reset({"TRAIN_DATA_PATH": str(old_dir / "train.jsonl"),
+                       "MODEL_NAME": "Qwen/Qwen3-8B",
                        "STUDENT_MAX_PROMPT_LEN": "14336",
-                       "TEACHER_MAX_PROMPT_LEN": "300"})
-    c5 = collator5.SDFTCollator(tokenizer=tok, hindsight_field="user_response")
-    try:
-        c5(examples)
-        raise AssertionError("per-example teacher assert did not fire")
-    except ValueError as e:
-        assert "system + tools + hint" in str(e)
-        print(f"[12] per-example teacher assert fires on tiny TEACHER_MAX_PROMPT_LEN: ValueError — {str(e)[:80]}...")
+                       "TEACHER_MAX_PROMPT_LEN": "2048"})
+    assert collator5.TOOL_DEFS is None
+    c5 = collator5.SDFTCollator(tokenizer=tok, hindsight_field="enriched_user_response")
+    legacy_big = {"prompt": [{"from": "human", "value": "q"}],
+                  "user_response": {"value": "a"},
+                  "enriched_user_response": {"value": "doc " * 3000}}
+    legacy_small = {"prompt": [{"from": "human", "value": "q"}],
+                    "user_response": {"value": "a"},
+                    "enriched_user_response": {"value": "short"}}
+    kept5 = c5.filter_dataset(Dataset.from_list([legacy_big, legacy_small, legacy_big]))
+    assert len(kept5) == 1, "expected 2 over-budget hints dropped, 1 kept"
+    out5 = c5(list(kept5))
+    assert "short" in out5["conditional_texts"][0] and "doc " * 3000 not in out5["conditional_texts"][0]
+    print("[13] drop filter: 2 over-budget hints dropped (warned), 1 kept")
 
     print("\nALL CHECKS PASSED")
 

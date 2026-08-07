@@ -149,6 +149,9 @@ def train() -> None:
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
     dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
     collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
+    # Drop examples whose protected set (system + hint) exceeds the budgets —
+    # logged as warnings, never trained on. Deterministic across ranks.
+    dataset = collator.filter_dataset(dataset, rank=rank)
     dataloader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True,
     )
