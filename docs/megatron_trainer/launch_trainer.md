@@ -111,7 +111,7 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | `SAVE_EVERY` | `200` | `200` | — | optimizer steps between checkpoints to `OUTPUT_DIR/step_{N}` |
 | `LEARNING_RATE` | `5e-5` | `5e-5` | — | |
 | `EMA_ALPHA` | `0.05` | `0.05` | — | EMA for student→teacher blend (ignored when `TEACHER_MODEL_PATH` set) |
-| `TRAINER_BACKEND` | `fsdp` | `fsdp` | — | **default**; `ddp` = bitsandbytes AdamW8bit; `fsdp` = torch AdamW + MCore FSDP |
+| `TRAINER_BACKEND` | `fsdp` | `fsdp` | — | **default**; MCore FSDP + torch AdamW (the `ddp`/8-bit path is being removed — see `TODOS.md`) |
 
 ### Data & collator
 

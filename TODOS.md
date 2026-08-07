@@ -20,13 +20,32 @@ Spec updated (`docs/megatron_trainer/launch_trainer.md`). Code defaults still `d
 - [ ] `megatron_trainer/config.py:30` — `TRAINER_BACKEND = os.environ.get("TRAINER_BACKEND", "ddp")` → default `fsdp`
 - [ ] Smoke with no `TRAINER_BACKEND` set (FSDP path, bitsandbytes no longer loaded)
 
-## Remove 8-bit AdamW (bitsandbytes)
+## Remove DDP trainer backend + 8-bit AdamW (FSDP-only)
 
-Only used by the `ddp` backend; dead once FSDP is the only backend.
+Spec updated (`docs/megatron_trainer/trainer.md`, `launch_trainer.md`): only `fsdp` is
+documented. Code still has the `ddp`/`bitsandbytes` path — remove later.
 
-- [ ] `megatron_trainer/trainer.py:139-146` — drop the `bitsandbytes` import + `bnb.optim.AdamW8bit` branch (FSDP torch AdamW is the only optimizer)
-- [ ] `megatron_trainer/config.py:29` — drop the `ddp` = AdamW8bit comment
-- [ ] Remove `bitsandbytes` from the container install (`megatron_trainer/train_full.sh:119`) if nothing else uses it
+- [ ] `megatron_trainer/trainer.py` — drop the `TRAINER_BACKEND` if/else branches (wrap `:122-137`,
+      optimizer `:139-146`, `finish_grad_sync` `:382-383`, weight-sync/ckpt rank guards `:434,469,474`);
+      hardcode the MCore FSDP path
+- [ ] Rename the `ddp_model` handle to the FSDP-wrapped model
+- [ ] `megatron_trainer/config.py:29-30` — drop `TRAINER_BACKEND` env read + `ddp` comment
+- [ ] `megatron_trainer/train_full.sh:105` — drop `-e TRAINER_BACKEND` passthrough
+- [ ] Remove `bitsandbytes` from the container install (`megatron_trainer/train_full.sh:119`)
+
+## Log `train/grad_norm` to wandb
+
+Spec updated (`docs/megatron_trainer/trainer.md` §7). Code doesn't capture it yet.
+
+- [ ] `megatron_trainer/trainer.py:384` — capture the return value: `grad_norm = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)`
+- [ ] `megatron_trainer/trainer.py:404-409` — add `"train/grad_norm": grad_norm` to `log_dict`
+
+## Expand wandb run config
+
+Run config (`trainer.py:171-186`) omits several knobs and hardcodes `backend`. Add them:
+
+- [ ] `megatron_trainer/trainer.py:174` — replace hardcoded `"backend": "megatron-bridge-ddp"` with `TRAINER_BACKEND`
+- [ ] `megatron_trainer/trainer.py:171-186` — add to `config`: `max_grad_norm` (`MAX_GRAD_NORM`), `max_total_len` (`MAX_TOTAL_LEN`), `student_max_prompt_len` (`STUDENT_MAX_PROMPT_LEN`), `teacher_max_prompt_len` (`TEACHER_MAX_PROMPT_LEN`), `thinking_budget` (`THINKING_BUDGET`), `ema_alpha` (`EMA_ALPHA`), `teacher_model` (`TEACHER_MODEL_PATH`)
 
 ## Remove `LOGPROB_BATCH_SIZE` (server-side batching)
 
