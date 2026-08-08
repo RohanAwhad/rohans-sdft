@@ -132,7 +132,8 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | `REFLECTOR_PROJECT_ID` | — | `(empty)` | online_feedback | required for reflector calls |
 | `GEN_TEMPERATURE` | `0.7` | `0.7` | — | |
 | `GEN_TOP_P` | — | `0.95` | — | |
-| `THINKING_BUDGET` | — | `512` | — | |
+| `STUDENT_THINKING` | `0` | `0` | — | `1` → student + teacher render with thinking on (Qwen: `enable_thinking=True`; gpt-oss: analysis channel). Only Qwen/gpt-oss validated — `config.py` raises otherwise. Completion stays a single vLLM pass (truncated-CoT split deferred) |
+| `THINKING_BUDGET` | `512` | `512` | — | api_adapter thinking split (`env/api_adapter_env.py:182`); unused by the rag path while thinking-on generation is single-pass |
 
 ### Servers / ports
 
@@ -230,8 +231,7 @@ Start a job, then inspect `logs/` (all host-visible via the workspace mount) in 
 ## Constraints
 
 - **`train_full.sh` is the only supported launch path.**
-- No hardcoded thinking for Qwen — the collator renders with `enable_thinking=False`
-  (`collator.py:122`), no launcher knob.
+- Student thinking is launcher-controlled: `STUDENT_THINKING` (default `0` → `enable_thinking=False` / final channel, current behavior). `1` → thinking on (Qwen `enable_thinking=True`; gpt-oss analysis channel). Both student and teacher renders flip together.
 - Budget semantics live in the collator spec — the launcher's job is to pass budgets through and keep
   `--max-model-len` consistent with them.
 
@@ -240,6 +240,8 @@ Start a job, then inspect `logs/` (all host-visible via the workspace mount) in 
 - **Budget defaults are a foot-gun.** `STUDENT/TEACHER_MAX_PROMPT_LEN=2048` is legacy; consider
   defaulting to the OLS values (14336/15360) or deriving them from the dataset, and matching
   `MAX_TOTAL_LEN` / `GEN_MAX_NEW_TOKENS` so the `config.py` assert passes without manual override.
+- **Thinking knobs passed through**: `STUDENT_THINKING` and `THINKING_BUDGET` now reach the
+  container via `-e` (both defaulted in the script).
 - **Make the parallel-job port block env-configurable** (currently two of the four ports are
   hardcoded, which blocks co-located runs on one node):
   - `LOGPROB_PORT`: currently `-e LOGPROB_PORT=8010` hardcoded → read from env with default 8010

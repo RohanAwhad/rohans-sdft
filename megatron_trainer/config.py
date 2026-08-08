@@ -21,6 +21,17 @@ IS_GPT_OSS = "gpt-oss" in MODEL_NAME.lower()
 # (tools / tool_calls / tool_results). Non-Qwen models with that shape raise.
 IS_QWEN = "qwen" in MODEL_NAME.lower()
 
+# Student thinking mode ("1" = thinking on). Qwen renders with
+# enable_thinking=True (native CoT, no empty <think> block); gpt-oss switches
+# to the analysis channel. Applies to both student and teacher renders.
+STUDENT_THINKING = os.environ.get("STUDENT_THINKING", "0") == "1"
+
+if STUDENT_THINKING and not (IS_QWEN or IS_GPT_OSS):
+    raise ValueError(
+        "STUDENT_THINKING=1 is only validated for Qwen and gpt-oss model "
+        f"families, got MODEL_NAME={MODEL_NAME}"
+    )
+
 # GPU assignment (physical GPU IDs, used in CUDA_VISIBLE_DEVICES)
 GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))

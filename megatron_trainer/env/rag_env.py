@@ -7,6 +7,7 @@ and produces a ready-to-use privileged_information_prompt for the teacher.
 import copy
 
 from megatron_trainer import reflector
+from megatron_trainer.config import STUDENT_THINKING
 from megatron_trainer.env.base import BaseEnv
 from megatron_trainer.vllm_utils import vllm_generate
 
@@ -66,5 +67,6 @@ class RagEnv(BaseEnv):
             golden_answer=self.golden_answer,
         )
         self.privileged_information_prompt = self.tokenizer.apply_chat_template(
-            cond_history, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            cond_history, tokenize=False, add_generation_prompt=True,
+            enable_thinking=STUDENT_THINKING,
         )

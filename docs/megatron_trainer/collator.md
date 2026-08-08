@@ -25,9 +25,9 @@ Only `prompt_texts` / `conditional_texts` participate in training.
 ## Current behavior (gpt-oss — kept as-is, flag-gated)
 
 - `_normalize_messages`: converts WildChat `from/value` → `role/content`
-- `IS_GPT_OSS` flag (derived from `MODEL_NAME`) gates `_append_analysis_channel`: appends `<|channel|>analysis<|message|>` to the generation prompt to force the gpt-oss model into its thinking channel
+- `IS_GPT_OSS` flag (derived from `MODEL_NAME`) gates `_append_channel`: appends an explicit channel start to the generation prompt so gpt-oss picks a deterministic channel — `<|channel|>analysis<|message|>` when `STUDENT_THINKING=1` (thinking channel, model self-switches to final when done), `<|channel|>final<|message|>` otherwise (answer-only)
 - `HINDSIGHT_TEMPLATES`: `user_response`, `enriched_user_response`, `online_feedback` (latter defers privileged text to the env after rollout)
-- Renders via `apply_chat_template(add_generation_prompt=True, enable_thinking=False)` with gpt-oss's harmony template
+- Renders via `apply_chat_template(add_generation_prompt=True, enable_thinking=STUDENT_THINKING)` with gpt-oss's harmony template
 
 This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 
@@ -36,7 +36,7 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 ### Qwen3 specifics (validated)
 
 - **Native multi-call tool calling** — all N `<tool_call>` blocks render inline in one assistant message (gpt-oss's template hardcodes `tool_calls[0]`, silently dropping calls 2..N; Qwen3 needs no splitting/custom rendering)
-- **Generation prompt** with `enable_thinking=False` renders `<|im_start|>assistant\n<think>\n\n</think>\n\n` — official template quirk, identical string at train and serve time
+- **Generation prompt** — `enable_thinking` driven by `STUDENT_THINKING` (default `False`): `False` renders `<|im_start|>assistant\n<think>\n\n</think>\n\n` (official template quirk, identical string at train and serve time); `True` renders a bare `<|im_start|>assistant\n` and the model thinks natively. Applies to **both** student and teacher renders (reverse-KL requires both sides to match).
 - **Tool defs ARE included in the prompt** — the model must know its tool inventory to call the right tool with the right arguments. Passed via `tools=` to `apply_chat_template`, which renders them as a `<tools>` JSON block in the system message. Loaded from `tool_defs.json` next to the train dataset (`dirname(TRAIN_DATA_PATH)`); if absent, `tools=None` and the block is skipped.
 - **Stripped tool defs** — description fields are dropped (top-level + per-property), keeping names, parameter types, enums, defaults, required. Full OLS defs cost ~7,214 tokens; stripped cost **~2,332 tokens** (validated). Rationale: descriptions in the OLS defs are long (28 tools), and the token budget matters more — the trajectory's tool calls demonstrate correct usage.
 
@@ -82,13 +82,14 @@ This path is **not removed** — both paths coexist, selected by `IS_GPT_OSS`.
 
 ## Constraints
 
-- **No thinking hardcoded, except for oss.** The gpt-oss path may force the analysis channel (`_append_analysis_channel`); the Qwen path must not hardcode thinking — `enable_thinking` stays config-driven (default `False`).
+- **Thinking is config-driven, per family.** `STUDENT_THINKING` (default `"0"`) selects the rendering for both Qwen and gpt-oss and applies to **both** student and teacher prompts (they must stay in sync for the reverse-KL). Qwen: `enable_thinking=STUDENT_THINKING`. gpt-oss: channel suffix `analysis` (thinking) vs `final` (answer-only). Only Qwen and gpt-oss families are validated with `STUDENT_THINKING=1` — `config.py` raises at import otherwise.
 - **New-format paths are Qwen-only.** Tool defs (`tools != None`), `tool_calls`, and `tool_results` are only validated for Qwen-family models. If any of these are present and the model is not Qwen, **raise an error** stating this path is not validated — gpt-oss currently fails silently or with obscure jinja errors on this shape (drops calls 2..N, crashes on `content|tojson`).
 - **Protected-set budgets are enforced by dropping, never by raising.** If `render(system + tools) > STUDENT_MAX_PROMPT_LEN` or `render(system + tools + hint) > TEACHER_MAX_PROMPT_LEN`, the example is dropped at dataset load with a warning and not trained on; a fully-dropped dataset is an error. This keeps runs alive on datasets with a few oversized hints (e.g. legacy WildChat/enriched data where the hint alone can exceed a small `TEACHER_MAX_PROMPT_LEN`).
 
 ## Proposed changes to `megatron_trainer/collator.py`
 
-- Keep gpt-oss path untouched (behind `IS_GPT_OSS`)
+- Keep gpt-oss path untouched (behind `IS_GPT_OSS`); `_append_channel` selects the channel suffix from `STUDENT_THINKING`
+- `_render_tokens` passes `enable_thinking=STUDENT_THINKING` (was hardcoded `False`)
 - Extend `_normalize_messages` with the tool branch (`tool_results` → `content=json.dumps(...)`)
 - Add `_target_text(user_response) -> str` (hand-format)
 - `raw_questions` → last user message (not `clean_prompt[-1]`)

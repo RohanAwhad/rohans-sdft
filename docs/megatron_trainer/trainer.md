@@ -183,7 +183,8 @@ the job 400s / OOMs / drops examples.
 | `STUDENT_MAX_PROMPT_LEN` | `2048` | **yes** | student prompt truncation; `≤ MAX_TOTAL_LEN − GEN_MAX_NEW_TOKENS` |
 | `TEACHER_MAX_PROMPT_LEN` | `2048` | **yes** | teacher cond truncation |
 | `MAX_TOTAL_LEN` | `8192` | **yes** | import-time guard: `STUDENT + GEN ≤ MAX_TOTAL_LEN` |
-| `THINKING_BUDGET` | `512` | api_adapter | adapter thinking split (`env/api_adapter_env.py:182`) |
+| `STUDENT_THINKING` | `0` | — | `1` → thinking on (Qwen `enable_thinking=True`; gpt-oss analysis channel); logged to wandb as `student_thinking` |
+| `THINKING_BUDGET` | `512` | api_adapter | adapter thinking split (`env/api_adapter_env.py:182`); logged to wandb as `thinking_budget` |
 | `GEN_MAX_NEW_TOKENS` | `MAX_TOTAL_LEN − STUDENT_MAX_PROMPT_LEN` | **yes** | rollout `max_tokens`, completion truncation, TCP recv-buffer size |
 | `GEN_TEMPERATURE` / `GEN_TOP_P` | `0.7` / `0.95` | — | `vllm_generate` |
 | Optimizer betas / wd / eps | `(0.9, 0.95)` / `0.01` / `1e-8` | — | fixed in `trainer.py:141` |
