@@ -2,6 +2,23 @@
 
 Checklist of pending cleanups / follow-ups. Tick items off as they land.
 
+## Make student thinking configurable (`STUDENT_THINKING`)
+
+Spec: `docs/megatron_trainer/thinking.md`. Currently fully hardcoded — Qwen renders
+with `enable_thinking=False` (collator), gpt-oss forces the **final** channel
+(`<|channel|>final<|message|>`, commit `475db67`), api_adapter hardcodes
+`enable_thinking=True`. No env knob exists.
+
+- [ ] `megatron_trainer/config.py` — add `STUDENT_THINKING` (default `"0"`, truthy `"1"`); raise at import if `STUDENT_THINKING=1` and model is neither Qwen nor gpt-oss
+- [ ] `megatron_trainer/collator.py:27,32` — channel suffix selectable: `analysis` (`<|channel|>analysis<|message|>`, thinking) vs `final` (current), driven by `IS_GPT_OSS + STUDENT_THINKING`
+- [ ] `megatron_trainer/collator.py:122` — `enable_thinking=False` → `enable_thinking=STUDENT_THINKING` (Qwen path; applies to both student and teacher renders — must stay in sync)
+- [ ] `megatron_trainer/env/rag_env.py:69` — `enable_thinking=False` → flag-gated
+- [ ] `megatron_trainer/env/api_adapter_env.py:193,302,324` — replace hardcoded `enable_thinking=True` with the flag (note: default-off flips api_adapter behavior — verify two-phase `THINKING_BUDGET` split on default path)
+- [ ] `megatron_trainer/env/rag_env.py:48` — thinking-on truncated CoT: force-close `</think>` + continue (reuse api_adapter two-phase pattern via shared `vllm_utils` helper)
+- [ ] `megatron_trainer/train_full.sh` — add `-e STUDENT_THINKING=...` and `-e THINKING_BUDGET=...` passthrough (THINKING_BUDGET currently never reaches the container)
+- [ ] `megatron_trainer/trainer.py:171-186` — wandb config: add `student_thinking`, `thinking_budget` (merges with the "Expand wandb run config" item below)
+- [ ] Update stale docs: `collator.md:28,85` (say gpt-oss forces analysis channel — code is final since `475db67`), `launch_trainer.md:233` ("no launcher knob" no longer true)
+
 ## Make `MODEL_NAME` / `TRAIN_DATA_PATH` required (no defaults)
 
 Spec updated (`docs/megatron_trainer/launch_trainer.md`): both are required with no default; the
