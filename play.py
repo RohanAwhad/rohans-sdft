@@ -16,6 +16,10 @@ TEACHER_LIMIT = 15360
 TOTAL_LIMIT = 16384
 HINT_PREFIX = "The following is the correct answer. Use this to guide your response: "
 
+GPT_OSS_PATH = "/mnt/nvme1n1/rawhad/.hf_cache/hub/models--unsloth--gpt-oss-20b-BF16/snapshots/cc89b3e7fd423253264883a80a4fa5abc619649f"
+ANALYSIS_CHANNEL = "<|channel|>analysis<|message|>"
+FINAL_CHANNEL = "<|channel|>final<|message|>"
+
 
 def reset(env_updates: dict):
     os.environ.update(env_updates)
@@ -149,7 +153,9 @@ def main():
     assert collator2b.TOOL_DEFS is None
     out_old = collator2b.SDFTCollator(tokenizer=tok, hindsight_field="user_response")([old_ex])
     assert out_old["prompt_texts"][0] and out_old["golden_answers"][0] == "a"
-    print("[8] gpt-oss + old format (no tool shape): no guard fire, renders")
+    assert out_old["prompt_texts"][0].endswith(FINAL_CHANNEL), "gpt-oss prompt lacks final channel suffix"
+    assert out_old["conditional_texts"][0].endswith(FINAL_CHANNEL), "gpt-oss conditional lacks final channel suffix"
+    print("[8] gpt-oss + old format (no tool shape): no guard fire, renders, final channel appended")
 
     # ---------------- Phase 3: old-format regression (no tools file) ----------------
     collator3 = reset({"TRAIN_DATA_PATH": str(old_dir / "train.jsonl"),
@@ -220,5 +226,43 @@ def main():
     print("\nALL CHECKS PASSED")
 
 
+def channel_compare():
+    """gpt-oss 128-token generation: forced analysis channel vs forced final channel."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(GPT_OSS_PATH, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        GPT_OSS_PATH,
+        local_files_only=True,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda:0",
+    )
+    model.eval()
+
+    base = tok.apply_chat_template(
+        [{"role": "user", "content": "Write a Python function that checks if a string is a palindrome. Explain your approach in one paragraph."}],
+        tokenize=False,
+        add_generation_prompt=True,
+    ).rstrip()
+    assert base.endswith("<|start|>assistant")
+
+    for name, suffix in [("analysis", ANALYSIS_CHANNEL), ("final", FINAL_CHANNEL)]:
+        prompt = base + suffix
+        ids = tok(prompt, return_tensors="pt", add_special_tokens=False).to("cuda")
+        with torch.no_grad():
+            out = model.generate(**ids, max_new_tokens=128, do_sample=False)
+        new_ids = out[0][ids["input_ids"].shape[1]:]
+        raw = tok.decode(new_ids, skip_special_tokens=False)
+        text = tok.decode(new_ids, skip_special_tokens=True)
+        channels = [c for c in ("analysis", "commentary", "final")
+                    if f"<|channel|>{c}<|message|>" in raw]
+        print(f"\n===== channel={name} | {new_ids.shape[0]} tokens | channels seen in output: {channels} =====")
+        print(f"raw (special tokens): {raw!r}")
+        print(f"clean completion: {text!r}")
+
+
 if __name__ == "__main__":
     main()
+    if os.environ.get("CHANNEL_COMPARE") == "1":
+        channel_compare()

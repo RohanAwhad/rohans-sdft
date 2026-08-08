@@ -24,21 +24,21 @@ from megatron_trainer.config import (
 )
 
 
-ANALYSIS_CHANNEL_SUFFIX = "<|channel|>analysis<|message|>"
+FINAL_CHANNEL_SUFFIX = "<|channel|>final<|message|>"
 
 TOOL_SHAPE_KEYS = ("tool_calls", "tool_results")
 
 
-def _append_analysis_channel(text: str) -> str:
-    """Force gpt-oss generation into the analysis (thinking) channel.
+def _append_final_channel(text: str) -> str:
+    """Force gpt-oss generation into the final (answer) channel.
 
     The gpt-oss chat template ends the generation prompt on a bare
     '<|start|>assistant' and the model picks a channel on its own; an explicit
-    analysis channel start makes it deterministic. Trailing whitespace is
+    final channel start makes it deterministic. Trailing whitespace is
     stripped so the suffix attaches directly to the assistant start token.
     """
-    if not text.rstrip().endswith(ANALYSIS_CHANNEL_SUFFIX):
-        return text.rstrip() + ANALYSIS_CHANNEL_SUFFIX
+    if not text.rstrip().endswith(FINAL_CHANNEL_SUFFIX):
+        return text.rstrip() + FINAL_CHANNEL_SUFFIX
     return text
 
 
@@ -330,7 +330,7 @@ class SDFTCollator:
                 render_kwargs=render_kwargs,
             )
             if IS_GPT_OSS:
-                p_text = _append_analysis_channel(p_text)
+                p_text = _append_final_channel(p_text)
             prompt_texts.append(p_text)
 
             # Raw data for env: truncated trajectory, last question, golden answer
@@ -356,7 +356,7 @@ class SDFTCollator:
                     render_kwargs=render_kwargs,
                 )
                 if IS_GPT_OSS:
-                    xo_text = _append_analysis_channel(xo_text)
+                    xo_text = _append_final_channel(xo_text)
                 conditional_texts.append(xo_text)
 
         return {

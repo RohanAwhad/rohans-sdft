@@ -13,7 +13,7 @@ HF_MODEL_PATH = os.environ.get("HF_MODEL_PATH", MODEL_NAME)
 TEACHER_MODEL_PATH = os.environ.get("TEACHER_MODEL_PATH", "")
 
 # gpt-oss models use a channel-based chat protocol (analysis/commentary/final).
-# When True, the collator appends an explicit analysis-channel suffix to
+# When True, the collator appends an explicit final-channel suffix to
 # generation prompts and vLLM must return special tokens (skip_special_tokens=False).
 IS_GPT_OSS = "gpt-oss" in MODEL_NAME.lower()
 
