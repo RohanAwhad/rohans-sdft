@@ -26,7 +26,7 @@ from loguru import logger
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 import wandb
 from megatron_trainer.collator import SDFTCollator
@@ -39,6 +39,7 @@ from megatron_trainer.config import (
     HF_MODEL_PATH,
     HINDSIGHT_FIELD,
     LEARNING_RATE,
+    LR_SCHEDULER,
     MAX_GRAD_NORM,
     MODEL_NAME,
     NUM_EPOCHS,
@@ -160,6 +161,24 @@ def train() -> None:
     steps_per_epoch = len(dataset) // GRAD_ACCUM_STEPS
     logger.info(f"Dataset: {len(dataset)} examples, {steps_per_epoch} steps/epoch")
 
+    # ---- LR scheduler (total steps known only after dataset load) ----
+    total_train_steps = steps_per_epoch * NUM_EPOCHS
+    warmup_steps = 0
+    scheduler = None
+    if LR_SCHEDULER == "cosine":
+        warmup_steps = min(int(0.1 * total_train_steps), 100)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_train_steps,
+        )
+        logger.info(
+            f"LR scheduler: cosine, warmup={warmup_steps} over {total_train_steps} "
+            f"optimizer steps"
+        )
+    else:
+        logger.info("LR scheduler: constant")
+
     # ---- Rank 0 only: wandb, vLLM, logprob server ----
     vllm_group = None
     logprob_comm = None
@@ -175,6 +194,8 @@ def train() -> None:
                 "env_type": ENV_TYPE,
                 "backend": "megatron-bridge-ddp",
                 "learning_rate": LEARNING_RATE,
+                "lr_scheduler": LR_SCHEDULER,
+                "warmup_steps": warmup_steps,
                 "batch_size": BATCH_SIZE,
                 "grad_accum_steps": GRAD_ACCUM_STEPS,
                 "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
@@ -387,6 +408,8 @@ def train() -> None:
                 ddp_model.finish_grad_sync()
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer_step += 1
             t_optimizer = time.monotonic() - t0
 
@@ -409,7 +432,7 @@ def train() -> None:
                     "train/loss": avg_loss,
                     "train/completion_length": avg_comp_len,
                     "train/epoch": epoch,
-                    "train/lr": LEARNING_RATE,
+                    "train/lr": scheduler.get_last_lr()[0] if scheduler is not None else LEARNING_RATE,
                 }
                 if full_pass_rate is not None:
                     key = "reflector/pass_rate" if ENV_TYPE == "rag" else "episode/pass_rate"

@@ -110,6 +110,7 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | `GRAD_ACCUM_STEPS` | `32` | `32` | **yes** | must be divisible by num_trainers (assert in trainer.py); effective batch = `BATCH_SIZE(=1) × GRAD_ACCUM_STEPS` |
 | `SAVE_EVERY` | `200` | `200` | — | optimizer steps between checkpoints to `OUTPUT_DIR/step_{N}` |
 | `LEARNING_RATE` | `5e-5` | `5e-5` | — | |
+| `LR_SCHEDULER` | `constant` | `constant` | — | `constant` = fixed LR; `cosine` = linear warmup `min(10% of total steps, 100)` + cosine decay to 0 |
 | `EMA_ALPHA` | `0.05` | `0.05` | — | EMA for student→teacher blend (ignored when `TEACHER_MODEL_PATH` set) |
 | `TRAINER_BACKEND` | `fsdp` | `fsdp` | — | **default**; MCore FSDP + torch AdamW (the `ddp`/8-bit path is being removed — see `TODOS.md`) |
 

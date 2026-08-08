@@ -42,6 +42,13 @@ TRAINER_BACKEND = os.environ.get("TRAINER_BACKEND", "ddp")
 
 # Training hyperparams
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-5"))
+# LR schedule: "constant" (fixed LEARNING_RATE) or "cosine" (linear warmup of
+# min(10% of total optimizer steps, 100), then cosine decay to 0)
+LR_SCHEDULER = os.environ.get("LR_SCHEDULER", "constant")
+if LR_SCHEDULER not in ("constant", "cosine"):
+    raise ValueError(
+        f"LR_SCHEDULER must be 'constant' or 'cosine', got {LR_SCHEDULER!r}"
+    )
 BATCH_SIZE = 1  # always 1; effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
 GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", "32"))
 NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))

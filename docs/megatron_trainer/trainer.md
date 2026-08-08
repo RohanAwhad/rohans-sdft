@@ -31,6 +31,14 @@ orchestrates the full on-policy SDFT step:
   the bridge's `AutoMapping` the FSDP-prefixed module class names.
 - **Optimizer** (`trainer.py:141`): `torch.optim.AdamW` with `lr=LEARNING_RATE,
   betas=(0.9, 0.95), weight_decay=0.01`.
+- **LR scheduler** (`LR_SCHEDULER`, `constant` default): `constant` = fixed
+  `LEARNING_RATE` (current behavior, no scheduler object). `cosine` = linear
+  warmup for `min(10% of total optimizer steps, 100)` steps, then cosine decay
+  to 0 over the remaining steps (`transformers.get_cosine_schedule_with_warmup`).
+  Total optimizer steps = `steps_per_epoch × NUM_EPOCHS`, where
+  `steps_per_epoch = len(filtered_dataset) // GRAD_ACCUM_STEPS` — so warmup
+  depends on the collator's load-time drop filter. Built after dataset load
+  (`trainer.py:161-167`) since total steps aren't known at optimizer creation.
 
 ## Model loading
 
@@ -108,15 +116,17 @@ iterates. Over-budget examples never reach the per-batch collator (see
 ### 6. Optimizer step (`trainer.py:380-387`)
 
 The FSDP-wrapped model's `finish_grad_sync()` → `clip_grad_norm_(..., MAX_GRAD_NORM=1.0)`
-→ `optimizer.step()`.
+→ `optimizer.step()` → `scheduler.step()` (no-op when `LR_SCHEDULER=constant`).
 
 ### 7. Aggregation & logging (`trainer.py:391-430`)
 
 - `[accum_loss_sum, accum_samples]` are `all_reduce`d so rank 0 reports the
   global mean loss.
-- `wandb.log` (`train/loss`, `train/completion_length`, `train/lr`,
-  `train/grad_norm` — the total gradient norm captured from
-  `clip_grad_norm_`'s return value at `trainer.py:384`,
+- `wandb.log` (`train/loss`, `train/completion_length`, `train/lr` — the
+  **current scheduler LR** (`scheduler.get_last_lr()[0]`), falling back to
+  `LEARNING_RATE` when `LR_SCHEDULER=constant`, `train/grad_norm` — the total
+  gradient norm captured from `clip_grad_norm_`'s return value at
+  `trainer.py:384`,
   `reflector/pass_rate` or `episode/pass_rate`, sdpo signal metrics, and — for
   api_adapter every 10 optimizer steps — an `episode/sample` conversation table).
 - Per-step `TIMING` line: `total/gen/teacher/student/loss_bwd/optim/wsync`
@@ -175,6 +185,7 @@ the job 400s / OOMs / drops examples.
 | Var | Default | Critical | Used where |
 |---|---|---|---|
 | `LEARNING_RATE` | `5e-5` | — | optimizer |
+| `LR_SCHEDULER` | `constant` | — | `constant` = fixed LR; `cosine` = linear warmup of `min(10% of total optimizer steps, 100)` then cosine decay to 0 over `steps_per_epoch × NUM_EPOCHS` |
 | `BATCH_SIZE` | `1` (fixed) | — | dataloader; effective batch = `1 × GRAD_ACCUM_STEPS` |
 | `GRAD_ACCUM_STEPS` | `32` | **yes** | must be `% world_size == 0`; `local_accum_steps = GRAD_ACCUM_STEPS / world_size` |
 | `NUM_EPOCHS` | `10` | — | outer loop |
