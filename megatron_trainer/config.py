@@ -63,8 +63,8 @@ THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "512"))
 GEN_MAX_NEW_TOKENS = int(
     os.environ.get("GEN_MAX_NEW_TOKENS", str(MAX_TOTAL_LEN - STUDENT_MAX_PROMPT_LEN))
 )
-GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
-GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
+GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "1.0"))
+GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "1.0"))
 
 if STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS > MAX_TOTAL_LEN:
     raise ValueError(
