@@ -15,7 +15,10 @@ The same model plays two roles per training sample:
 - **Teacher** `Q = pi_phi(.|x, c)`: sees query + privileged demonstration/context
 
 Training loop per sample:
-1. Sample on-policy completion `y ~ P` (via vLLM)
+1. Sample on-policy completion `y ~ P` (via vLLM). When the vLLM proposal
+   drifts from the current policy (weight staleness, sampling params ≠ 1.0),
+   the loss is rescaled by a per-sequence importance-sampling weight
+   `w = mean_t clamp(exp(log P(y_t) − log q_rollout(y_t)), cap=2.0)` (TIS)
 2. Compute teacher log-probs `Q(y_t | y_<t, x, c)` at each token of `y`
 3. Compute student logits `P(v | y_<t, x)` over full vocab at each position
 4. Loss = reverse KL: `KL(P || Q) = sum_t sum_v P(v) * (log P(v) - log Q(v))`
@@ -266,8 +269,8 @@ Training loss trajectory should be comparable to the reference run.
 - Max grad norm: 10.0
 - EMA alpha: 0.05
 - Gen max new tokens: 2048
-- Gen temperature: 0.7
-- Gen top_p: 0.95
+- Gen temperature: 1.0
+- Gen top_p: 1.0
 - Optimizer: 8-bit Adam
 - LR schedule: constant
 

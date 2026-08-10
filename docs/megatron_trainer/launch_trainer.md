@@ -53,6 +53,10 @@ VLLM_PORT=8101 VLLM_NCCL_MASTER_PORT_BASE=29600 LOGPROB_PORT=8020 LOGPROB_TCP_PO
   guarantees vLLM never HTTP-400s a rollout (`prompt + max_tokens ≤ --max-model-len`).
   Each instance `i` is launched with `--master-port $((VLLM_NCCL_MASTER_PORT_BASE + i*100))` for its
   NCCL weight-transfer engine (see **Ports** above).
+- `--logprobs-mode processed_logprobs` is **auto-injected** by `start_vllm_patched.py`
+  (explicit in `smoke_test.sh`). Required for importance sampling: the IS ratio needs the
+  log-probs of the **actual sampling distribution** (post-temperature/post-top-p); raw mode only
+  equals that when `GEN_TEMPERATURE=1.0`.
 - `VLLM_SERVER_DEV_MODE=1` is required — it exposes the dev endpoints (`/init_weight_transfer_engine`,
   `/update_weights`, `/pause`/`/resume`) the trainer uses for per-step weight sync.
 - Instances start **30s apart** (`sleep 30` after each) to avoid the port-scan race.
@@ -131,8 +135,10 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | `REFLECTOR_MODEL` | — | `claude-sonnet-4-6@default` | online_feedback | Anthropic Vertex |
 | `REFLECTOR_REGION` | — | `us-east5` | — | |
 | `REFLECTOR_PROJECT_ID` | — | `(empty)` | online_feedback | required for reflector calls |
-| `GEN_TEMPERATURE` | `0.7` | `0.7` | — | |
-| `GEN_TOP_P` | — | `0.95` | — | |
+| `GEN_TEMPERATURE` | `1.0` | `1.0` | — | must be 1.0 while the server runs raw logprobs; `≠1.0` requires `processed_logprobs` (always on via `start_vllm_patched.py`) |
+| `GEN_TOP_P` | — | `1.0` | — | |
+| `IS_WEIGHTING` | `1` | `1` | — | `1` → rescale reverse-KL loss by per-sequence TIS weight (rollout vs current policy); `0` → unweighted |
+| `IS_CAP` | `2.0` | `2.0` | — | TIS truncation cap on per-token ratio `exp(policy_logp − rollout_logp)` |
 | `STUDENT_THINKING` | `0` | `0` | — | `1` → student + teacher render with thinking on (Qwen: `enable_thinking=True`; gpt-oss: analysis channel). Only Qwen/gpt-oss validated — `config.py` raises otherwise. Completion stays a single vLLM pass (truncated-CoT split deferred) |
 | `THINKING_BUDGET` | `512` | `512` | — | api_adapter thinking split (`env/api_adapter_env.py:182`); unused by the rag path while thinking-on generation is single-pass |
 

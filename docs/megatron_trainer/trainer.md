@@ -63,31 +63,38 @@ collator runs a **one-time load-time pass** — `filter_dataset` (`trainer.py:15
 iterates. Over-budget examples never reach the per-batch collator (see
 `collator.md`).
 
-### 1. Rollout (rank 0, `trainer.py:222-285`)
+### 1. Rollout (rank 0, `trainer.py:246-314`)
 
 - Builds one env per example (`RagEnv` when `ENV_TYPE=rag`, `ApiAdapterEnv`
   when `ENV_TYPE=api_adapter`) and runs them **concurrently** via
   `ThreadPoolExecutor(max_workers=min(32, len(envs)))`.
-- `RagEnv` (`env/rag_env.py:20`): `vllm_generate` → optionally grades via the
+- `RagEnv` (`env/rag_env.py:21`): `vllm_generate` → optionally grades via the
   reflector (`use_reflector = HINDSIGHT_FIELD == "online_feedback"`) and rebuilds
-  the privileged prompt from feedback (`env/rag_env.py:57`).
-- `ApiAdapterEnv` (`env/api_adapter_env.py:92`): multi-turn adapter↔API loop with
-  thinking-budget splitting (`env/api_adapter_env.py:182`); successful adapter
+  the privileged prompt from feedback (`env/rag_env.py:60`).
+- `ApiAdapterEnv` (`env/api_adapter_env.py:96`): multi-turn adapter↔API loop with
+  thinking-budget splitting (`env/api_adapter_env.py:186`); successful adapter
   verdicts are cached in a rank-0 `success_cache` and re-injected as hindsight on
-  later failing rollouts (`trainer.py:257-264`).
-- Rollout payload (`trainer.py:267-274`): `{prompt_text, completion_text,
-  privileged_information_prompt}` per example. A `pass_rate` is computed
-  (episode verdicts for api_adapter, reflector verdicts for rag).
+  later failing rollouts (`trainer.py:287-294`).
+- Rollout payload (`trainer.py:296-304`): `{prompt_text, completion_text,
+  completion_log_probs, privileged_information_prompt}` per example — the
+  log-probs are the rollout (vLLM) proposal's per-token logps used for
+  importance sampling. A `pass_rate` is computed (episode verdicts for
+  api_adapter, reflector verdicts for rag).
 
 ### 2. Broadcast & shard (`trainer.py:289-293`)
 
 `dist.broadcast_object_list(rollout_data, src=0)`; each rank slices
 `rollout_data[rank*local_accum_steps : (rank+1)*local_accum_steps]`.
 
-### 3. Per-microstep: teacher log-probs (`trainer.py:305-326`)
+### 3. Per-microstep: teacher log-probs (`trainer.py:336-383`)
 
 - `completion_ids` = encode(`completion_text`, no special tokens), skipped if
   empty, truncated to `GEN_MAX_NEW_TOKENS`.
+- **Rollout log-probs → IS tensor** (`trainer.py:344-368`, only when
+  `IS_WEIGHTING`): `completion_log_probs` → `(C,)` fp32 tensor on device;
+  `None` entries become `NaN` (never-sampled tokens, excluded from the IS
+  weight); truncated to `len(completion_ids)`, and any residual length gap is
+  NaN-padded with a warning.
 - `cond_ids` = encode(`privileged_information_prompt`, truncation,
   `max_length=TEACHER_MAX_PROMPT_LEN`).
 - `request_teacher_log_probs_tcp(token_ids=cond_ids+completion_ids,
@@ -99,26 +106,29 @@ iterates. Over-budget examples never reach the per-batch collator (see
     (`logprob_client.py:63`, sized `GEN_MAX_NEW_TOKENS × vocab × 2`) and one H2D
     copy to bf16.
 
-### 4. Per-microstep: student forward + reverse-KL (`trainer.py:328-359`)
+### 4. Per-microstep: student forward + reverse-KL (`trainer.py:386-411`)
 
 - `prompt_ids` = encode(`prompt_text`, truncation, `max_length=STUDENT_MAX_PROMPT_LEN`);
   `input_ids = cat([prompt_ids, completion_ids])`, contiguous `position_ids`.
-- `make_kl_processor(...)` (`chunked_head.py:71`) builds the MCore
+- `make_kl_processor(...)` (`chunked_head.py:113`) builds the MCore
   `output_processor` hook; `model(input_ids, position_ids, attention_mask=None,
-  output_processor=kl_processor)` returns `(loss, metrics)`.
+  output_processor=kl_processor)` returns `(loss, metrics)`. When the rollout
+  log-probs tensor is present (and `IS_WEIGHTING`), the loss is rescaled by the
+  per-sequence TIS weight (see `chunked_head.md` — "Importance-sampling
+  weighting").
 
-### 5. Backward + gradient accumulation (`trainer.py:361-378`)
+### 5. Backward + gradient accumulation (`trainer.py:413-430`)
 
 - `is_final = (micro_step == local_accum_steps - 1)`; non-final micro-steps run
   under the FSDP-wrapped model's `no_sync()`; `scaled_loss = loss / local_accum_steps`.
 - Loss/metrics/sample/completion-len are accumulated.
 
-### 6. Optimizer step (`trainer.py:380-387`)
+### 6. Optimizer step (`trainer.py:441-445`)
 
 The FSDP-wrapped model's `finish_grad_sync()` → `clip_grad_norm_(..., MAX_GRAD_NORM=1.0)`
 → `optimizer.step()` → `scheduler.step()` (no-op when `LR_SCHEDULER=constant`).
 
-### 7. Aggregation & logging (`trainer.py:391-430`)
+### 7. Aggregation & logging (`trainer.py:447-489`)
 
 - `[accum_loss_sum, accum_samples]` are `all_reduce`d so rank 0 reports the
   global mean loss.
@@ -126,11 +136,12 @@ The FSDP-wrapped model's `finish_grad_sync()` → `clip_grad_norm_(..., MAX_GRAD
   **current scheduler LR** (`scheduler.get_last_lr()[0]`), falling back to
   `LEARNING_RATE` when `LR_SCHEDULER=constant`, `train/grad_norm` — the total
   gradient norm captured from `clip_grad_norm_`'s return value at
-  `trainer.py:384`,
-  `reflector/pass_rate` or `episode/pass_rate`, sdpo signal metrics, and — for
+  `trainer.py:442`,
+  `reflector/pass_rate` or `episode/pass_rate`, sdpo signal metrics, `is/*`
+  importance-sampling metrics (see `chunked_head.md`), and — for
   api_adapter every 10 optimizer steps — an `episode/sample` conversation table).
 - Per-step `TIMING` line: `total/gen/teacher/student/loss_bwd/optim/wsync`
-  (`trainer.py:450-456`).
+  (`trainer.py:513-517`).
 
 ### 8. Weight sync & checkpoints (`trainer.py:432-448`)
 
@@ -156,11 +167,12 @@ The FSDP-wrapped model's `finish_grad_sync()` → `clip_grad_norm_(..., MAX_GRAD
 
 Reverse-KL is computed via a chunked LM-head pass as an MCore `output_processor`
 hook. The trainer's contract with it: `make_kl_processor(prompt_len,
-completion_ids, teacher_log_probs, eos_token_id, device)` (`chunked_head.py:71`),
-then `model(input_ids, position_ids, attention_mask=None, output_processor=...)`
-returns `(loss, metrics)` (`trainer.py:346-358`). Full detail — single head
-call, `ChunkedRowKL` analytic backward, memory profile, sdpo metrics — in
-`chunked_head.md`.
+completion_ids, teacher_log_probs, eos_token_id, device, rollout_log_probs=None,
+is_weighting=True, is_cap=2.0)` (`chunked_head.py:113`), then
+`model(input_ids, position_ids, attention_mask=None, output_processor=...)`
+returns `(loss, metrics)` (`trainer.py:401-411`). Full detail — single head
+call, `ChunkedRowKL` analytic backward, memory profile, importance-sampling
+weighting, sdpo + `is/*` metrics — in `chunked_head.md`.
 
 ## Rollout envs (`env/`)
 
@@ -197,7 +209,9 @@ the job 400s / OOMs / drops examples.
 | `STUDENT_THINKING` | `0` | — | `1` → thinking on (Qwen `enable_thinking=True`; gpt-oss analysis channel); logged to wandb as `student_thinking` |
 | `THINKING_BUDGET` | `512` | api_adapter | adapter thinking split (`env/api_adapter_env.py:182`); logged to wandb as `thinking_budget` |
 | `GEN_MAX_NEW_TOKENS` | `MAX_TOTAL_LEN − STUDENT_MAX_PROMPT_LEN` | **yes** | rollout `max_tokens`, completion truncation, TCP recv-buffer size |
-| `GEN_TEMPERATURE` / `GEN_TOP_P` | `0.7` / `0.95` | — | `vllm_generate` |
+| `GEN_TEMPERATURE` / `GEN_TOP_P` | `1.0` / `1.0` | — | `vllm_generate` |
+| `IS_WEIGHTING` | `1` | — | `1` → rescale the reverse-KL loss by the per-sequence TIS weight (rollout log-probs vs current policy); `0` → unweighted loss |
+| `IS_CAP` | `2.0` | — | TIS truncation cap on the per-token ratio `exp(policy_logp − rollout_logp)` |
 | Optimizer betas / wd / eps | `(0.9, 0.95)` / `0.01` / `1e-8` | — | fixed in `trainer.py:141` |
 
 ## Hard invariants
