@@ -66,6 +66,13 @@ GEN_MAX_NEW_TOKENS = int(
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "1.0"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "1.0"))
 
+# Importance sampling (vLLM is the rollout engine; its proposal distribution
+# can drift from the training policy via weight staleness or sampling params).
+# Weights the reverse-KL loss by exp(policy_logp - rollout_logp), truncated at
+# IS_CAP (Truncated Importance Sampling, same scheme as TRL DistilTrainer).
+IS_WEIGHTING = os.environ.get("IS_WEIGHTING", "1") == "1"
+IS_CAP = float(os.environ.get("IS_CAP", "2.0"))
+
 if STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS > MAX_TOTAL_LEN:
     raise ValueError(
         "STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS must be <= MAX_TOTAL_LEN "

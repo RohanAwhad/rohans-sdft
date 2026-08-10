@@ -34,11 +34,14 @@ Three fully independent NCCL groups. No shared world. Each is self-contained.
 ## Per-Step Data Flow
 
 ```
- 1. Rank 0: generate completions via vLLM (HTTP to localhost)
- 2. Rank 0: broadcast/scatter rollout sequences to all trainer ranks
+ 1. Rank 0: generate completions via vLLM (HTTP to localhost),
+            capture per-token rollout log-probs (logprobs=1, processed mode)
+ 2. Rank 0: broadcast/scatter rollout sequences + log-probs to all trainer ranks
  3. Each rank: request reference logprobs from logprob server (HTTP, independently)
  4. All ranks: forward pass -> current policy logprobs (with grad)
- 5. All ranks: compute reverse KL loss
+ 5. All ranks: compute reverse KL loss, rescaled by the per-sequence
+            importance-sampling weight (TIS: clamped mean of per-token
+            exp(policy_logp - rollout_logp)); see chunked_head.compute_is_weight
  6. All ranks: backward pass
  7. DDP: all-reduce gradients across torch.distributed group
  8. All ranks: optimizer step

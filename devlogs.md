@@ -603,3 +603,27 @@ Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a differ
 
 ### Note
 - The analyze_research run_5 crash is now resolved by the drop filter: over-budget hints are skipped with warnings instead of killing the run. If TEACHER_MAX_PROMPT_LEN=2048 drops too many, raise the budget.
+
+## 2026-08-10 - Importance sampling weighting (vLLM rollout vs training policy)
+
+### Why
+- vLLM is the rollout engine; its proposal distribution can drift from the training policy (weight staleness, future T!=1). Reverse-KL gradients estimated from rollout samples are biased unless corrected. Added TIS weighting, same scheme as TRL DistilTrainer (idan-Self-Distillation).
+
+### Math (chunked_head.py)
+- Per-token ratio r_t = exp(policy_logp - rollout_logp), clamped at IS_CAP (default 2.0); per-sequence weight = masked mean of r_t over valid tokens; loss *= weight (detached). policy_logp already existed (ChunkedRowKL); rollout_logp is new, captured from vLLM at generation time.
+
+### Code changes
+- config.py: IS_WEIGHTING (default on), IS_CAP (default 2.0)
+- vllm_utils.py: vllm_generate requests logprobs=1, returns (text, finish_reason, token_logprobs) — 1:1 aligned with output tokens
+- env/rag_env.py: stashes completion_log_probs (single call)
+- env/api_adapter_env.py: per-segment log-probs; inserted force-close tokens (.\n</think>\n\n) and template artifacts (<|im_end|>) are None (masked)
+- trainer.py: rollout_data carries completion_log_probs; tensor built with NaN for masked; length-aligned with warn; passed to make_kl_processor; wandb config gains knobs
+- chunked_head.py: compute_is_weight() + loss rescale + is/* metrics (ratio min/mean/max, logp_diff_mean, clip_rate)
+- start_vllm_patched.py + smoke_test.sh: vLLM launched with --logprobs-mode processed_logprobs (post-temperature logp — the correct log q for IS; raw mode only equals it at T=1.0)
+- train_full.sh: IS_WEIGHTING/IS_CAP passed into container
+
+### Validation (Qwen3-0.6B, H100, vLLM 0.23)
+- logprobs=1: token_logprobs aligned 1:1 with generated tokens; matches independent HF forward at T=1.0 in raw mode (mean |diff| 0.02)
+- processed mode at T=0.7: returns log_softmax(z/T) (max diff 0.116 vs computed) — correct for IS at T!=1
+- CAVEAT: processed mode at T=1.0 inflates logprobs on low-prob tokens vs HF (up to ~0.97 nats; clean completions <= ~0.12). On-policy is/ratio_mean will read < 1 (~0.3-0.9), NOT 1.0 — that's the accepted processed-mode quirk, not drift.
+- Gotcha found: vLLM 0.23 gumbel sampling uses a deterministic hash PRNG (tl.rand); ~2-5% of seeds produce degenerate garbage completions ('_______, with___ _ _ _'). Orthogonal to IS; candidates: per-request seeds, use_fp64_gumbel.

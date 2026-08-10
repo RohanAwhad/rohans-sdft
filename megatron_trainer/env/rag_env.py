@@ -42,12 +42,14 @@ class RagEnv(BaseEnv):
 
         # outputs (populated by run())
         self.completion_text: str | None = None
+        self.completion_log_probs: list[float] | None = None
         self.privileged_information_prompt: str | None = privileged_information_prompt
         self.reflector_result: dict[str, str] | None = None
 
     def run(self) -> None:
-        text, _ = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
+        text, _, logprobs = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
         self.completion_text = text
+        self.completion_log_probs = logprobs
 
         if self.use_reflector:
             self.reflector_result = reflector.run(

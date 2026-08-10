@@ -36,6 +36,12 @@ try:
 except ImportError:
     pass
 
+import sys
 import runpy
 if __name__ == "__main__":
+    # Logprobs must be post-temperature/post-top-p ("processed") for importance
+    # sampling: the IS ratio needs the logp of the actual sampling distribution,
+    # which raw mode only equals when temperature=1.0.
+    if "--logprobs-mode" not in sys.argv:
+        sys.argv += ["--logprobs-mode", "processed_logprobs"]
     runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")

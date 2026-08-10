@@ -47,11 +47,15 @@ def vllm_generate(
     max_tokens: int = GEN_MAX_NEW_TOKENS,
     temperature: float = GEN_TEMPERATURE,
     top_p: float = GEN_TOP_P,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[float] | None]:
     """Generate a completion via vLLM's OpenAI-compatible API.
 
-    Returns (generated_text, finish_reason).
+    Returns (generated_text, finish_reason, token_logprobs).
     finish_reason is "length" if max_tokens was hit, "stop" if natural stop.
+    token_logprobs is the per-token log-probability of each generated token
+    under the actual sampling distribution (1:1 aligned with the output
+    tokens), or None if the server did not return logprobs. Used as the
+    rollout proposal logp for importance sampling.
     """
     resp = requests.post(
         f"{base_url}/v1/completions",
@@ -61,6 +65,7 @@ def vllm_generate(
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": top_p,
+            "logprobs": 1,
             "skip_special_tokens": False,
         },
         timeout=180,
@@ -69,7 +74,10 @@ def vllm_generate(
         logger.error(f"vLLM completions error ({resp.status_code}): {resp.text}")
         resp.raise_for_status()
     choice = resp.json()["choices"][0]
-    return choice["text"], choice["finish_reason"]
+    logprobs = None
+    if choice.get("logprobs") is not None:
+        logprobs = choice["logprobs"].get("token_logprobs")
+    return choice["text"], choice["finish_reason"], logprobs
 
 
 # ---------------------------------------------------------------------------

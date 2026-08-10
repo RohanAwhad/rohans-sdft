@@ -115,9 +115,13 @@ class ApiAdapterEnv(BaseEnv):
         # state (populated during rollout)
         self.adapter_history: list[dict] = []
         self.api_history: list[dict] = []
+        # (text_segment, per-token logprobs | None) from each vLLM call;
+        # None marks segments that were never sampled (inserted template text)
+        self._rollout_segments: list[tuple[str, list[float] | None]] = []
 
         # outputs (populated by run())
         self.completion_text: str | None = None
+        self.completion_log_probs: list[float | None] | None = None
         self.privileged_information_prompt: str | None = None
         self.episode_result: bool | None = None
         self.verdict: bool = False
@@ -185,7 +189,11 @@ class ApiAdapterEnv(BaseEnv):
         Phase 1: generate with max_tokens=THINKING_BUDGET.
         Phase 2: if thinking was truncated (finish_reason=="length"),
                  force-close </think> and continue with remaining budget.
+
+        Tracks per-segment rollout log-probs (for importance sampling); the
+        inserted force-close text was never sampled, so its log-probs are None.
         """
+        self._rollout_segments = []
         prompt_text = self.tokenizer.apply_chat_template(
             self.adapter_history,
             tokenize=False,
@@ -194,24 +202,31 @@ class ApiAdapterEnv(BaseEnv):
         )
 
         # Phase 1: thinking-budgeted generation
-        text, finish_reason = vllm_generate(
+        text, finish_reason, logprobs = vllm_generate(
             prompt_text, base_url=self.vllm_base_url, max_tokens=THINKING_BUDGET,
         )
 
         if finish_reason != "length":
+            self._rollout_segments.append((text, logprobs))
             return text
 
         # Phase 2: force-close thinking, generate the actual answer
         truncated_thinking = text
+        inserted = ""
         if "</think>" not in truncated_thinking:
             truncated_thinking = truncated_thinking.rstrip() + ".\n</think>\n\n"
+            inserted = ".\n</think>\n\n"
 
         continued_prompt = prompt_text + truncated_thinking
-        answer_text, _ = vllm_generate(
+        answer_text, _, answer_logprobs = vllm_generate(
             continued_prompt,
             base_url=self.vllm_base_url,
             max_tokens=GEN_MAX_NEW_TOKENS - THINKING_BUDGET,
         )
+        self._rollout_segments.append((text.rstrip(), logprobs))
+        if inserted:
+            self._rollout_segments.append((inserted, None))
+        self._rollout_segments.append((answer_text, answer_logprobs))
         return truncated_thinking + answer_text
 
     # ------------------------------------------------------------------
@@ -304,6 +319,24 @@ class ApiAdapterEnv(BaseEnv):
 
         # completion_text: slice off the prompt prefix, strip trailing \n template artifact
         self.completion_text = full_text[len(self.prompt_text):].rstrip("\n")
+
+        # Build rollout log-probs aligned to completion_text tokens (None =
+        # never-sampled tokens: template artifacts like <|im_end|>, inserted
+        # force-close text). Trainer re-encodes completion_text; align by
+        # truncate/pad so lengths always match.
+        comp_len = len(self.tokenizer.encode(self.completion_text, add_special_tokens=False))
+        log_probs: list[float | None] = []
+        for seg_text, seg_log_probs in self._rollout_segments:
+            seg_ids = self.tokenizer.encode(seg_text, add_special_tokens=False)
+            if seg_log_probs is None:
+                log_probs.extend([None] * len(seg_ids))
+            else:
+                log_probs.extend(seg_log_probs[: len(seg_ids)])
+        if len(log_probs) < comp_len:
+            log_probs.extend([None] * (comp_len - len(log_probs)))
+        elif len(log_probs) > comp_len:
+            log_probs = log_probs[:comp_len]
+        self.completion_log_probs = log_probs
 
         # conditional_text: prompt + hindsight appended to last user message
         hindsight = HINDSIGHT_TEMPLATE.format(llm_response=self.api_history[-1]['content'], feedback=self.feedback)

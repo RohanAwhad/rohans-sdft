@@ -38,6 +38,8 @@ from megatron_trainer.config import (
     GRAD_ACCUM_STEPS,
     HF_MODEL_PATH,
     HINDSIGHT_FIELD,
+    IS_CAP,
+    IS_WEIGHTING,
     LEARNING_RATE,
     LR_SCHEDULER,
     MAX_GRAD_NORM,
@@ -205,6 +207,8 @@ def train() -> None:
                 "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
                 "student_thinking": STUDENT_THINKING,
                 "thinking_budget": THINKING_BUDGET,
+                "is_weighting": IS_WEIGHTING,
+                "is_cap": IS_CAP,
                 "loss": "reverse_kl",
                 "dataset": TRAIN_DATA_PATH,
                 "hindsight_field": HINDSIGHT_FIELD,
@@ -293,6 +297,7 @@ def train() -> None:
                     {
                         "prompt_text": env.prompt_text,
                         "completion_text": env.completion_text,
+                        "completion_log_probs": env.completion_log_probs,
                         "privileged_information_prompt": env.privileged_information_prompt,
                     }
                     for env in envs
@@ -336,6 +341,31 @@ def train() -> None:
                     continue
                 completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
+                # Rollout (vLLM) log-probs for importance sampling; NaN marks
+                # never-sampled tokens (excluded from the IS weight).
+                rollout_log_probs = None
+                if IS_WEIGHTING:
+                    lp_list = item_data.get("completion_log_probs")
+                    if lp_list:
+                        lp_list = lp_list[: len(completion_ids)]
+                        rollout_log_probs = torch.tensor(
+                            [float("nan") if v is None else float(v) for v in lp_list],
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                        if rollout_log_probs.size(0) != len(completion_ids):
+                            logger.warning(
+                                f"logprobs length {rollout_log_probs.size(0)} != "
+                                f"completion length {len(completion_ids)}; masking trailing"
+                            )
+                            pad = torch.full(
+                                (len(completion_ids) - rollout_log_probs.size(0),),
+                                float("nan"),
+                                dtype=torch.float32,
+                                device=device,
+                            )
+                            rollout_log_probs = torch.cat([rollout_log_probs, pad])
+
                 # Teacher log-probs via TCP (each rank independently)
                 t0 = time.monotonic()
                 cond_ids: list[int] = tokenizer.encode(
@@ -374,6 +404,9 @@ def train() -> None:
                     teacher_log_probs=teacher_log_probs,
                     eos_token_id=tokenizer.eos_token_id,
                     device=device,
+                    rollout_log_probs=rollout_log_probs,
+                    is_weighting=IS_WEIGHTING,
+                    is_cap=IS_CAP,
                 )
                 loss, step_metrics = model(
                     input_ids=input_ids,

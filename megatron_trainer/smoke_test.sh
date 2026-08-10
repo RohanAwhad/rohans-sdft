@@ -47,6 +47,7 @@ PATH="$VLLM_VENV/bin:$PATH" \
     --dtype bfloat16 \
     --gpu-memory-utilization 0.85 \
     --weight-transfer-config '{"backend":"nccl"}' \
+    --logprobs-mode processed_logprobs \
     --no-enable-log-requests \
     2>&1 | tee "$WORKSPACE/logs/vllm_smoke.log" &
 VLLM_PID=$!
