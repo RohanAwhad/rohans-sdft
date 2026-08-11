@@ -61,7 +61,8 @@ collator runs a **one-time load-time pass** — `filter_dataset` (`trainer.py:15
 `collator.py:266`) drops over-budget examples and returns a filtered dataset
 (`dataset.select(valid_indices)`, `collator.py:294`) that is what the DataLoader
 iterates. Over-budget examples never reach the per-batch collator (see
-`collator.md`).
+`collator.md`). In `online_feedback` mode, examples with an **empty golden
+answer** are also dropped here — reflection requires a golden to grade.
 
 ### 1. Rollout (rank 0, `trainer.py:246-314`)
 
@@ -70,7 +71,8 @@ iterates. Over-budget examples never reach the per-batch collator (see
   `ThreadPoolExecutor(max_workers=min(32, len(envs)))`.
 - `RagEnv` (`env/rag_env.py:21`): `vllm_generate` → optionally grades via the
   reflector (`use_reflector = HINDSIGHT_FIELD == "online_feedback"`) and rebuilds
-  the privileged prompt from feedback (`env/rag_env.py:60`).
+  the privileged prompt from feedback (golden chunk optional + golden answer +
+  detailed feedback; `env/rag_env.py:60`).
 - `ApiAdapterEnv` (`env/api_adapter_env.py:96`): multi-turn adapter↔API loop with
   thinking-budget splitting (`env/api_adapter_env.py:186`); successful adapter
   verdicts are cached in a rank-0 `success_cache` and re-injected as hindsight on

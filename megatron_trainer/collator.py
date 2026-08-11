@@ -220,14 +220,20 @@ class SDFTCollator:
                 "will be dropped by the protected-set filter"
             )
 
+    def _golden_chunk_for(self, ex: Dict[str, Any]) -> str:
+        """Extract the golden chunk (enriched_user_response value/content), or ''."""
+        doc_data = ex.get("enriched_user_response")
+        if not doc_data:
+            return ""
+        return (doc_data.get("value") or doc_data.get("content") or "").strip()
+
     def _hint_for(self, ex: Dict[str, Any]) -> Optional[str]:
         """Build the privileged hint for an example, or None for online_feedback."""
         if self.hindsight_field == "online_feedback":
             return None
         template = HINDSIGHT_TEMPLATES[self.hindsight_field]
         if self.hindsight_field == "enriched_user_response":
-            doc_data = ex["enriched_user_response"]
-            doc = (doc_data.get("value") or doc_data.get("content") or "").strip()
+            doc = self._golden_chunk_for(ex)
             answer_data = ex["user_response"]
             answer = (answer_data.get("value") or answer_data.get("content") or "").strip()
             return template.format(doc=doc, answer=answer)
@@ -255,6 +261,12 @@ class SDFTCollator:
                     f"{STUDENT_MAX_PROMPT_LEN}"
                 )
         hint = self._hint_for(ex)
+        if self.hindsight_field == "online_feedback":
+            if not _target_text(ex.get("user_response") or {}):
+                return (
+                    "empty golden answer (user_response) required for "
+                    "online_feedback"
+                )
         if hint is None:
             return None
         n_tokens, _ = _render_tokens(
@@ -304,6 +316,7 @@ class SDFTCollator:
         conditional_texts: list[str] = []
         raw_questions: list[str] = []
         golden_answers: list[str] = []
+        golden_chunks: list[str] = []
         normalized_messages: list[list[dict[str, str]]] = []
 
         render_kwargs = self._render_kwargs()
@@ -326,6 +339,7 @@ class SDFTCollator:
                 )
 
             golden_answers.append(_target_text(ex["user_response"]))
+            golden_chunks.append(self._golden_chunk_for(ex))
 
             # --- Student prompt (x) ---
             student_prompt, p_text = _truncate_to_budget(
@@ -370,5 +384,6 @@ class SDFTCollator:
             "conditional_texts": conditional_texts,
             "raw_questions": raw_questions,
             "golden_answers": golden_answers,
+            "golden_chunks": golden_chunks,
             "normalized_messages": normalized_messages,
         }

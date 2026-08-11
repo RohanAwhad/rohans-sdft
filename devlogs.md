@@ -627,3 +627,31 @@ Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a differ
 - processed mode at T=0.7: returns log_softmax(z/T) (max diff 0.116 vs computed) — correct for IS at T!=1
 - CAVEAT: processed mode at T=1.0 inflates logprobs on low-prob tokens vs HF (up to ~0.97 nats; clean completions <= ~0.12). On-policy is/ratio_mean will read < 1 (~0.3-0.9), NOT 1.0 — that's the accepted processed-mode quirk, not drift.
 - Gotcha found: vLLM 0.23 gumbel sampling uses a deterministic hash PRNG (tl.rand); ~2-5% of seeds produce degenerate garbage completions ('_______, with___ _ _ _'). Orthogonal to IS; candidates: per-request seeds, use_fp64_gumbel.
+
+## 2026-08-11 - online_feedback: reflection-model feedback as privileged info (first e2e run)
+
+### Why
+- `HINDSIGHT_FIELD=online_feedback` was wired in code (collator → RagEnv → reflector) but never run end-to-end. Made it work: infra fixes + richer feedback + golden-chunk support.
+
+### Changes
+- train_full.sh: install `anthropic[vertex]` (was missing → import crash on any rag run); pass `REFLECTOR_MODEL/REGION/PROJECT_ID` via `-e` (project id was never reaching the container).
+- reflector.py: detailed feedback prompt (~150-250 words: what's right, concrete errors, actionable guidance; max_tokens 1024→2048); bare-JSON parse fallback (was `IndexError` if no ```json fence).
+- collator.py: `golden_chunks` batch field (enriched_user_response value/content, '' when absent); `_drop_reason` drops examples with EMPTY golden answer in online_feedback mode ("empty golden answer (user_response) required").
+- trainer.py: passes `golden_chunk` into RagEnv.
+- env/rag_env.py: privileged prompt = golden chunk (optional) + golden answer (required) + reflection feedback (`ONLINE_FEEDBACK_TEMPLATE` / `NO_CHUNK` variant).
+- Docs: ragenv.md (3-part template, detailed feedback), launch_trainer.md (REFLECTOR_* rows, install line, online_feedback contract).
+
+### Validation (Qwen3-0.6B, maas_raft smoke 64, H100)
+- Tokenizer-only: 3-part prompt with chunk (951 tok) / 2-part without (393 tok); empty-golden dropped in online_feedback mode but kept in static mode (regression); batch carries golden_chunks.
+- Container e2e (3 GPUs, train_full.sh layout): 2 optimizer steps completed, exit 0 — TIMING step=1 total=45.5s (gen=30.1s = 32 concurrent reflector calls), step=2 total=46.1s; vLLM + logprob NCCL groups initialized; no deadlock.
+- Live reflector call: FAIL verdict, 209 words, structured multi-paragraph critique vs golden.
+
+### Gotchas discovered
+- **Host-vLLM ↔ container-trainer NCCL weight-engine init fails** (500 / hang / "NCCL error: invalid usage") — cross-process-group NCCL with different NCCL builds. ALL processes must live in ONE NeMo container (train_full.sh pattern: vLLM dev 0, trainer dev N, logprob last dev).
+- **trainer.log file sink dies after model load** (bridge reconfigures loguru) — stdout is authoritative; debug lines (Reflector: ...) only in file sink pre-bridge. Pre-existing, not from this change.
+- ADC project `cloudability-it-gemini` lacks `aiplatform.endpoints.predict` for Anthropic publisher models; **must use `REFLECTOR_PROJECT_ID=itpc-gcp-ai-eng-claude`** (matches ANTHROPIC_VERTEX_PROJECT_ID).
+- Empty `REFLECTOR_PROJECT_ID` → `ValueError: Could not resolve project_id` inside container (host venv tolerated it via ADC default).
+- OLS tool-format still needs `_append_hint` reuse in rag_env (`_build_privileged_prompt_from_feedback` assumes last msg is user) — for OLS runs only; maas_raft old format unaffected.
+
+### Remaining
+- OLS runs: fix last-message-is-tool hint placement; OLS 10/31 empty-golden examples now auto-dropped by filter (may need TEACHER_MAX_PROMPT_LEN bump).

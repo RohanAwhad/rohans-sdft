@@ -13,6 +13,12 @@ from megatron_trainer.vllm_utils import vllm_generate
 
 
 ONLINE_FEEDBACK_TEMPLATE = (
+    "Relevant documentation:\n{chunk}\n\n"
+    "Correct solution:\n{golden_answer}\n\n"
+    "The following is feedback from your earlier attempt:\n{feedback}"
+)
+
+ONLINE_FEEDBACK_NO_CHUNK_TEMPLATE = (
     "Correct solution:\n{golden_answer}\n\n"
     "The following is feedback from your earlier attempt:\n{feedback}"
 )
@@ -31,11 +37,13 @@ class RagEnv(BaseEnv):
         normalized_messages: list[dict],
         tokenizer,
         use_reflector: bool = False,
+        golden_chunk: str = "",
     ):
         self.prompt_text = prompt_text
         self.vllm_base_url = vllm_base_url
         self.raw_question = raw_question
         self.golden_answer = golden_answer
+        self.golden_chunk = golden_chunk
         self.normalized_messages = normalized_messages
         self.tokenizer = tokenizer
         self.use_reflector = use_reflector
@@ -64,7 +72,13 @@ class RagEnv(BaseEnv):
         # inside the <tool_response> body instead of as a fresh user turn
         # before the generation prompt. Fix (when online_feedback + OLS runs):
         # reuse collator._append_hint.
-        cond_history[-1]["content"] += "\n\n" + ONLINE_FEEDBACK_TEMPLATE.format(
+        template = (
+            ONLINE_FEEDBACK_TEMPLATE
+            if self.golden_chunk
+            else ONLINE_FEEDBACK_NO_CHUNK_TEMPLATE
+        )
+        cond_history[-1]["content"] += "\n\n" + template.format(
+            chunk=self.golden_chunk,
             feedback=self.reflector_result["feedback"],
             golden_answer=self.golden_answer,
         )

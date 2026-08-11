@@ -19,10 +19,19 @@ You are a grader comparing a model's response against the correct answer.
 Output EXACTLY this JSON format and nothing else:
 
 ```json
-{"verdict": "PASS", "feedback": "one sentence why, max 30 words"}
+{"verdict": "PASS", "feedback": "detailed feedback text"}
 ```
 
-verdict must be PASS or FAIL. No other text outside the json block."""
+Rules:
+- verdict must be PASS or FAIL.
+- feedback must be DETAILED: a multi-paragraph critique (roughly 150-250
+  words) that (1) states exactly what the response got right and where it
+  diverges from the correct answer, (2) pinpoints the concrete errors —
+  missing steps, wrong ordering, incorrect commands, malformed YAML, wrong
+  final answer, etc. — and (3) gives actionable, step-by-step guidance on
+  what the response should have done instead. Quote the correct answer's
+  relevant parts where useful.
+- No other text outside the json block."""
 
 REFLECTOR_USER_TEMPLATE = """\
 Question:
@@ -66,12 +75,13 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
     )
     response = client.messages.create(
         model=REFLECTOR_MODEL,
-        max_tokens=1024,
+        max_tokens=2048,
         system=REFLECTOR_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )
     raw: str = response.content[0].text.strip()
-    raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+    if "```json" in raw:
+        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
     parsed: dict[str, str] = json.loads(raw)
     logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
     return parsed

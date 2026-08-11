@@ -123,7 +123,7 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | Var | train_full.sh default | config.py default | Critical | Notes |
 |---|---|---|---|---|
 | `TRAIN_DATA_PATH` | **(required — no default)** | **(required — no default)** | **yes** | `tool_defs.json` loaded from `dirname(TRAIN_DATA_PATH)` (absent → `tools=None`); `train_full.sh` fails fast if unset |
-| `HINDSIGHT_FIELD` | `online_feedback` | `enriched_user_response` | **yes** | `online_feedback` → reflector grades + env builds privileged prompt dynamically; `user_response`/`enriched_user_response` → static hint. OLS data has no enriched field → use `user_response` |
+| `HINDSIGHT_FIELD` | `online_feedback` | `enriched_user_response` | **yes** | `online_feedback` → reflector grades the rollout and the env builds the privileged prompt dynamically = golden chunk (optional) + golden answer (**required**) + reflection feedback; empty-golden examples are **dropped at load** (filter_dataset). `user_response`/`enriched_user_response` → static hint. OLS data has no enriched field → use `user_response` (static) or `online_feedback` (chunk auto-ignored) |
 
 ### Env & API
 
@@ -132,9 +132,9 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | `ENV_TYPE` | `rag` | `rag` | — | `rag` (vLLM + optional reflector) vs `api_adapter` (multi-turn litellm adapter loop) |
 | `API_MODEL` | — | `vertex_ai/claude-haiku-4-5@20251001` | api_adapter only | litellm model |
 | `MAX_ADAPTER_TURNS` | — | `5` | api_adapter only | |
-| `REFLECTOR_MODEL` | — | `claude-sonnet-4-6@default` | online_feedback | Anthropic Vertex |
-| `REFLECTOR_REGION` | — | `us-east5` | — | |
-| `REFLECTOR_PROJECT_ID` | — | `(empty)` | online_feedback | required for reflector calls |
+| `REFLECTOR_MODEL` | `claude-sonnet-4-6@default` | `claude-sonnet-4-6@default` | online_feedback | Anthropic Vertex |
+| `REFLECTOR_REGION` | `us-east5` | `us-east5` | — | |
+| `REFLECTOR_PROJECT_ID` | `(empty)` | `(empty)` | online_feedback | **required** for reflector calls (Vertex); not passed unless set |
 | `GEN_TEMPERATURE` | `1.0` | `1.0` | — | must be 1.0 while the server runs raw logprobs; `≠1.0` requires `processed_logprobs` (always on via `start_vllm_patched.py`) |
 | `GEN_TOP_P` | — | `1.0` | — | |
 | `IS_WEIGHTING` | `1` | `1` | — | `1` → rescale reverse-KL loss by per-sequence TIS weight (rollout vs current policy); `0` → unweighted |
@@ -185,7 +185,7 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
   capacity (5.75 GiB reserved-but-unallocated at 4.24 GiB free). Permanent default.
 - **vLLM pinned to `==0.23`** — v0.25+ pulls `torchcodec` which needs system FFmpeg libs. Do not upgrade.
   Container installs: `vllm==0.23 bitsandbytes safetensors`, `humming-kernels[cu13]==0.1.4`,
-  `kernels==0.14.1`, `litellm google-cloud-aiplatform tenacity fastapi uvicorn`; `triton_kernels` uninstalled.
+  `kernels==0.14.1`, `anthropic[vertex] litellm google-cloud-aiplatform tenacity fastapi uvicorn`; `triton_kernels` uninstalled.
 - **`GRAD_ACCUM_STEPS % NUM_TRAINERS == 0`** (asserted in trainer.py) and effective
   `local_accum_steps = GRAD_ACCUM_STEPS / NUM_TRAINERS`.
 - **`STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS ≤ MAX_TOTAL_LEN`** — `config.py` raises at import;

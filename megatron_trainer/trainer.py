@@ -264,6 +264,7 @@ def train() -> None:
                             normalized_messages=item["normalized_messages"][0],
                             tokenizer=tokenizer,
                             use_reflector=use_reflector,
+                            golden_chunk=item["golden_chunks"][0],
                         )
                         for i, item in enumerate(items)
                     ]

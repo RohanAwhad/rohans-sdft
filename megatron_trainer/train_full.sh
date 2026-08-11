@@ -91,6 +91,9 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east5}" \
     -e VERTEXAI_PROJECT="${VERTEXAI_PROJECT:-}" \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-online_feedback}" \
+    -e REFLECTOR_MODEL="${REFLECTOR_MODEL:-claude-sonnet-4-6@default}" \
+    -e REFLECTOR_REGION="${REFLECTOR_REGION:-us-east5}" \
+    -e REFLECTOR_PROJECT_ID="${REFLECTOR_PROJECT_ID:-}" \
     -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/train_dir/data/synthetic_algebra/train_sdft.jsonl}" \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-6144}" \
@@ -124,7 +127,7 @@ set -e
 pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
 pip uninstall -y triton_kernels 2>/dev/null || true
 pip install --quiet "humming-kernels[cu13]==0.1.4" 2>/dev/null
-pip install --quiet litellm google-cloud-aiplatform tenacity fastapi uvicorn 2>/dev/null
+pip install --quiet "anthropic[vertex]" litellm google-cloud-aiplatform tenacity fastapi uvicorn 2>/dev/null
 pip install --quiet kernels==0.14.1 2>/dev/null
 
 NUM_GPUS=\$(nvidia-smi -L | wc -l)
