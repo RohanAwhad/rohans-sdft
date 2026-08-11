@@ -23,6 +23,9 @@ ONLINE_FEEDBACK_NO_CHUNK_TEMPLATE = (
     "The following is feedback from your earlier attempt:\n{feedback}"
 )
 
+FALLBACK_TEMPLATE = "Relevant documentation:\n{chunk}\n\nCorrect solution:\n{golden_answer}"
+FALLBACK_NO_CHUNK_TEMPLATE = "Correct solution:\n{golden_answer}"
+
 
 class RagEnv(BaseEnv):
     """RAG-based rollout: vLLM generation + optional reflector feedback."""
@@ -63,7 +66,22 @@ class RagEnv(BaseEnv):
             self.reflector_result = reflector.run(
                 self.raw_question, self.golden_answer, self.completion_text,
             )
-            self._build_privileged_prompt_from_feedback()
+            if self.reflector_result is not None:
+                self._build_privileged_prompt_from_feedback()
+            else:
+                self._build_privileged_prompt_fallback()
+
+    def _build_privileged_prompt_fallback(self) -> None:
+        cond_history = copy.deepcopy(self.normalized_messages)
+        template = FALLBACK_TEMPLATE if self.golden_chunk else FALLBACK_NO_CHUNK_TEMPLATE
+        cond_history[-1]["content"] += "\n\n" + template.format(
+            chunk=self.golden_chunk,
+            golden_answer=self.golden_answer,
+        )
+        self.privileged_information_prompt = self.tokenizer.apply_chat_template(
+            cond_history, tokenize=False, add_generation_prompt=True,
+            enable_thinking=STUDENT_THINKING,
+        )
 
     def _build_privileged_prompt_from_feedback(self) -> None:
         cond_history = copy.deepcopy(self.normalized_messages)

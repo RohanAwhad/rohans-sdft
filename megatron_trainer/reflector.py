@@ -57,10 +57,15 @@ def _get_client() -> AnthropicVertex:
     return _client
 
 
+def _fallback_on_exhaustion(retry_state):
+    return None
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=0.2, max=10),
     retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError)),
+    retry_error_callback=_fallback_on_exhaustion,
 )
 def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
     """Reflect on model_response vs golden_answer.

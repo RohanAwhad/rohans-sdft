@@ -240,6 +240,7 @@ def train() -> None:
         logger.info(f"=== Epoch {epoch + 1}/{NUM_EPOCHS} ===")
         epoch_loss_sum: float = 0.0
         epoch_samples: int = 0
+        reflector_fallback_count: int = 0
 
         data_iter = iter(dataloader) if rank == 0 else None
 
@@ -283,6 +284,9 @@ def train() -> None:
 
                 with ThreadPoolExecutor(max_workers=min(32, len(envs))) as executor:
                     list(executor.map(lambda e: e.run(), envs))
+
+                if ENV_TYPE == "rag":
+                    reflector_fallback_count += sum(1 for e in envs if e.use_reflector and e.reflector_result is None)
 
                 if ENV_TYPE == "api_adapter":
                     # Cache successful adapter responses
@@ -522,6 +526,8 @@ def train() -> None:
             f"Epoch {epoch + 1}/{NUM_EPOCHS} done. "
             f"avg_loss={avg_epoch_loss:.4f} samples={epoch_samples}"
         )
+        if reflector_fallback_count > 0:
+            logger.info(f"reflector fallback: {reflector_fallback_count}/{epoch_samples} envs")
         if rank == 0:
             wandb.log(
                 {"epoch/avg_loss": avg_epoch_loss, "epoch/number": epoch + 1},

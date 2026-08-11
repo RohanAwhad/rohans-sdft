@@ -26,9 +26,13 @@ golden_chunk="")` (`env/rag_env.py:23`):
    requires the server's `--logprobs-mode processed_logprobs`) are stashed on
    `completion_log_probs` (`env/rag_env.py:50-52`).
 2. If `use_reflector`: call `reflector.run(raw_question, golden_answer,
-   completion_text)` → `{verdict, feedback}`, then rebuild the privileged
-   prompt from the feedback (`_build_privileged_prompt_from_feedback`,
-   `env/rag_env.py:60`).
+   completion_text)` → `{verdict, feedback} | None`.
+   - If reflector succeeds: rebuild the privileged prompt from the feedback
+     (`_build_privileged_prompt_from_feedback`).
+   - If reflector returns `None` (retry exhaustion): fall back to
+     `_build_privileged_prompt_fallback` — golden chunk + golden answer only,
+     no feedback. The step trains like `enriched_user_response`. The trainer
+     counts these fallbacks and logs a per-epoch summary.
 
 ## Privileged-prompt rebuild (`env/rag_env.py:60`)
 
@@ -51,10 +55,11 @@ grade against; a missing chunk is tolerated and ignored.
 
 ## Reflector (`reflector.py:56`)
 
-`reflector.run(question, golden_answer, model_response) -> {verdict, feedback}`
+`reflector.run(question, golden_answer, model_response) -> {verdict, feedback} | None`
 via `AnthropicVertex` (`REFLECTOR_MODEL/REGION/PROJECT_ID`), strict JSON output,
 tenacity retry (3 attempts, exp backoff) on `APIError`/`APIConnectionError`/
-`JSONDecodeError`. Feedback is **detailed** (multi-paragraph critique +
+`JSONDecodeError`. Returns `None` on retry exhaustion (`retry_error_callback`),
+never raises. Feedback is **detailed** (multi-paragraph critique +
 actionable guidance, ~150-250 words; `max_tokens=2048`), not one-liner.
 
 ## Outputs
