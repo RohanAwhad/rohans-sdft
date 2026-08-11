@@ -46,7 +46,8 @@ HF_CACHE=${HF_HOME:-$HOME/.cache/huggingface}
 HOSTNAME_FIX=$(hostname)
 export TMPDIR=${TMPDIR:-/mnt/nvme0n1/podman_tmp}
 
-MODEL_NAME=${MODEL_NAME:-"Qwen/Qwen3-8B"}
+: "${MODEL_NAME:?MODEL_NAME is required — e.g. MODEL_NAME=Qwen/Qwen3-8B bash megatron_trainer/train_full.sh}"
+: "${TRAIN_DATA_PATH:?TRAIN_DATA_PATH is required — path to training .jsonl as seen inside the container (e.g. /workspace/.../train_sdft.jsonl)}"
 VLLM_PORT=${VLLM_PORT:-8001}
 OUTPUT_DIR=${OUTPUT_DIR:-"/workspace/output_megatron"}
 
@@ -94,7 +95,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e REFLECTOR_MODEL="${REFLECTOR_MODEL:-claude-sonnet-4-6@default}" \
     -e REFLECTOR_REGION="${REFLECTOR_REGION:-us-east5}" \
     -e REFLECTOR_PROJECT_ID="${REFLECTOR_PROJECT_ID:-}" \
-    -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/train_dir/data/synthetic_algebra/train_sdft.jsonl}" \
+    -e TRAIN_DATA_PATH="$TRAIN_DATA_PATH" \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-6144}" \
     -e IS_WEIGHTING="${IS_WEIGHTING:-1}" \

@@ -22,10 +22,10 @@ teacher renders (reverse-KL alignment). Specs: `docs/megatron_trainer/collator.m
 Spec updated (`docs/megatron_trainer/launch_trainer.md`): both are required with no default; the
 script must **fail fast** if either is unset. Code still has defaults — change later.
 
-- [ ] `megatron_trainer/train_full.sh:49` — `MODEL_NAME=${MODEL_NAME:-"Qwen/Qwen3-8B"}` → require it, fail if unset
-- [ ] `megatron_trainer/train_full.sh:94` — `TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/.../train_sdft.jsonl}"` → require it, fail if unset
-- [ ] `megatron_trainer/config.py:5` — `MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B")` → raise if unset
-- [ ] `megatron_trainer/config.py:77-80` — `TRAIN_DATA_PATH = os.environ.get("TRAIN_DATA_PATH", "...")` → raise if unset
+- [x] `megatron_trainer/train_full.sh:49` — `MODEL_NAME=${MODEL_NAME:-"Qwen/Qwen3-8B"}` → require it, fail if unset (`:?` guard)
+- [x] `megatron_trainer/train_full.sh:97` — `TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/workspace/.../train_sdft.jsonl}"` → require it, fail if unset (`:?` guard)
+- [x] `megatron_trainer/config.py:5` — `MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B")` → raise if unset
+- [x] `megatron_trainer/config.py:77-80` — `TRAIN_DATA_PATH = os.environ.get("TRAIN_DATA_PATH", "...")` → raise if unset
 
 ## Make `TRAINER_BACKEND` default to `fsdp`
 

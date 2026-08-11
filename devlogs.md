@@ -1,5 +1,14 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-11 - Required-env fail-fast (TODO 2)
+
+- `MODEL_NAME` / `TRAIN_DATA_PATH` now required (no defaults) per `launch_trainer.md`.
+- `train_full.sh`: `:?` guards at lines 49-50 (exit 1 with message before container launch).
+- `config.py`: raise `ValueError` at import if either is unset/empty (line 5/102).
+- Deleted `megatron_trainer/repro_fixed_8192.py` (one-off 2026-08-03 OOM repro; conclusion recorded in 2026-08-03 entry, cap enforced in config).
+- Verified: unset MODEL_NAME → exit 1; unset TRAIN_DATA_PATH → exit 1; both set → proceeds to podman launch.
+
+
 ## 2025-07-11 - Task 1: NCCL Weight Transfer (HF -> vLLM)
 
 ### Goal
