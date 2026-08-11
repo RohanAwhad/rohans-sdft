@@ -116,7 +116,6 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 | `LEARNING_RATE` | `5e-5` | `5e-5` | — | |
 | `LR_SCHEDULER` | `constant` | `constant` | — | `constant` = fixed LR; `cosine` = linear warmup `min(10% of total steps, 100)` + cosine decay to 0 |
 | `EMA_ALPHA` | `0.05` | `0.05` | — | EMA for student→teacher blend (ignored when `TEACHER_MODEL_PATH` set) |
-| `TRAINER_BACKEND` | `fsdp` | `fsdp` | — | **default**; MCore FSDP + torch AdamW (the `ddp`/8-bit path is being removed — see `TODOS.md`) |
 
 ### Data & collator
 
@@ -184,7 +183,7 @@ original OLS failure. Because `--max-model-len` now tracks `MAX_TOTAL_LEN`, the 
 - **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.** Run-21-era OOM was fragmentation, not
   capacity (5.75 GiB reserved-but-unallocated at 4.24 GiB free). Permanent default.
 - **vLLM pinned to `==0.23`** — v0.25+ pulls `torchcodec` which needs system FFmpeg libs. Do not upgrade.
-  Container installs: `vllm==0.23 bitsandbytes safetensors`, `humming-kernels[cu13]==0.1.4`,
+  Container installs: `vllm==0.23 safetensors`, `humming-kernels[cu13]==0.1.4`,
   `kernels==0.14.1`, `anthropic[vertex] litellm google-cloud-aiplatform tenacity fastapi uvicorn`; `triton_kernels` uninstalled.
 - **`GRAD_ACCUM_STEPS % NUM_TRAINERS == 0`** (asserted in trainer.py) and effective
   `local_accum_steps = GRAD_ACCUM_STEPS / NUM_TRAINERS`.

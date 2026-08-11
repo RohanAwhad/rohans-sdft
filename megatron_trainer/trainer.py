@@ -1,15 +1,15 @@
-"""SDFT trainer — Megatron Bridge version with DDP + FSDP support.
+"""SDFT trainer — Megatron Bridge version with MCore FSDP.
 
 Orchestrates:
     1. Env rollout (rank 0 only, broadcast to all ranks)
        - ENV_TYPE=rag: RagEnv (vLLM generation + optional reflector)
        - ENV_TYPE=api_adapter: ApiAdapterEnv (multi-turn adapter loop)
-    2. Student forward pass (Megatron-Core GPTModel via DDP or MCore FSDP)
+    2. Student forward pass (Megatron-Core GPTModel via MCore FSDP)
     3. Teacher log-probs (TCP from logprob server, each rank independently)
     4. Chunked reverse KL loss + backward (via MCore output_processor hook,
        with gradient accumulation + no_sync)
-    5. Step-level weight sync to both servers (all ranks for FSDP,
-       rank 0 only for DDP — FSDP export/gather passes are collectives)
+    5. Step-level weight sync to both servers (all ranks — FSDP
+       export/gather passes are collectives)
 
 Launch: torchrun --nproc_per_node=N -m megatron_trainer.trainer
 """
@@ -23,7 +23,6 @@ import torch
 import torch.distributed as dist
 from datasets import load_dataset
 from loguru import logger
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
@@ -52,7 +51,6 @@ from megatron_trainer.config import (
     TEACHER_MAX_PROMPT_LEN,
     TEACHER_MODEL_PATH,
     THINKING_BUDGET,
-    TRAINER_BACKEND,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
     VLLM_BASE_URLS,
@@ -106,8 +104,8 @@ def train() -> None:
     )
     local_accum_steps = GRAD_ACCUM_STEPS // world_size
 
-    logger.info(f"DDP/FSDP: rank={rank}/{world_size}, local_rank={local_rank}, "
-                f"local_accum_steps={local_accum_steps} backend={TRAINER_BACKEND}")
+    logger.info(f"FSDP: rank={rank}/{world_size}, local_rank={local_rank}, "
+                f"local_accum_steps={local_accum_steps}")
 
     # ---- Model + tokenizer ----
     logger.info(f"Loading model: {HF_MODEL_PATH}")
@@ -123,32 +121,23 @@ def train() -> None:
         f"GPU mem after load: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB"
     )
 
-    # ---- DDP or MCore FSDP wrapping ----
-    if TRAINER_BACKEND == "fsdp":
-        from megatron.core.distributed import (
-            DistributedDataParallelConfig,
-            TorchFullyShardedDataParallel,
-        )
+    # ---- MCore FSDP wrapping ----
+    from megatron.core.distributed import (
+        DistributedDataParallelConfig,
+        TorchFullyShardedDataParallel,
+    )
 
-        register_fsdp_module_mappings()
-        ddp_model = TorchFullyShardedDataParallel(
-            unwrapped.config,
-            DistributedDataParallelConfig(use_distributed_optimizer=False),
-            model,
-        )
-        logger.info("MCore FSDP wrapping complete.")
-    else:
-        ddp_model = DDP(model, device_ids=[local_rank])
-        logger.info("PyTorch DDP wrapping complete.")
+    register_fsdp_module_mappings()
+    fsdp_model = TorchFullyShardedDataParallel(
+        unwrapped.config,
+        DistributedDataParallelConfig(use_distributed_optimizer=False),
+        model,
+    )
+    logger.info("MCore FSDP wrapping complete.")
 
-    # ---- Optimizer (FSDP: torch AdamW; DDP: 8-bit Adam) ----
-    if TRAINER_BACKEND == "fsdp":
-        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
-        logger.info(f"torch AdamW optimizer ready. LR={LEARNING_RATE}")
-    else:
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
-        logger.info(f"8-bit Adam optimizer ready. LR={LEARNING_RATE}")
+    # ---- Optimizer (FSDP: torch AdamW) ----
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
+    logger.info(f"torch AdamW optimizer ready. LR={LEARNING_RATE}")
 
     # ---- Dataset (all ranks load, only rank 0 iterates) ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
@@ -194,7 +183,7 @@ def train() -> None:
             config={
                 "model": MODEL_NAME,
                 "env_type": ENV_TYPE,
-                "backend": "megatron-bridge-ddp",
+                "backend": "fsdp",
                 "learning_rate": LEARNING_RATE,
                 "lr_scheduler": LR_SCHEDULER,
                 "warmup_steps": warmup_steps,
@@ -425,7 +414,7 @@ def train() -> None:
                 t0 = time.monotonic()
                 # no_sync on non-final micro-steps (skip allreduce)
                 is_final = (micro_step == local_accum_steps - 1)
-                ctx = nullcontext() if is_final else ddp_model.no_sync()
+                ctx = nullcontext() if is_final else fsdp_model.no_sync()
                 with ctx:
                     scaled_loss = loss / local_accum_steps
                     scaled_loss.backward()
@@ -442,8 +431,7 @@ def train() -> None:
 
             # ---- Optimizer step ----
             t0 = time.monotonic()
-            if TRAINER_BACKEND == "fsdp":
-                ddp_model.finish_grad_sync()
+            fsdp_model.finish_grad_sync()
             clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
             if scheduler is not None:
@@ -494,18 +482,17 @@ def train() -> None:
                 wandb.log(log_dict, step=optimizer_step)
                 logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
 
-            # ---- Sync weights + checkpoint (all ranks for FSDP: export/gather
-            #      passes are collectives; rank 0 only for DDP) ----
-            if rank == 0 or TRAINER_BACKEND == "fsdp":
-                t0 = time.monotonic()
-                if not TEACHER_MODEL_PATH:
-                    sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
-                sync_weights_to_vllm(model, device, vllm_group, rank=rank)
-                t_weight_sync = time.monotonic() - t0
+            # ---- Sync weights + checkpoint (all ranks — FSDP export/gather
+            #      passes are collectives) ----
+            t0 = time.monotonic()
+            if not TEACHER_MODEL_PATH:
+                sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
+            sync_weights_to_vllm(model, device, vllm_group, rank=rank)
+            t_weight_sync = time.monotonic() - t0
 
-                if optimizer_step % SAVE_EVERY == 0:
-                    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-                    save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+            if optimizer_step % SAVE_EVERY == 0:
+                ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+                save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
 
             # All ranks wait for rank 0 weight sync before next step
             t0 = time.monotonic()
@@ -533,14 +520,13 @@ def train() -> None:
                 {"epoch/avg_loss": avg_epoch_loss, "epoch/number": epoch + 1},
                 step=optimizer_step,
             )
-        if rank == 0 or TRAINER_BACKEND == "fsdp":
-            ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
-            save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+        # FSDP export is collective — all ranks save
+        ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
+        save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
 
     # ---- Final checkpoint + shutdown ----
-    if rank == 0 or TRAINER_BACKEND == "fsdp":
-        ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-        save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+    ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+    save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
     if rank == 0:
         wandb.finish()
 

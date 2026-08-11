@@ -57,6 +57,25 @@ echo "NUM_TRAINERS=$NUM_TRAINERS, NUM_VLLM_GPUS=$NUM_VLLM_GPUS, Model=$MODEL_NAM
 
 mkdir -p "$WORKSPACE/logs"
 
+# Optional envs: only pass through when set (empty -e values crash
+# pydantic-based settings, e.g. wandb Settings with WANDB_BASE_URL="")
+OPTIONAL_ENVS=()
+for var in WANDB_MODE WANDB_BASE_URL WANDB_ENTITY WANDB_API_KEY \
+           VERTEXAI_PROJECT REFLECTOR_PROJECT_ID TEACHER_MODEL_PATH \
+           PYTORCH_CUDA_ALLOC_CONF; do
+    if [ -n "${!var:-}" ]; then
+        OPTIONAL_ENVS+=("-e" "$var=${!var}")
+    fi
+done
+
+# SELinux enforcing nodes need :z (relabel) on bind mounts; permissive/disabled
+# nodes reject the relabel on read-only files (e.g. a lab-owned HF cache).
+if [ "$(getenforce 2>/dev/null || echo Enforcing)" = "Enforcing" ]; then
+    LABEL_SUFFIX=":z"
+else
+    LABEL_SUFFIX=""
+fi
+
 TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     --name sdft-megatron-train \
     $VLLM_DEVICES \
@@ -83,18 +102,12 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e SAVE_EVERY="${SAVE_EVERY:-200}" \
     -e VLLM_SERVER_DEV_MODE=1 \
     -e BNB_CUDA_VERSION=130 \
-    -e WANDB_BASE_URL="${WANDB_BASE_URL:-}" \
     -e WANDB_PROJECT="${WANDB_PROJECT:-sdft-online}" \
-    -e WANDB_MODE="${WANDB_MODE:-}" \
     -e WANDB_NAME="${WANDB_NAME:-sdft-ddp-$(basename $MODEL_NAME)-t${NUM_TRAINERS}-e${NUM_EPOCHS:-10}}" \
-    -e WANDB_ENTITY="${WANDB_ENTITY:-}" \
-    -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
     -e VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east5}" \
-    -e VERTEXAI_PROJECT="${VERTEXAI_PROJECT:-}" \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-online_feedback}" \
     -e REFLECTOR_MODEL="${REFLECTOR_MODEL:-claude-sonnet-4-6@default}" \
     -e REFLECTOR_REGION="${REFLECTOR_REGION:-us-east5}" \
-    -e REFLECTOR_PROJECT_ID="${REFLECTOR_PROJECT_ID:-}" \
     -e TRAIN_DATA_PATH="$TRAIN_DATA_PATH" \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-6144}" \
@@ -107,25 +120,23 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e LR_SCHEDULER="${LR_SCHEDULER:-constant}" \
     -e STUDENT_MAX_PROMPT_LEN="${STUDENT_MAX_PROMPT_LEN:-2048}" \
     -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
-    -e TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-}" \
     -e MAX_TOTAL_LEN="${MAX_TOTAL_LEN:-8192}" \
-    -e PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-}" \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
-    -e TRAINER_BACKEND="${TRAINER_BACKEND:-ddp}" \
     -e LOGPROB_BATCH_SIZE="${LOGPROB_BATCH_SIZE:-4}" \
-    -v "$WORKSPACE:/workspace:z" \
-    -v "$HF_CACHE:/root/.cache/huggingface:z" \
-    -v /mnt/nvme5n1/rohan_patched_ckpts:/mnt/nvme5n1/rohan_patched_ckpts:z \
-    -v /mnt/nvme5n1/rawhad:/mnt/nvme5n1/rawhad:z \
+    "${OPTIONAL_ENVS[@]}" \
+    -v "$WORKSPACE:/workspace${LABEL_SUFFIX}" \
+    -v "$HF_CACHE:/root/.cache/huggingface${LABEL_SUFFIX}" \
+    -v /mnt/nvme5n1/rohan_patched_ckpts:/mnt/nvme5n1/rohan_patched_ckpts${LABEL_SUFFIX} \
+    -v /mnt/nvme5n1/rawhad:/mnt/nvme5n1/rawhad${LABEL_SUFFIX} \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.netrc:/root/.netrc:ro" \
     -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
-    -v /mnt/nvme5n1/rohan_patched_ckpts/triton_cache:/root/.triton:z \
+    -v /mnt/nvme5n1/rohan_patched_ckpts/triton_cache:/root/.triton${LABEL_SUFFIX} \
     -w /workspace \
     nvcr.io/nvidia/nemo:26.06 \
     bash -c "
 set -e
-pip install --quiet --no-deps vllm==0.23 bitsandbytes safetensors 2>/dev/null
+pip install --quiet --no-deps vllm==0.23 safetensors 2>/dev/null
 pip uninstall -y triton_kernels 2>/dev/null || true
 pip install --quiet "humming-kernels[cu13]==0.1.4" 2>/dev/null
 pip install --quiet "anthropic[vertex]" litellm google-cloud-aiplatform tenacity fastapi uvicorn 2>/dev/null

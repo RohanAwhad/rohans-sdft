@@ -31,22 +31,22 @@ script must **fail fast** if either is unset. Code still has defaults — change
 
 Spec updated (`docs/megatron_trainer/launch_trainer.md`). Code defaults still `ddp` — change later.
 
-- [ ] `megatron_trainer/train_full.sh:105` — `-e TRAINER_BACKEND="${TRAINER_BACKEND:-ddp}"` → default `fsdp`
-- [ ] `megatron_trainer/config.py:30` — `TRAINER_BACKEND = os.environ.get("TRAINER_BACKEND", "ddp")` → default `fsdp`
-- [ ] Smoke with no `TRAINER_BACKEND` set (FSDP path, bitsandbytes no longer loaded)
+- [x] `megatron_trainer/train_full.sh:105` — `-e TRAINER_BACKEND="${TRAINER_BACKEND:-ddp}"` → default `fsdp` (superseded by removal below)
+- [x] `megatron_trainer/config.py:30` — `TRAINER_BACKEND = os.environ.get("TRAINER_BACKEND", "ddp")` → default `fsdp` (superseded by removal below)
+- [x] Smoke with no `TRAINER_BACKEND` set (FSDP path, bitsandbytes no longer loaded)
 
 ## Remove DDP trainer backend + 8-bit AdamW (FSDP-only)
 
 Spec updated (`docs/megatron_trainer/trainer.md`, `launch_trainer.md`): only `fsdp` is
 documented. Code still has the `ddp`/`bitsandbytes` path — remove later.
 
-- [ ] `megatron_trainer/trainer.py` — drop the `TRAINER_BACKEND` if/else branches (wrap `:122-137`,
-      optimizer `:139-146`, `finish_grad_sync` `:382-383`, weight-sync/ckpt rank guards `:434,469,474`);
-      hardcode the MCore FSDP path
-- [ ] Rename the `ddp_model` handle to the FSDP-wrapped model
-- [ ] `megatron_trainer/config.py:29-30` — drop `TRAINER_BACKEND` env read + `ddp` comment
-- [ ] `megatron_trainer/train_full.sh:105` — drop `-e TRAINER_BACKEND` passthrough
-- [ ] Remove `bitsandbytes` from the container install (`megatron_trainer/train_full.sh:119`)
+- [x] `megatron_trainer/trainer.py` — drop the `TRAINER_BACKEND` if/else branches (wrap,
+      optimizer, `finish_grad_sync`, weight-sync/ckpt rank guards); hardcode the MCore FSDP path
+- [x] Rename the `ddp_model` handle to the FSDP-wrapped model (`fsdp_model`)
+- [x] `megatron_trainer/config.py:29-30` — drop `TRAINER_BACKEND` env read + `ddp` comment
+- [x] `megatron_trainer/train_full.sh:105` — drop `-e TRAINER_BACKEND` passthrough
+- [x] Remove `bitsandbytes` from the container install (`megatron_trainer/train_full.sh:119`)
+- [x] wandb `backend` config hardcoded to `fsdp` (supersedes TODO 6 item 1)
 
 ## Log `train/grad_norm` to wandb
 
@@ -59,7 +59,7 @@ Spec updated (`docs/megatron_trainer/trainer.md` §7). Code doesn't capture it y
 
 Run config (`trainer.py:171-186`) omits several knobs and hardcodes `backend`. Add them:
 
-- [ ] `megatron_trainer/trainer.py:174` — replace hardcoded `"backend": "megatron-bridge-ddp"` with `TRAINER_BACKEND`
+- [ ] `megatron_trainer/trainer.py:174` — replace hardcoded `"backend": "megatron-bridge-ddp"` with `TRAINER_BACKEND` (done via FSDP-only change — now hardcoded `"fsdp"`)
 - [ ] `megatron_trainer/trainer.py:171-186` — add to `config`: `max_grad_norm` (`MAX_GRAD_NORM`), `max_total_len` (`MAX_TOTAL_LEN`), `student_max_prompt_len` (`STUDENT_MAX_PROMPT_LEN`), `teacher_max_prompt_len` (`TEACHER_MAX_PROMPT_LEN`), `thinking_budget` (`THINKING_BUDGET`), `ema_alpha` (`EMA_ALPHA`), `teacher_model` (`TEACHER_MODEL_PATH`)
 
 ## Remove `LOGPROB_BATCH_SIZE` (server-side batching)
