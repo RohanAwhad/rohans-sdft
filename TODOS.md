@@ -52,8 +52,8 @@ documented. Code still has the `ddp`/`bitsandbytes` path — remove later.
 
 Spec updated (`docs/megatron_trainer/trainer.md` §7). Code doesn't capture it yet.
 
-- [ ] `megatron_trainer/trainer.py:384` — capture the return value: `grad_norm = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)`
-- [ ] `megatron_trainer/trainer.py:404-409` — add `"train/grad_norm": grad_norm` to `log_dict`
+- [x] `megatron_trainer/trainer.py:435` — capture the return value: `grad_norm = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)`
+- [x] `megatron_trainer/trainer.py:457-468` — add `"train/grad_norm"` (global norm via all-reduced norm²) to `log_dict` + per-step log line
 
 ## Expand wandb run config
 
