@@ -2,7 +2,9 @@
 
 import os
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B")
+MODEL_NAME = os.environ.get("MODEL_NAME")
+if not MODEL_NAME:
+    raise ValueError("MODEL_NAME is required (e.g. MODEL_NAME=Qwen/Qwen3-8B)")
 HF_MODEL_PATH = os.environ.get("HF_MODEL_PATH", MODEL_NAME)
 
 # Optional frozen teacher. When set, the logprob server loads THIS model via
@@ -36,9 +38,6 @@ if STUDENT_THINKING and not (IS_QWEN or IS_GPT_OSS):
 GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))
 GPU_LOGPROB_SERVER = int(os.environ.get("GPU_LOGPROB_SERVER", "2"))
-
-# Training backend: "ddp" (bitsandbytes AdamW8bit) or "fsdp" (torch AdamW)
-TRAINER_BACKEND = os.environ.get("TRAINER_BACKEND", "ddp")
 
 # Training hyperparams
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-5"))
@@ -99,10 +98,12 @@ LOGPROB_BASE_URL = f"http://localhost:{LOGPROB_PORT}"
 LOGPROB_TCP_PORT = int(os.environ.get("LOGPROB_TCP_PORT", "8011"))
 
 # Dataset
-TRAIN_DATA_PATH = os.environ.get(
-    "TRAIN_DATA_PATH",
-    "/home/lab/rawhad/sdg-ki-eval/data/maas_data/rohans_data/train_maas_sdft.jsonl",
-)
+TRAIN_DATA_PATH = os.environ.get("TRAIN_DATA_PATH")
+if not TRAIN_DATA_PATH:
+    raise ValueError(
+        "TRAIN_DATA_PATH is required (path to the training .jsonl, "
+        "e.g. /workspace/.../train_sdft.jsonl)"
+    )
 
 # Collator
 HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")

@@ -60,7 +60,7 @@ GPU_VLLM=3 GPU_TRAINER=4 GPU_LOGPROB_SERVER=5 VLLM_PORT=8001 NCCL_MASTER_PORT=29
 - Gemma 3 is gated on HF; that's why Qwen3-0.6B is used instead.
 - **`device_map=DEVICE`** requires `accelerate` — install it in the venv.
 - **`dtype=` not `torch_dtype=`** — `torch_dtype` is deprecated in newer transformers.
-- **bitsandbytes required** for 8-bit Adam — needed to fit 8B model + optimizer on single 80GB GPU.
+- **FSDP-only trainer**: MCore `TorchFullyShardedDataParallel` + `torch.optim.AdamW` (bitsandbytes removed) — runs in the nemo:26.06 container via `megatron_trainer/train_full.sh`.
 - **Two independent NCCL groups** coexist: `torch.distributed` (port 29500) for teacher, vLLM `NCCLWeightTransferEngine` (auto port) for inference.
 
 ## Training data

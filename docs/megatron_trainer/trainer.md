@@ -26,8 +26,8 @@ orchestrates the full on-policy SDFT step:
   rank trains on a disjoint slice of the step's examples, so the loss math is
   per-rank; cross-rank communication is only for broadcast, loss aggregation,
   and weight sync.
-- **Backend**: `TRAINER_BACKEND=fsdp` (default) — MCore `TorchFullyShardedDataParallel`,
-  wrapped via `register_fsdp_module_mappings` (`model_utils.py:138`), which teaches
+- **Backend**: MCore `TorchFullyShardedDataParallel` (FSDP), wrapped via
+  `register_fsdp_module_mappings` (`model_utils.py:138`), which teaches
   the bridge's `AutoMapping` the FSDP-prefixed module class names.
 - **Optimizer** (`trainer.py:141`): `torch.optim.AdamW` with `lr=LEARNING_RATE,
   betas=(0.9, 0.95), weight_decay=0.01`.

@@ -1,5 +1,23 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-11 - FSDP-only trainer (TODOs 3+4) + smoke on ai-innovation-h100-12
+
+- `trainer.py`: removed DDP + bitsandbytes AdamW8bit branches; hardcoded MCore FSDP wrap + torch AdamW; `ddp_model` → `fsdp_model`; weight-sync/ckpt now unconditional (FSDP export is collective); wandb `backend` → `"fsdp"`.
+- `config.py`: dropped `TRAINER_BACKEND` env read.
+- `train_full.sh`: dropped `-e TRAINER_BACKEND` + `bitsandbytes` install; optional envs (`WANDB_*`, `TEACHER_MODEL_PATH`, ...) only passed when set (empty `-e WANDB_BASE_URL=""` crashed wandb Settings); `:z` mount suffix conditional on `getenforce` (permissive nodes can't relabel lab-owned files).
+- Smoke: `train_full.sh 0 2 1` with no `TRAINER_BACKEND`, Qwen3-8B, 100-sample eval jsonl, 2 GPUs, 50 optimizer steps. FSDP wrap + torch AdamW logged; 0 bitsandbytes references; `TIMING step=50` OK; vLLM + logprob weight syncs 200 OK; ckpts `epoch_1`/`step_50` saved. avg_loss=0.46.
+- Node quirks (ai-innovation-h100-12-preserve): had to kill lab's vLLM jobs on GPUs 2,3,6,7; HF cache copied to rawhad-owned dir (Megatron-Bridge lock file needs write); port 8001 occupied → `VLLM_PORT=8101`.
+
+
+## 2026-08-11 - Required-env fail-fast (TODO 2)
+
+- `MODEL_NAME` / `TRAIN_DATA_PATH` now required (no defaults) per `launch_trainer.md`.
+- `train_full.sh`: `:?` guards at lines 49-50 (exit 1 with message before container launch).
+- `config.py`: raise `ValueError` at import if either is unset/empty (line 5/102).
+- Deleted `megatron_trainer/repro_fixed_8192.py` (one-off 2026-08-03 OOM repro; conclusion recorded in 2026-08-03 entry, cap enforced in config).
+- Verified: unset MODEL_NAME → exit 1; unset TRAIN_DATA_PATH → exit 1; both set → proceeds to podman launch.
+
+
 ## 2025-07-11 - Task 1: NCCL Weight Transfer (HF -> vLLM)
 
 ### Goal
