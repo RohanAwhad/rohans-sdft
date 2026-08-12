@@ -432,31 +432,33 @@ def train() -> None:
             # ---- Optimizer step ----
             t0 = time.monotonic()
             fsdp_model.finish_grad_sync()
-            clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            grad_norm = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
             optimizer_step += 1
             t_optimizer = time.monotonic() - t0
 
-            # ---- Aggregate loss across ranks ----
+            # ---- Aggregate loss + grad norm across ranks ----
             t0 = time.monotonic()
-            loss_tensor = torch.tensor(
-                [accum_loss_sum, float(accum_samples)], device=device,
+            agg_tensor = torch.tensor(
+                [accum_loss_sum, float(accum_samples), grad_norm.item() ** 2], device=device,
             )
-            dist.all_reduce(loss_tensor)
+            dist.all_reduce(agg_tensor)
             t_allreduce = time.monotonic() - t0
 
             t_weight_sync: float = 0.0
             if rank == 0:
-                total_loss = loss_tensor[0].item()
-                total_samples = max(loss_tensor[1].item(), 1)
+                total_loss = agg_tensor[0].item()
+                total_samples = max(agg_tensor[1].item(), 1)
                 avg_loss = total_loss / total_samples
+                global_grad_norm = agg_tensor[2].item() ** 0.5
                 avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)
 
                 log_dict: dict = {
                     "train/loss": avg_loss,
                     "train/completion_length": avg_comp_len,
+                    "train/grad_norm": global_grad_norm,
                     "train/epoch": epoch,
                     "train/lr": scheduler.get_last_lr()[0] if scheduler is not None else LEARNING_RATE,
                 }
@@ -480,7 +482,7 @@ def train() -> None:
                         log_dict["episode/sample"] = table
 
                 wandb.log(log_dict, step=optimizer_step)
-                logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f}")
+                logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f} grad_norm={global_grad_norm:.4f}")
 
             # ---- Sync weights + checkpoint (all ranks — FSDP export/gather
             #      passes are collectives) ----
