@@ -14,13 +14,20 @@ LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-5"))
 BATCH_SIZE = 1  # always 1; effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
 GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", "32"))
 NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))
-MAX_GRAD_NORM = 10.0
+MAX_GRAD_NORM = 1.0
+WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "0.01"))
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))  # teacher EMA: phi = alpha*theta + (1-alpha)*phi
+LR_SCHEDULER = os.environ.get("LR_SCHEDULER", "constant")  # "constant" | "cosine"
+WARMUP_STEPS = int(os.environ.get("WARMUP_STEPS", "100"))   # cosine only; actual = min(this, 0.1 * total_steps)
 
 # Generation (vLLM rollout)
 GEN_MAX_NEW_TOKENS = int(os.environ.get("GEN_MAX_NEW_TOKENS", "2048"))
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "0.7"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "0.95"))
+
+# Prompt truncation
+STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))
+TEACHER_MAX_PROMPT_LEN = int(os.environ.get("TEACHER_MAX_PROMPT_LEN", "2048"))
 
 # vLLM server
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
@@ -37,6 +44,12 @@ TRAIN_DATA_PATH = os.environ.get(
 
 # Collator
 HINDSIGHT_FIELD = os.environ.get("HINDSIGHT_FIELD", "enriched_user_response")
+ONLINE_HINDSIGHT_FIELDS: set[str] = {"online_feedback", "reflection"}
+
+# Reflector (used when HINDSIGHT_FIELD=online_feedback)
+REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")
+REFLECTOR_REGION = os.environ.get("REFLECTOR_REGION", "us-east5")
+REFLECTOR_PROJECT_ID = os.environ.get("REFLECTOR_PROJECT_ID", "")
 
 # Output
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")

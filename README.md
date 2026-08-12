@@ -2,6 +2,35 @@
 
 On-policy self-distillation with privileged information. A student model learns from a teacher that sees enriched context (hindsight), while the student sees only the original prompt. Weight sync via NCCL on H100s.
 
+## How to Run:
+
+```bash
+# Terminal 1: vLLM server (GPU 1, port 8004)
+cd /home/lab/rawhad/self_distillation/rohans_sdft && \
+GPU_VLLM=4 MODEL_NAME=/home/lab/rawhad/self_distillation/rohans_sdft/train_dir/output_run_14/epoch_10 VLLM_PORT=8010 \
+bash train_dir/start_vllm.sh
+```
+
+```bash
+# Terminal 2: Trainer (GPU 2) + Logprob server (GPU 3)
+cd /home/lab/rawhad/self_distillation/rohans_sdft/train_dir && \
+GPU_VLLM=4 \
+GPU_TRAINER=5 \
+GPU_LOGPROB_SERVER=6 \
+MODEL_NAME=/home/lab/rawhad/self_distillation/rohans_sdft/train_dir/output_run_14/epoch_10 \
+VLLM_PORT=8010 \
+NCCL_MASTER_PORT=29501 \
+TRAIN_DATA_PATH=/home/lab/rawhad/sdft_rag_experiment/data/raft_dataset/v2_500/dataset_train_sdft.jsonl \
+HINDSIGHT_FIELD=enriched_user_response \
+OUTPUT_DIR=/mnt/nvme7n1/sdft_rag_experiment_raft_post_ki \
+GRAD_ACCUM_STEPS=32 \
+NUM_EPOCHS=10 \
+SAVE_EVERY=3 \
+LEARNING_RATE=2e-6 \
+WANDB_NAME=sdft_rag_from_base_raft_post_ki \
+bash launch.sh
+```
+
 ## Architecture
 
 ```

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SDFT Token Diagnostic Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8f8f8; color: #222; }
+  .header { background: #1a1a2e; color: #fff; padding: 16px 24px; }
+  .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .controls select, .controls label { font-size: 13px; }
+  .controls select { padding: 4px 8px; border-radius: 4px; border: none; }
+  .controls label { color: #ccc; }
+  .container { max-width: 1200px; margin: 20px auto; padding: 0 24px; }
+  .section { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .section h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; color: #444; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stat { background: #f5f5f5; padding: 10px 12px; border-radius: 6px; }
+  .stat .label { font-size: 11px; text-transform: uppercase; color: #888; }
+  .stat .value { font-size: 20px; font-weight: 600; margin-top: 2px; }
+  .token-flow { line-height: 2.4; font-size: 15px; font-family: 'SF Mono', 'Consolas', monospace; word-break: break-all; overflow-wrap: break-word; }
+  .token { display: inline; padding: 2px 1px; border-radius: 3px; cursor: pointer; position: relative; }
+  .token:hover { outline: 2px solid #333; z-index: 10; }
+  .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #222; color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 12px; white-space: nowrap; z-index: 100; line-height: 1.5; }
+  .token:hover .tooltip { display: block; }
+  .legend { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; color: #666; }
+  .legend-bar { width: 200px; height: 14px; border-radius: 3px; }
+  .meta { font-size: 13px; color: #555; line-height: 1.6; margin-bottom: 8px; }
+  .meta strong { color: #222; }
+  .color-mode { margin-bottom: 12px; }
+  .color-mode label { margin-right: 12px; font-size: 13px; cursor: pointer; }
+  .token.selected { outline: 3px solid #e040fb; z-index: 10; }
+  .topk-panel { margin-top: 16px; border-top: 1px solid #ddd; padding-top: 16px; display: none; }
+  .topk-panel.open { display: block; }
+  .topk-header { font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #333; }
+  .topk-header .pos-badge { background: #e040fb; color: #fff; padding: 2px 8px; border-radius: 10px; font-size: 12px; margin-left: 8px; }
+  .topk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .topk-col h3 { font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #555; }
+  .topk-table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: 'SF Mono', 'Consolas', monospace; }
+  .topk-table th { text-align: left; padding: 4px 8px; border-bottom: 2px solid #ddd; font-size: 11px; text-transform: uppercase; color: #888; }
+  .topk-table td { padding: 4px 8px; border-bottom: 1px solid #eee; }
+  .topk-table tr.sampled { background: #fff3e0; font-weight: 600; }
+  .topk-table tr.overlap { background: #e8f5e9; }
+  .topk-table .prob-bar { display: inline-block; height: 10px; background: #42a5f5; border-radius: 2px; vertical-align: middle; margin-left: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>SDFT Token Diagnostic Viewer</h1>
+  <div class="controls">
+    <label>Model:</label>
+    <select id="filePicker"><option value="">-- Select --</option></select>
+  </div>
+</div>
+
+<div class="container">
+  <div class="section" id="contextSection" style="display:none;">
+    <h2>Question</h2>
+    <div class="field-value" id="questionText" style="max-height:300px; overflow-y:auto; white-space:pre-wrap; font-size:13px; line-height:1.6; background:#f9f9f9; padding:12px; border-radius:4px; border:1px solid #eee;"></div>
+    <h2 style="margin-top:12px;">Golden Answer</h2>
+    <div class="field-value" id="goldenText" style="white-space:pre-wrap; font-size:13px; line-height:1.6; background:#fffbeb; padding:12px; border-radius:4px; border:1px solid #fde68a;"></div>
+  </div>
+
+  <div class="section" id="summarySection" style="display:none;">
+    <h2>Summary</h2>
+    <div class="meta" id="metaInfo"></div>
+    <div class="summary-grid" id="summaryGrid"></div>
+  </div>
+
+  <div class="section" id="tokenSection" style="display:none;">
+    <h2>Token-Level View</h2>
+    <div class="color-mode">
+      <strong>Color by:</strong>
+      <label><input type="radio" name="colorMode" value="log_ratio" checked> log(teacher/student)</label>
+      <label><input type="radio" name="colorMode" value="overlap"> Overlap Ratio</label>
+      <label><input type="radio" name="colorMode" value="entropy_gap"> Entropy Gap</label>
+      <label><input type="radio" name="colorMode" value="student_prob"> Student Prob</label>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="token-flow" id="tokenFlow"></div>
+    <div class="topk-panel" id="topkPanel">
+      <div class="topk-header" id="topkHeader"></div>
+      <div class="topk-grid">
+        <div class="topk-col">
+          <h3>Student Top-16</h3>
+          <table class="topk-table" id="studentTopk"><thead><tr><th>#</th><th>Token</th><th>Prob</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+        <div class="topk-col">
+          <h3>Teacher Top-16</h3>
+          <table class="topk-table" id="teacherTopk"><thead><tr><th>#</th><th>Token</th><th>Prob</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentData = null;
+
+async function loadFileList() {
+  const resp = await fetch('/api/files');
+  const files = await resp.json();
+  const picker = document.getElementById('filePicker');
+  files.filter(f => f.includes('opd_diagnostic') && f.endsWith('.json')).forEach(f => {
+    const opt = document.createElement('option');
+    opt.value = f;
+    opt.textContent = f.replace('opd_diagnostic/', '').replace('.json', '');
+    picker.appendChild(opt);
+  });
+}
+
+async function loadFile(path) {
+  if (!path) return;
+  const resp = await fetch('/api/load?path=' + encodeURIComponent(path));
+  currentData = await resp.json();
+  renderSummary();
+  renderTokens();
+}
+
+function renderSummary() {
+  const d = currentData;
+  document.getElementById('contextSection').style.display = '';
+  document.getElementById('summarySection').style.display = '';
+
+  document.getElementById('questionText').textContent = d.question;
+  document.getElementById('goldenText').textContent = d.golden_answer;
+
+  document.getElementById('metaInfo').innerHTML =
+    `<strong>Model:</strong> ${d.model_name || d.model_path}<br>` +
+    `<strong>Completion:</strong> ${d.completion_length} tokens`;
+
+  const s = d.summary;
+  const stats = [
+    ['Overlap Ratio', s.mean_overlap_ratio.toFixed(3)],
+    ['Student Entropy', s.mean_student_entropy.toFixed(4)],
+    ['Teacher Entropy', s.mean_teacher_entropy.toFixed(4)],
+    ['Entropy Gap', s.mean_entropy_gap.toFixed(4)],
+    ['Mean Student P', s.mean_student_prob.toFixed(4)],
+    ['Mean Teacher P', s.mean_teacher_prob.toFixed(4)],
+  ];
+  document.getElementById('summaryGrid').innerHTML = stats.map(([label, value]) =>
+    `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`
+  ).join('');
+}
+
+function getColorMode() {
+  return document.querySelector('input[name="colorMode"]:checked').value;
+}
+
+function tokenValue(t, mode) {
+  if (mode === 'log_ratio') {
+    const sp = Math.max(t.student_prob, 1e-10);
+    const tp = Math.max(t.teacher_prob, 1e-10);
+    return Math.log(tp) - Math.log(sp);
+  }
+  if (mode === 'overlap') return t.overlap_ratio;
+  if (mode === 'entropy_gap') return -t.entropy_gap; // negative = bad
+  if (mode === 'student_prob') return t.student_prob;
+  return 0;
+}
+
+function valueToColor(val, mode) {
+  if (mode === 'log_ratio') {
+    // diverging: red (teacher disagrees) -> white -> blue (teacher agrees more)
+    // clamp to [-5, 5]
+    const v = Math.max(-5, Math.min(5, val));
+    const t = (v + 5) / 10; // 0 to 1
+    if (t < 0.5) {
+      const s = t / 0.5;
+      const r = 255;
+      const g = Math.round(200 * s + 55 * (1 - s));
+      const b = Math.round(200 * s + 55 * (1 - s));
+      return `rgb(${r},${g},${b})`;
+    } else {
+      const s = (t - 0.5) / 0.5;
+      const r = Math.round(200 * (1 - s) + 55 * s);
+      const g = Math.round(200 * (1 - s) + 55 * s);
+      const b = 255;
+      return `rgb(${r},${g},${b})`;
+    }
+  }
+  if (mode === 'overlap') {
+    const v = Math.max(0, Math.min(1, val));
+    const r = Math.round(255 * (1 - v));
+    const g = Math.round(200 * v + 55);
+    const b = Math.round(255 * v);
+    return `rgba(${100}, ${Math.round(180 * v + 75)}, ${255}, ${0.1 + 0.6 * v})`;
+  }
+  if (mode === 'entropy_gap') {
+    const v = Math.max(-1, Math.min(0, val));
+    const t = (v + 1); // 0=bad, 1=good
+    return `rgba(255, ${Math.round(80 + 175 * t)}, ${Math.round(80 + 175 * t)}, ${0.3 + 0.4 * (1 - t)})`;
+  }
+  if (mode === 'student_prob') {
+    const v = Math.max(0, Math.min(1, val));
+    return `rgba(76, 175, 80, ${0.1 + 0.7 * v})`;
+  }
+  return 'transparent';
+}
+
+function renderTokens() {
+  const d = currentData;
+  const mode = getColorMode();
+  document.getElementById('tokenSection').style.display = '';
+
+  // legend
+  const legendEl = document.getElementById('legend');
+  if (mode === 'log_ratio') {
+    legendEl.innerHTML = '<span>Teacher disagrees</span>' +
+      '<div class="legend-bar" style="background: linear-gradient(to right, rgb(255,55,55), rgb(255,200,200), white, rgb(200,200,255), rgb(55,55,255))"></div>' +
+      '<span>Teacher agrees more</span>';
+  } else if (mode === 'overlap') {
+    legendEl.innerHTML = '<span>Low overlap</span>' +
+      '<div class="legend-bar" style="background: linear-gradient(to right, rgba(100,75,255,0.1), rgba(100,255,255,0.7))"></div>' +
+      '<span>High overlap</span>';
+  } else if (mode === 'entropy_gap') {
+    legendEl.innerHTML = '<span>Large gap (bad)</span>' +
+      '<div class="legend-bar" style="background: linear-gradient(to right, rgba(255,80,80,0.7), rgba(255,255,255,0.3))"></div>' +
+      '<span>No gap (good)</span>';
+  } else {
+    legendEl.innerHTML = '<span>Low prob</span>' +
+      '<div class="legend-bar" style="background: linear-gradient(to right, rgba(76,175,80,0.1), rgba(76,175,80,0.8))"></div>' +
+      '<span>High prob</span>';
+  }
+
+  // tokens
+  const flow = document.getElementById('tokenFlow');
+  flow.innerHTML = d.tokens.map(t => {
+    const val = tokenValue(t, mode);
+    const bg = valueToColor(val, mode);
+    const sp = t.student_prob;
+    const tp = t.teacher_prob;
+    const lr = (Math.log(Math.max(tp, 1e-10)) - Math.log(Math.max(sp, 1e-10))).toFixed(3);
+    const displayStr = t.token_str.replace(/\n/g, '\\n').replace(/ /g, '\u00a0');
+
+    const tooltipLines = [
+      `pos: ${t.position}`,
+      `token: "${t.token_str.replace(/\n/g, '\\n')}"`,
+      `student_p: ${sp.toFixed(6)}`,
+      `teacher_p: ${tp.toFixed(6)}`,
+      `log_ratio: ${lr}`,
+      `overlap: ${t.overlap_ratio.toFixed(3)}`,
+      `H_student: ${t.student_entropy.toFixed(4)}`,
+      `H_teacher: ${t.teacher_entropy.toFixed(4)}`,
+    ];
+
+    return `<span class="token" data-pos="${t.position}" style="background:${bg}" onclick="showTopK(${t.position})">` +
+      `${escHtml(displayStr)}` +
+      `<span class="tooltip">${tooltipLines.join('<br>')}</span>` +
+      `</span>`;
+  }).join('');
+
+  // hide panel on re-render
+  document.getElementById('topkPanel').classList.remove('open');
+  document.querySelectorAll('.token.selected').forEach(el => el.classList.remove('selected'));
+}
+
+function showTopK(pos) {
+  const t = currentData.tokens[pos];
+  if (!t) return;
+
+  // highlight selected token
+  document.querySelectorAll('.token.selected').forEach(el => el.classList.remove('selected'));
+  document.querySelector(`.token[data-pos="${pos}"]`).classList.add('selected');
+
+  const panel = document.getElementById('topkPanel');
+  panel.classList.add('open');
+
+  const lr = (Math.log(Math.max(t.teacher_prob, 1e-10)) - Math.log(Math.max(t.student_prob, 1e-10))).toFixed(3);
+  document.getElementById('topkHeader').innerHTML =
+    `Position ${pos}: "${escHtml(t.token_str.replace(/\n/g, '\\n'))}"` +
+    `<span class="pos-badge">overlap: ${t.overlap_ratio.toFixed(3)}</span>` +
+    `<span class="pos-badge" style="background:#42a5f5">log_ratio: ${lr}</span>` +
+    `<span class="pos-badge" style="background:#66bb6a">H_s: ${t.student_entropy.toFixed(3)}</span>` +
+    `<span class="pos-badge" style="background:#ffa726">H_t: ${t.teacher_entropy.toFixed(3)}</span>`;
+
+  const overlapSet = new Set(t.overlap_token_ids || []);
+
+  function fillTable(tableId, topk) {
+    const tbody = document.querySelector(`#${tableId} tbody`);
+    tbody.innerHTML = topk.map((tk, i) => {
+      const isSampled = tk.token_id === t.token_id;
+      const isOverlap = overlapSet.has(tk.token_id);
+      const cls = isSampled ? 'sampled' : (isOverlap ? 'overlap' : '');
+      const barW = Math.max(1, Math.round(tk.prob * 200));
+      return `<tr class="${cls}">` +
+        `<td>${i+1}</td>` +
+        `<td>${escHtml(tk.token_str.replace(/\n/g, '\\n'))}</td>` +
+        `<td>${tk.prob.toFixed(6)}</td>` +
+        `<td><span class="prob-bar" style="width:${barW}px"></span></td>` +
+        `</tr>`;
+    }).join('');
+  }
+
+  fillTable('studentTopk', t.student_top16);
+  fillTable('teacherTopk', t.teacher_top16);
+
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+document.getElementById('filePicker').addEventListener('change', e => loadFile(e.target.value));
+document.querySelectorAll('input[name="colorMode"]').forEach(r => r.addEventListener('change', () => { if (currentData) renderTokens(); }));
+
+loadFileList();
+</script>
+</body>
+</html>
