@@ -64,7 +64,7 @@ def _fallback_on_exhaustion(retry_state):
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=0.2, max=10),
-    retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError)),
+    retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError, ValueError)),
     retry_error_callback=_fallback_on_exhaustion,
 )
 def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
@@ -88,5 +88,12 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
     if "```json" in raw:
         raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
     parsed: dict[str, str] = json.loads(raw)
+    if isinstance(parsed, list):
+        if len(parsed) == 1 and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        else:
+            raise ValueError(f"Reflector returned unexpected JSON list: {raw[:200]}")
+    if not isinstance(parsed, dict) or "verdict" not in parsed or "feedback" not in parsed:
+        raise ValueError(f"Reflector returned unexpected JSON: {raw[:200]}")
     logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
     return parsed
