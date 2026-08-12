@@ -59,8 +59,8 @@ Spec updated (`docs/megatron_trainer/trainer.md` §7). Code doesn't capture it y
 
 Run config (`trainer.py:171-186`) omits several knobs and hardcodes `backend`. Add them:
 
-- [ ] `megatron_trainer/trainer.py:174` — replace hardcoded `"backend": "megatron-bridge-ddp"` with `TRAINER_BACKEND` (done via FSDP-only change — now hardcoded `"fsdp"`)
-- [ ] `megatron_trainer/trainer.py:171-186` — add to `config`: `max_grad_norm` (`MAX_GRAD_NORM`), `max_total_len` (`MAX_TOTAL_LEN`), `student_max_prompt_len` (`STUDENT_MAX_PROMPT_LEN`), `teacher_max_prompt_len` (`TEACHER_MAX_PROMPT_LEN`), `thinking_budget` (`THINKING_BUDGET`), `ema_alpha` (`EMA_ALPHA`), `teacher_model` (`TEACHER_MODEL_PATH`)
+- [x] `megatron_trainer/trainer.py` — `"backend": "fsdp"` (done via FSDP-only change)
+- [x] `megatron_trainer/trainer.py:183-208` — add to `config`: `max_grad_norm` (`MAX_GRAD_NORM`), `max_total_len` (`MAX_TOTAL_LEN`), `student_max_prompt_len` (`STUDENT_MAX_PROMPT_LEN`), `teacher_max_prompt_len` (`TEACHER_MAX_PROMPT_LEN`), `thinking_budget` (`THINKING_BUDGET`), `ema_alpha` (`EMA_ALPHA`), `teacher_model` (`TEACHER_MODEL_PATH`)
 
 ## Remove `LOGPROB_BATCH_SIZE` (server-side batching)
 
