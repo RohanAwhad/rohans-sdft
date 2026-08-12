@@ -75,7 +75,7 @@ Removed from spec (`docs/megatron_trainer/launch_trainer.md`). Code usage still 
 
 Spec now says `--max-model-len $MAX_TOTAL_LEN` (`docs/megatron_trainer/launch_trainer.md`), code still hardcodes 16384.
 
-- [ ] `megatron_trainer/train_full.sh:142` — `--max-model-len 16384` → `--max-model-len "$MAX_TOTAL_LEN"`
+- [x] `megatron_trainer/train_full.sh:162` — `--max-model-len 16384` → `--max-model-len "$MAX_TOTAL_LEN"` (passthrough already in place at `:123`)
 - [ ] Smoke: defaults (8192) still fine; OLS set `MAX_TOTAL_LEN=16384`
 
 ## Port-scan race: 30s stagger

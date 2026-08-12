@@ -159,7 +159,7 @@ for i in \$(seq 0 \$((NUM_VLLM - 1))); do
         --model \"\$MODEL_NAME\" \\
         --port \"\$PORT\" \\
         --master-port \$DIST_PORT \\
-        --max-model-len 16384 \\
+        --max-model-len \"\$MAX_TOTAL_LEN\" \\
         --dtype bfloat16 \\
         --gpu-memory-utilization 0.8 \\
         --weight-transfer-config '{\"backend\":\"nccl\"}' \\
