@@ -107,6 +107,7 @@ repeat until GRAD_ACCUM_STEPS microbatches done
   tracked in https://github.com/RohanAwhad/rohans-sdft/issues/12. Not planned
   now; streaming + TIS covers the staleness it would fix.
 - **Per-rank batch > 1**: padding + attention masks, AReaL-style dynamic
-  token-balanced microbatching — explicitly out of scope for now.
+  token-balanced microbatching — explicitly out of scope for now
+  (https://github.com/RohanAwhad/rohans-sdft/issues/13).
 - **Drop/regenerate stale samples** (AReaL η) if IS-weight variance shows up
-  in practice.
+  in practice (https://github.com/RohanAwhad/rohans-sdft/issues/14).
