@@ -1,5 +1,14 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-12 - TODOs batch: grad_norm logging, wandb config, max-model-len, batch-path deletion
+
+- `trainer.py`: capture `clip_grad_norm_` return → extend existing SUM all-reduce to 3 elems (loss, samples, grad_norm²) so rank 0 logs the **global** norm (FSDP shard-local norms sum to global). `train/grad_norm` in wandb `log_dict` + per-step log line.
+- `trainer.py`: wandb config now includes `max_grad_norm`, `max_total_len`, `student/teacher_max_prompt_len`, `ema_alpha`, `teacher_model` (empty = internal EMA teacher); imports `EMA_ALPHA`, `MAX_TOTAL_LEN`.
+- `train_full.sh`: `--max-model-len "$MAX_TOTAL_LEN"` (was hardcoded 16384); `MAX_TOTAL_LEN` passthrough already existed.
+- Deleted unused batch logprob path entirely (per request, not un-chunked): `LOGPROB_BATCH_SIZE` env + passthrough, `BatchLogprobRequest`, `/logprobs_batch` endpoint, `request_teacher_log_probs_batch_http`, trainer import. Trainer uses per-rank TCP only.
+- Port-scan race TODO dropped from scope (user decision).
+- Verification: only Mac-side (`py_compile` / `bash -n`) + zero leftover refs via rg. **Full cluster smoke still pending** — covers all 4 changes + the `MAX_TOTAL_LEN` smoke item.
+
 ## 2026-08-11 - FSDP-only trainer (TODOs 3+4) + smoke on ai-innovation-h100-12
 
 - `trainer.py`: removed DDP + bitsandbytes AdamW8bit branches; hardcoded MCore FSDP wrap + torch AdamW; `ddp_model` → `fsdp_model`; weight-sync/ckpt now unconditional (FSDP export is collective); wandb `backend` → `"fsdp"`.
