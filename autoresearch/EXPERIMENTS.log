@@ -1,0 +1,262 @@
+# EXPERIMENTS LOG
+
+---
+
+## #E018 [DONE]
+
+1. **Motivation:** First systematic sweep. Testing aggressive LR + EMA teacher + high temp.
+2. **Hypothesis:** 3e-5 LR with EMA self-distillation and temp=1.0 can improve over baseline.
+3. **Prediction:** Accuracy should climb over 3 epochs. Refuted if ep1 < 0.60 or declining trajectory.
+4. **Design:** LR=3e-5, cosine, IS_CAP=2.0, EMA(0.01) teacher, temp=1.0, enriched, 3ep k400.
+5. **Results:** ep1=0.6391, ep2=0.6194, ep3=0.6822. Δ(1→3)=+4.3pp.
+6. **Analysis:** Ep2 dipped below ep1 — unstable. Recovery at ep3 but still far from baseline.
+7. **Conclusion:** INCONCLUSIVE. REVERT. EMA + high LR + high temp is too noisy.
+8. **New questions:** Is the EMA teacher or the high temp the problem?
+
+---
+
+## #E019 [DONE]
+
+1. **Motivation:** Replace EMA with frozen 120b teacher, keep cosine schedule.
+2. **Hypothesis:** 120b frozen teacher provides better signal than EMA at 1e-5 with cosine warmup.
+3. **Prediction:** Smoother trajectory than E018, ep3 > 0.70.
+4. **Design:** LR=1e-5, cosine, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6391, ep2=0.6930, ep3=0.7056. Δ(1→3)=+6.7pp.
+6. **Analysis:** Strong upward trend. 120b teacher clearly better than EMA. Cosine warmup delayed ep1.
+7. **Conclusion:** WEAKLY SUPPORTED. KEEP. 120b teacher validated, but cosine delays convergence.
+8. **New questions:** Would constant schedule start higher at ep1?
+
+---
+
+## #E020 [DONE]
+
+1. **Motivation:** Test constant schedule vs cosine at 1e-5.
+2. **Hypothesis:** Constant LR avoids the slow cosine warmup, giving higher ep1.
+3. **Prediction:** ep1 > 0.68 (higher than E019's 0.6391), flat or improving trend.
+4. **Design:** LR=1e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.7056, ep2=0.7127, ep3=0.7038. Δ(1→3)=-0.2pp.
+6. **Analysis:** ep1 much higher than E019 (confirming constant > cosine for early epochs). But flat — no improvement over 3 epochs.
+7. **Conclusion:** SUPPORTED (constant beats cosine at ep1). KEEP. But 1e-5 doesn't scale with more training.
+8. **New questions:** Does higher LR (2e-5) scale better over epochs?
+
+---
+
+## #E021 [DONE]
+
+1. **Motivation:** Isolate teacher effect — EMA vs frozen 120b at 1e-5.
+2. **Hypothesis:** EMA self-distillation is comparable to 120b teacher at low LR.
+3. **Prediction:** ep3 within 2pp of E020 (0.7038).
+4. **Design:** LR=1e-5, constant, IS_CAP=2.0, EMA teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6912, ep2=0.6930, ep3=0.6912. Δ(1→3)=0pp.
+6. **Analysis:** Completely flat. EMA teacher at 1e-5 doesn't improve at all.
+7. **Conclusion:** REFUTED. REVERT. 120b teacher essential even at low LR.
+8. **New questions:** None — EMA eliminated as viable teacher option.
+
+---
+
+## #E022 [DONE]
+
+1. **Motivation:** Test IS weighting off vs on at 1e-5.
+2. **Hypothesis:** IS weighting matters for gradient quality.
+3. **Prediction:** Without IS, accuracy changes by >2pp vs E020.
+4. **Design:** LR=1e-5, constant, IS off, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6912, ep2=0.6822, ep3=0.6894. Δ(1→3)=-0.2pp.
+6. **Analysis:** IS on/off makes no difference at 1e-5. Both flat.
+7. **Conclusion:** INCONCLUSIVE. The LR is too low for IS to matter.
+8. **New questions:** Does IS matter at higher LR where gradients are larger?
+
+---
+
+## #E023 [DONE]
+
+1. **Motivation:** Test 2e-5 LR — higher than 1e-5 which plateaus, lower than 3e-5 which is noisy.
+2. **Hypothesis:** 2e-5 is the sweet spot for learning with thinking mode.
+3. **Prediction:** ep3 > 0.70 with upward trajectory across all 3 epochs.
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6230, ep2=0.6966, ep3=0.7110. Δ(1→3)=+8.8pp.
+6. **Analysis:** Strongest trajectory of any run. +8.8pp over 3 epochs. ep1 dip is expected — higher LR destabilizes initially but recovers strongly.
+7. **Conclusion:** SUPPORTED. KEEP. 2e-5 is the scaling LR. Best 3-epoch result.
+8. **New questions:** Does it continue scaling past epoch 3? Does it beat baseline at epoch 10?
+
+---
+
+## #E024 [DONE]
+
+1. **Motivation:** Test EMA teacher at 2e-5 (the scaling LR).
+2. **Hypothesis:** EMA self-distillation can work at 2e-5 where the LR is high enough.
+3. **Prediction:** ep3 within 3pp of E023 (0.7110).
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, EMA teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6786, ep2=0.6715, ep3=0.6643. Δ(1→3)=-1.4pp.
+6. **Analysis:** Declining trajectory. EMA teacher fails at 2e-5 — the student drifts from itself.
+7. **Conclusion:** REFUTED. REVERT. 120b frozen teacher is essential at all LRs.
+8. **New questions:** None — EMA teacher conclusively eliminated.
+
+---
+
+## #E025 [DONE]
+
+1. **Motivation:** Test temp=1.0 at 2e-5 (E023 used 0.7).
+2. **Hypothesis:** Higher rollout temperature increases exploration, improving accuracy.
+3. **Prediction:** ep3 > 0.70, comparable to E023.
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, 120b teacher, temp=1.0, enriched, 3ep k400.
+5. **Results:** ep1=0.6876, ep2=0.6930, ep3=0.6589. Δ(1→3)=-2.9pp.
+6. **Analysis:** Declining trajectory. Noisy rollouts at temp=1.0 hurt — the student gets worse signal.
+7. **Conclusion:** REFUTED. REVERT. temp=0.7 >> temp=1.0 at 2e-5.
+8. **New questions:** Is there a sweet spot between 0.7 and 1.0? Or is lower always better?
+
+---
+
+## #E026 [DONE]
+
+1. **Motivation:** Test IS_CAP=5.0 at 2e-5 (E023 used 2.0).
+2. **Hypothesis:** Higher IS cap allows more gradient from high-ratio samples.
+3. **Prediction:** ep3 > 0.70, trajectory at least as good as E023.
+4. **Design:** LR=2e-5, constant, IS_CAP=5.0, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6230, ep2=0.6481, ep3=0.6553. Δ(1→3)=+3.2pp.
+6. **Analysis:** Much weaker than E023 (+3.2pp vs +8.8pp). IS_CAP=5.0 is worse than 2.0 at 3 epochs.
+7. **Conclusion:** REFUTED at 3 epochs. REVERT. IS_CAP=2.0 is better for short runs.
+8. **New questions:** Could 5.0 perform differently over longer training (more steps)?
+
+---
+
+## #E027 [DONE]
+
+1. **Motivation:** Test IS_CAP=1.0 at 2e-5.
+2. **Hypothesis:** Tighter IS clipping stabilizes training.
+3. **Prediction:** Less zigzag, ep3 > 0.70.
+4. **Design:** LR=2e-5, constant, IS_CAP=1.0, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6643, ep2=0.6858, ep3=0.6804. Δ(1→3)=+1.6pp.
+6. **Analysis:** Clips ~20% of samples. Too aggressive — suppresses useful gradient signal.
+7. **Conclusion:** REFUTED. REVERT. IS_CAP=1.0 clips too much.
+8. **New questions:** IS_CAP=2.0 sweet spot confirmed at 3 epochs.
+
+---
+
+## #E028 [DONE]
+
+1. **Motivation:** Test GRAD_ACCUM=16 (half of E023's 32).
+2. **Hypothesis:** Smaller effective batch size gives more frequent updates.
+3. **Prediction:** Faster convergence, ep3 > 0.70.
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, GRAD_ACCUM=16, 3ep k400.
+5. **Results:** ep1=0.6697, ep2=0.6804, ep3=0.6948. Δ(1→3)=+2.5pp.
+6. **Analysis:** Weaker than E023 (+2.5pp vs +8.8pp). Noisier gradients from smaller batch.
+7. **Conclusion:** REFUTED. REVERT. GRAD_ACCUM=32 is better.
+8. **New questions:** None.
+
+---
+
+## #E029 [DONE]
+
+1. **Motivation:** Test LR=1.5e-5 — between the flat 1e-5 and scaling 2e-5.
+2. **Hypothesis:** 1.5e-5 may be a smoother scaling point.
+3. **Prediction:** Upward trajectory, ep3 > 0.70.
+4. **Design:** LR=1.5e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 3ep k400.
+5. **Results:** ep1=0.6894, ep2=0.7092, ep3=0.6948. Δ(1→3)=+0.5pp.
+6. **Analysis:** Nearly flat. 1.5e-5 behaves like 1e-5 — doesn't scale.
+7. **Conclusion:** REFUTED. REVERT. Only 2e-5 scales with thinking mode.
+8. **New questions:** None — 2e-5 confirmed as the only viable LR.
+
+---
+
+## #E030 [DONE]
+
+1. **Motivation:** 10-epoch validation of E023's config (best 3-epoch result).
+2. **Hypothesis:** The +8.8pp trajectory continues beyond epoch 3, eventually beating baseline 0.7415.
+3. **Prediction:** Accuracy reaches >0.74 by epoch 10.
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 10ep k400.
+5. **Results:** ep1=0.6697, ep2=0.6822, ep3=0.6894, ep4=0.6966, ep5=0.6858, ep6=0.6930, ep7=0.6912, ep8=0.6984. Ep9-10 lost to disk full.
+6. **Analysis:** Plateaued at 0.69-0.70 with zigzag pattern. Never approached baseline. The 3-epoch trajectory did not sustain.
+7. **Conclusion:** REFUTED. The k400 subset is too small — model overfits and oscillates.
+8. **New questions:** Can online_feedback provide richer per-step signal to break the plateau?
+
+---
+
+## #E031 [DONE]
+
+1. **Motivation:** Test online_feedback mode — reflector LLM provides per-step feedback.
+2. **Hypothesis:** online_feedback gives richer conditioning signal, pushing accuracy higher than enriched.
+3. **Prediction:** ep3 > 0.7110 (E023's ep3 with enriched).
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, online_feedback, 3ep k400.
+5. **Results:** ep1=0.6338, ep2=0.6750, ep3=0.6517. Δ(1→3)=+1.8pp.
+6. **Analysis:** Much worse than enriched E023 (+1.8pp vs +8.8pp). Ep3 dipped from ep2.
+7. **Conclusion:** REFUTED at 3 epochs with constant schedule. online_feedback underperforms enriched.
+8. **New questions:** Does cosine schedule help online_feedback?
+
+---
+
+## #E032 [DONE]
+
+1. **Motivation:** Test cosine schedule with online_feedback.
+2. **Hypothesis:** Cosine warmup stabilizes online_feedback's richer but noisier signal.
+3. **Prediction:** ep3 > E031's 0.6517.
+4. **Design:** LR=2e-5, cosine, IS_CAP=2.0, 120b teacher, temp=0.7, online_feedback, 3ep k400.
+5. **Results:** ep1=0.6607, ep2=0.6535, ep3=0.6948. Δ(1→3)=+3.4pp.
+6. **Analysis:** Better than constant+online_fb (E031), but still below enriched (E023).
+7. **Conclusion:** WEAKLY SUPPORTED. Cosine helps online_feedback but doesn't close the gap with enriched.
+8. **New questions:** Does online_feedback perform better over longer training (10 epochs)?
+
+---
+
+## #E033 [DONE]
+
+1. **Motivation:** 10-epoch validation of online_feedback.
+2. **Hypothesis:** online_feedback's richer signal accumulates benefit over more epochs, eventually beating enriched.
+3. **Prediction:** Peak accuracy > 0.7289 (E034's enriched 10ep peak, run concurrently). Ideally >0.7415 baseline.
+4. **Design:** LR=2e-5, constant, IS_CAP=2.0, 120b teacher, temp=0.7, online_feedback, 10ep k400.
+5. **Results:** ep1=0.6984, ep2=0.7092, ep3=0.6804, ep4=0.6984, ep5=0.6750, ep6=0.6786, ep7=0.7056, ep8=0.7092, ep9=0.7253, ep10=0.7020.
+6. **Analysis:** Peak 0.7253@ep9. Same zigzag plateau as E030 (enriched). online_feedback didn't break through.
+7. **Conclusion:** REFUTED. online_feedback doesn't outperform enriched over 10 epochs on k400. REVERT.
+8. **New questions:** Is the k400 plateau a dataset size issue, not a signal quality issue?
+
+---
+
+## #E034 [DONE]
+
+1. **Motivation:** Test cosine schedule over 10 epochs with enriched.
+2. **Hypothesis:** Cosine decay prevents late-epoch oscillation.
+3. **Prediction:** Less zigzag than E030 (constant), peak > 0.70.
+4. **Design:** LR=2e-5, cosine, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 10ep k400.
+5. **Results:** ep1=0.6804, ep2=0.6589, ep3=0.6804, ep4=0.7056, ep5=0.7181, ep6=0.6966, ep7=0.7289, ep8=0.7163, ep9=0.7235, ep10=0.7163.
+6. **Analysis:** Peak 0.7289@ep7 — highest of any IS run. Less zigzag in late epochs than E030. Cosine helps.
+7. **Conclusion:** WEAKLY SUPPORTED. KEEP. Cosine is better than constant for 10-epoch runs. But still doesn't beat baseline.
+8. **New questions:** Is IS clipping the bottleneck? Non-IS runs (3, 4, 13) beat baseline.
+
+---
+
+## #E035 [DONE]
+
+1. **Motivation:** Test IS_CAP=5.0 + temp=1.2 (loosen IS clipping + more rollout diversity).
+2. **Hypothesis:** Higher IS cap + higher temp unblocks the 0.73 plateau by allowing stronger gradient signal and more exploration.
+3. **Prediction:** Peak > 0.74 by epoch 10. Smoother trajectory than E030/E034.
+4. **Design:** LR=2e-5, constant, IS_CAP=5.0, 120b teacher, temp=1.2, enriched, 10ep k400.
+5. **Results:** ep1=0.6194, ep2=0.6230, ep3=0.6589, ep4=0.6517, ep5=0.6822, ep6=0.7235, ep7=0.7235, ep8=0.6894, ep9=0.6876, ep10=0.6858.
+6. **Analysis:** Smooth climb to 0.7235@ep6-7, then collapsed to 0.69 by ep10. Constant schedule can't sustain gains at higher IS_CAP.
+7. **Conclusion:** INCONCLUSIVE. The climb was promising but the collapse kills it. Need cosine to prevent late-epoch decay.
+8. **New questions:** Does cosine + IS_CAP=5.0 prevent the collapse?
+
+---
+
+## #E036 [DONE]
+
+1. **Motivation:** Test locked config (cosine + online_fb + IS_CAP=5.0 + temp=1.2).
+2. **Hypothesis:** Cosine prevents the late-epoch collapse seen in E035 while IS_CAP=5.0 provides stronger gradient.
+3. **Prediction:** Peak > 0.74. No collapse in ep8-10.
+4. **Design:** LR=2e-5, cosine, IS_CAP=5.0, 120b teacher, temp=1.2, online_feedback, 10ep k400.
+5. **Results:** ep1=0.6338, ep2=0.6768, ep3=0.7092, ep4=0.7235, ep5=0.6768, ep6=0.7110, ep7=0.7163, ep8=0.7074, ep9=0.7127, ep10=0.7110.
+6. **Analysis:** Peak 0.7235@ep4. Cosine prevented collapse (ep8-10 stable at 0.71). But still didn't break 0.74.
+7. **Conclusion:** WEAKLY SUPPORTED (no collapse) but REFUTED (didn't reach 0.74). Same 0.71 plateau.
+8. **New questions:** Is the k400 dataset too small? Move to large dataset.
+
+---
+
+## #E037 [RUNNING]
+
+1. **Motivation:** First large dataset run. Test if 12.5x more training examples breaks the k400 plateau.
+2. **Hypothesis:** More unique examples per epoch provide the gradient diversity needed to push past 0.73.
+3. **Prediction:** Accuracy exceeds 0.74 within 3 epochs (~468 steps). Step-50 checkpoints should show steady improvement.
+4. **Design:** LR=2e-5, cosine, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 3ep large dataset (5002 ex), SAVE_EVERY=50.
+   **NOTE:** This run used enriched + IS_CAP=2.0 instead of the locked config (online_fb + IS_CAP=5.0). Config error — should have used locked knobs.
+5. **Results (partial):** step_50=0.6966, step_100=0.6930, step_150=0.7074, epoch_1=0.6697. Still running.
+6. **Analysis:** Early signal in the same 0.69-0.71 range as k400 runs. No breakthrough yet from more data.
+7. **Conclusion:** PENDING.
+8. **New questions:** Should relaunch with correct locked config (online_fb + IS_CAP=5.0)?
