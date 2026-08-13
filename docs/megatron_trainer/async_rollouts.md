@@ -76,6 +76,53 @@ repeat until GRAD_ACCUM_STEPS microbatches done
 - `IS_CAP` — default `5`.
 - `train_full.sh` passthrough for all three.
 
+## Verification plan
+
+Three layers — plumbing correctness, per-step quality, then wall-clock payoff.
+All training runs start from `Qwen/Qwen3-8B` (same starting checkpoint as the
+smoke test), same data, same env config.
+
+### Layer 1 — plumbing equivalence
+
+- `ASYNC_ROLLOUT=1` with a **deterministic in-order producer mode**: queue
+  pre-filled in dataset order, no overlap (producer waits for consumption).
+- Claim: per-step loss, grad_norm, and IS weights are **bit-identical** to
+  `ASYNC_ROLLOUT=0`. Proves the thread/queue/per-microbatch-broadcast plumbing
+  changes nothing about the math.
+
+### Layer 2 — matched-step A/B
+
+- Sync vs async, **equal optimizer steps** (e.g. 200 each), same starting
+  checkpoint, same data. Checkpoints every 50 steps → eval each → curves.
+- Isolates: does off-policy staleness + reordered data hurt quality *per step*?
+
+### Layer 3 — matched wall-clock A/B
+
+- Sync 30 min vs async 30 min, same starting checkpoint. Async does more
+  steps — that is the point, not a bug: this run answers "what do I get for 30
+  minutes", not "is it correct" (Layer 2 is the correctness gate).
+
+### Metrics / health signals
+
+- **Eval**: `eval_maas_sdft.py` on `test_maas_sdft.jsonl` (canonical copy per
+  `EVAL.md` on `rh-h100-01`), Claude-judged no_context + with_context pass
+  rate, at every checkpoint.
+- **Training curves**: per-step train loss + grad_norm (sensitive, free).
+- **Async health (new logging, part of implementation)**: per-step mean IS
+  weight, **% IS weights clipped at `IS_CAP`**, and `policy_lag` distribution
+  (steps between generation and training). Low clip-rate + lag ≪ `N_ASYNC`
+  bound = TIS doing bounded work = the "async is safe" evidence.
+
+### Pitfalls (accepted)
+
+- Data order differs between runs (completion-order vs dataset-order) → some
+  variance; compare curves (multiple checkpoints), not single final values.
+- 30 min at 8B/6 GPUs ≈ tens of steps — likely too short for pass-rate eval
+  signal; Layer 2 is step-matched (however long it takes), 30 min is Layer 3
+  only.
+- 100-question eval split → 1% noise floor; loss curves are the more sensitive
+  correctness signal.
+
 ## Hard invariants
 
 - **No collectives in the producer thread** — HTTP-only; `broadcast`,
