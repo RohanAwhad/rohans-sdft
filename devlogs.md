@@ -1,5 +1,10 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-12 - Smoke on rh-h100-12 + repo sync
+
+- Smoke attempt on rh-h100-12: port 8001 taken by lab's trl vLLM (GPUs 6,7) → crash `Address already in use`. Patched `smoke_all_in_container.sh:15` to `VLLM_PORT=${VLLM_PORT:-8001}` (local + node sed). Port 8011 collided with the logprob **TCP** default (`LOGPROB_TCP_PORT`); 8012 taken; finally relaunched with `VLLM_PORT=8007` in tmux `sdft-smoke`. Result pending.
+- Repo sync: local branch was behind origin (remote gained reflector-fix 61bcd62 + merges) → rebased our 6 TODO commits, pushed to `ra/analyze-kd-agentic-search`, pulled on node (41cef02).
+
 ## 2026-08-12 - TODOs batch: grad_norm logging, wandb config, max-model-len, batch-path deletion
 
 - `trainer.py`: capture `clip_grad_norm_` return → extend existing SUM all-reduce to 3 elems (loss, samples, grad_norm²) so rank 0 logs the **global** norm (FSDP shard-local norms sum to global). `train/grad_norm` in wandb `log_dict` + per-step log line.

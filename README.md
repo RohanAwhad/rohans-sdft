@@ -196,7 +196,7 @@ megatron_trainer/  SDFT with Megatron Bridge (NeMo container)      [complete]
   start_vllm_patched.py  vLLM launcher with prometheus fix
   train_full.sh        Production launcher (10 epochs)
   smoke_all_in_container.sh  Smoke test launcher
-  goal.md              Design doc + progress tracking
+  (specs: docs/megatron_trainer/)
 ```
 
 ## Requirements
