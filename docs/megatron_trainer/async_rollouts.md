@@ -1,170 +1,112 @@
-# Async Rollouts — overlapped generation & training (`trainer.py`)
+# Streaming Rollouts — design (`trainer.py`)
 
-> Design follows PRIME-RL `max_async_level=1` semantics (sync-then-gen). Evidence and
-> alternatives (N-ahead window, partial rollout, verl-style transfer queues) in
-> `../research/async_rollouts_porting_analysis.md`.
+> Overlaps generation and training: Magistral-style streaming producer +
+> microbatch consumer. Per-rank batch size stays 1 — no padding/masking
+> changes. Off-policy staleness is accepted (bounded) and corrected by the
+> existing TIS machinery.
 
-## Role
+## Baseline (today)
 
-Today the step loop is strictly serial (`trainer.py:243-517`): rank 0 runs the
-whole rollout (vLLM generation, ~120s on gpt-oss) **before** any training work
-starts, so the teacher (logprob server) and trainer GPUs sit idle during
-generation — and vLLM sits idle during training. With async rollouts:
+Serial step loop, `trainer.py:243-517`:
 
-- A **producer thread** on rank 0 generates the rollout batch for step `n+1`
-  while all ranks train step `n` (teacher log-probs → student forward →
-  backward → optimizer).
-- The main path never changes its collective structure: it still broadcasts the
-  batch, accumulates gradients, syncs weights at the end of each optimizer step.
-- The only reordering: **weight sync of step `n` completes before generation for
-  step `n+1` starts**, so every rollout is generated under the latest synced
-  policy `θ_n` (PRIME-RL `max_async_level=1`; NCCL sync cadence forces k=1 — see
-  research doc, Hard constraints §1-2).
+1. Rank 0 pulls `GRAD_ACCUM_STEPS` items from `data_iter`, builds envs
+   (RagEnv/ApiAdapterEnv), runs them via `ThreadPoolExecutor` — vLLM
+   generation completes for **all** samples before anything else happens.
+2. Broadcast the whole batch → teacher log-probs (TCP) → student forward →
+   reverse-KL → backward, 1 sequence per rank per micro-step
+   (`BATCH_SIZE = 1`, `attention_mask=None`).
+3. `GRAD_ACCUM_STEPS` micro-steps → optimizer → weight sync (vLLM + logprob
+   server) → barrier.
 
-Net effect: `gen` hides behind `teacher + student + loss_bwd + optim`; the
-teacher GPUs process batch `n` while vLLM generates batch `n+1`.
+Waste: trainer/teacher GPUs idle during generation; vLLM idle during
+training; every step waits for the slowest rollout (skewness bubble).
 
-## Overlap model (step semantics)
+## Design
 
-Global optimizer step `n` (1-indexed):
+### Producer (rank 0, HTTP-only thread)
 
-- Rollout batch `(x_n, y_n)` was generated **during step `n-1`** under policy `θ_{n-1}`.
-- Step `n` trains on it, then syncs `θ_n` to vLLM + logprob server.
-- After the sync, the producer starts generating `(x_{n+1}, y_{n+1})` under `θ_n`.
+- Continuously pulls from `data_iter` and keeps `N_ASYNC` envs in flight
+  (vLLM HTTP calls).
+- **Each completed generation is pushed to the queue immediately** — a
+  per-sample stream, no batch barrier. A 20K-token straggler finishes whenever
+  it finishes; the queue is already fed by the shorter completions.
+- Each sample carries a `policy_version` stamp (optimizer-step counter when
+  its generation started).
+- Runs until `data_iter` is exhausted, then drains remaining in-flight
+  generations into the queue.
 
-Timeline:
-
-```
-step n (main path, all ranks):          producer thread (rank 0 only):
-  get batch_n from queue (blocking)        (idle — batch_n already produced)
-  broadcast → accum loop → optimizer
-  sync θ_n → vLLM + logprob server
-  signal producer ─────────────────────▶   generate batch_{n+1} under θ_n
-  barrier                                  puts batch_{n+1} + meta into queue
-step n+1: get batch_{n+1} ...              ...
-```
-
-- **Warmup**: before the loop, the producer synchronously generates batch 1
-  (identical to today's first-step behavior) so step 1 has data.
-- **Backpressure**: `queue.Queue(1)` — `get()` blocks when generation lags
-  (trainer-side stall, prime-rl's `wait_for_batch` equivalent); `put()` blocks
-  when training lags (vLLM-side backpressure).
-
-## Communication contract (how the pieces talk)
+### Consumer (main path, all ranks)
 
 ```
-# rank 0, producer thread — owns everything gen-related today's rank-0 block does
-def produce_step(items: list) -> tuple[list[dict], dict]:
-    envs = [RagEnv(...) | ApiAdapterEnv(...) for item in items]   # trainer.py:254-279
-    ThreadPoolExecutor(...).map(lambda e: e.run(), envs)           # trainer.py:281-282
-    rollout_data = [{prompt_text, completion_text,
-                     completion_log_probs, privileged_information_prompt} ...]  # trainer.py:296-304
-    meta = {full_pass_rate, reflector_fallback_count, success_cache_updates}
-    return rollout_data, meta
-
-gen_queue: queue.Queue[tuple[list[dict], dict]]   # maxsize=1
-gen_ready: threading.Event                        # set by main path after sync
+wait until queue ≥ MICROBATCH
+pop MICROBATCH samples (world_size, one per rank) → broadcast → fwd/bwd
+repeat until GRAD_ACCUM_STEPS microbatches done
+→ optimizer step
+→ weight sync (all ranks, collective; training paused until sync completes)
+→ barrier
+→ back to waiting for the queue
 ```
 
-Main path (`trainer.py:243-517` reshaped):
+- **Microbatch = `world_size` samples, 1 per rank** — per-rank batch size
+  stays 1, so the forward/backward math is byte-identical to today
+  (`no_sync` on non-final micro-steps, `scaled_loss / local_accum_steps`).
+  Only the pull/broadcast granularity changes: `GRAD_ACCUM_STEPS` broadcasts
+  per optimizer step instead of one.
+- Training starts as soon as `MICROBATCH` samples are ready — it never waits
+  for the full `GRAD_ACCUM_STEPS` batch to be generated.
 
-1. `rollout_data, meta = gen_queue.get()` (replaces today's inline rollout block).
-2. `dist.broadcast_object_list(rollout_data, src=0)` — **stays on the main path**
-   (it is a collective; it can never run inside the thread).
-3. Teacher log-probs / student forward / backward / optimizer — unchanged
-   (`trainer.py:336-447`).
-4. Weight sync to both servers — unchanged position, collective on all ranks
-   (`trainer.py:494-500`).
-5. `gen_ready.set()` → producer (woken) generates the next batch.
-6. `dist.barrier()` — unchanged (`trainer.py:506-509`).
+### Off-policy contract
 
-When `ASYNC_ROLLOUT=0` the code path is byte-identical to today (no thread, no
-queue, inline rollout block).
+- No sync-then-gen barrier. Generations in flight when θ updates finish under
+  the old policy; the `policy_version` stamp records it.
+- Staleness is bounded: Magistral's `N_ASYNC / step_batch ≤ 2` conservative
+  limit (`step_batch = GRAD_ACCUM_STEPS`).
+- Correction is the existing TIS: `completion_log_probs` from vLLM →
+  `compute_is_weight` rescales the reverse-KL by
+  `clamp(exp(policy_logp − rollout_logp), IS_CAP)` — no new math. Teacher is
+  frozen, so teacher log-probs carry no staleness.
+- `IS_CAP` default: **5** (was 2.0 — config change to be applied when
+  implemented).
 
-## I/O shapes
+### Config
 
-- **Producer → queue**: the existing broadcast payload, unchanged — a list of
-  `GRAD_ACCUM_STEPS` dicts with `prompt_text`, `completion_text`,
-  `completion_log_probs`, `privileged_information_prompt` (`trainer.py:296-304`).
-- **Producer → meta** (rank-0-only, consumed by the main-path logger):
-  `full_pass_rate` (episode/reflector verdicts, `trainer.py:307-313`),
-  `reflector_fallback_count` (`trainer.py:284-285`), and the api_adapter
-  `success_cache` updates (`trainer.py:287-294` — cache object itself lives in
-  the producer).
-- **No shape changes** downstream: broadcast, teacher TCP request, `make_kl_processor`
-  all consume the same dicts.
-
-## Off-policy contract
-
-- `y_n` is generated under `θ_{n-1}` → off-by-one policy gap. The existing
-  TIS machinery already corrects exactly this: rollout (vLLM) per-token
-  log-probs → `rollout_log_probs` tensor (`trainer.py:347-368`) →
-  `compute_is_weight` (`chunked_head.py:28`, `chunked_head.py:172-181`) rescales
-  the reverse-KL loss by `mean(clamp(exp(policy_logp − rollout_logp), IS_CAP))`.
-  No new math (see research doc, Decision 3A).
-- **Teacher is frozen** (`TEACHER_MODEL_PATH`) or EMA-synced — its log-probs
-  carry no staleness; the teacher GPUs simply stop idling.
-- Gap is bounded at 1 step by construction (sync-then-gen ordering). If gen
-  becomes slower than training, the trainer blocks on `get()` — vLLM stays
-  continuously busy; accepted for v1 (see Future work §A for the fix).
-
-## Config
-
-- `ASYNC_ROLLOUT` — feature flag, env-read in `config.py` at import:
-  `ASYNC_ROLLOUT = os.environ.get("ASYNC_ROLLOUT", "0") == "1"`.
-  **Default off**; both code paths retained for A/B comparison.
-- `train_full.sh` passthrough: `-e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}"`.
-- TIMING line (`trainer.py:511-517`) gains: `producer_wait` (main-path time
-  blocked on `gen_queue.get()` past data readiness), `gen_overlap` (gen wall
-  time hidden behind training). wandb `run config` gains `async_rollout`.
+- `ASYNC_ROLLOUT` — flag, env-read in `config.py`, default off; `0` keeps the
+  byte-identical baseline path.
+- `N_ASYNC` — in-flight generations (default: `2 × GRAD_ACCUM_STEPS`).
+- `IS_CAP` — default `5`.
+- `train_full.sh` passthrough for all three.
 
 ## Hard invariants
 
-- **No collectives in the producer thread** — it is HTTP-only (vLLM calls). Any
-  torch.distributed call from the thread deadlocks the step (two NCCL groups
-  already coexist; the main path is the only collective context).
-- **Weight sync stays collective on all ranks, on the main path, after the
-  optimizer step and before `gen_ready.set()`** — the producer must never
-  generate while the vLLM server is paused mid-update.
-- **Queue depth = 1** — at most one rollout batch in flight; memory bounded.
-- **Producer starts `gen(n+1)` only after the sync event** — guarantees `θ_n`
-  is what vLLM serves (k=1 off-policy bound).
-- **`broadcast_object_list` stays on the main path** (collective, cannot move
-  into the thread).
-- **Rank-0-only state moves into the producer**: `data_iter`, `success_cache`,
-  reflector fallback counter. The main path only reads the shipped meta.
-- **Warmup batch 1 is generated before the loop** (blocking), else step 1
-  deadlocks on an empty queue.
+- **No collectives in the producer thread** — HTTP-only; `broadcast`,
+  all-reduce, weight sync, barrier stay on the main path.
+- **Weight sync after every optimizer step, all ranks, main path, blocking** —
+  producer never generates while the vLLM server is mid-update.
+- **Queue bounded** (`maxsize`), backpressure both ways: producer blocks on
+  full queue; consumer blocks on empty.
+- **Rank-0 state moves into the producer**: `data_iter`, `success_cache`,
+  reflector fallback counter; main path only reads shipped meta
+  (`full_pass_rate`, `reflector_fallback_count`, `success_cache` updates).
+- **Warmup**: queue pre-filled before the loop starts, else the first
+  microbatch deadlocks.
 
 ## Known gotchas
 
-- **Producer exception must propagate and crash hard** (no try/except — house
-  policy). A dead producer would otherwise hang the main path on `get()` forever.
-- **loguru is thread-safe; wandb is not** — all wandb calls stay on the main
-  path (rank 0); the producer only logs via logger.
-- **Event discipline**: producer clears `gen_ready` before waiting, and the main
-  path sets it exactly once per step — a stale set would let gen run under an
-  unsynced policy.
-- **vLLM pause-during-sync** is avoided entirely by the sync-then-gen ordering —
-  no mid-generation aborts, no resume logic needed (this is why ordering A beats
-  verl's abort-resume for us; research doc Decision 2A).
-- **`success_cache` becomes single-writer** (producer) after handoff — today's
-  block at `trainer.py:287-294` mutates it inline; moving it avoids a data race.
-- First-step latency is unchanged (warmup generation is blocking, same as
-  today's step 1).
+- Producer exceptions must propagate and crash hard (house policy) — a dead
+  producer hangs the consumer on `get()` forever.
+- loguru is thread-safe; wandb is not — wandb stays on the main path.
+- `steps_per_epoch` semantics change: producer drains `data_iter`, then the
+  queue; epochs end on data exhaustion, not fixed counts.
+- Per-microbatch broadcasts add collectives per step (e.g. 32 vs 1) — small
+  overhead at this scale, accepted.
+- `success_cache` becomes single-writer (producer).
 
 ## Future work
 
-- **A. N-ahead window + staleness drop** (only if gen-bound persists): let the
-  producer run up to `max_off_policy_steps` batches ahead (prime-rl's inflight
-  window + `off_policy_steps` culling, default 8) and drop/regenerate rollouts
-  older than the cap (verl `ReplayBufferAsync` drop/wait strategies). Requires
-  version-stamping batches and a bigger queue. Evidence: research doc, Decision 2B.
-- **B. DPPO-Binary TV masks** (prime-rl loss.py:108-135) in place of the TIS cap
-  if the off-policy gap grows with A.
-- **C. Partial-rollout abort-resume** (verl `FullyAsyncLLMServerClient`) only if
-  we ever want to sync mid-generation instead of sync-then-gen.
-- **D. Separate orchestrator process** (prime-rl's CPU asyncio orchestrator +
-  FS/ZMQ transport) if generation ever moves off the trainer node.
-- **E. Teacher version stamps** if the teacher ever becomes trainable — today's
-  frozen teacher makes staleness tracking unnecessary.
+- **Mid-generation weight sync** (pause → sync → resume, no KV recompute):
+  tracked in https://github.com/RohanAwhad/rohans-sdft/issues/12. Not planned
+  now; streaming + TIS covers the staleness it would fix.
+- **Per-rank batch > 1**: padding + attention masks, AReaL-style dynamic
+  token-balanced microbatching — explicitly out of scope for now.
+- **Drop/regenerate stale samples** (AReaL η) if IS-weight variance shows up
+  in practice.
