@@ -2,6 +2,18 @@
 
 Checklist of pending cleanups / follow-ups. Tick items off as they land.
 
+## Async rollouts (producer thread, 1-ahead)
+
+Spec: `docs/megatron_trainer/async_rollouts.md` (research: `docs/research/async_rollouts_porting_analysis.md`).
+Feature flag `ASYNC_ROLLOUT` (default `0`, off); sync path preserved byte-identical.
+
+- [ ] `megatron_trainer/config.py` — `ASYNC_ROLLOUT = os.environ.get("ASYNC_ROLLOUT", "0") == "1"`
+- [ ] `megatron_trainer/trainer.py` — extract rank-0 rollout block (`:249-315`) into `produce_step()`; `queue.Queue(1)` + `threading.Event` handshake; main path `get()` → broadcast → train → sync → `gen_ready.set()`; warmup batch before loop; meta (`full_pass_rate`, `reflector_fallback_count`, `success_cache`) ships with the batch; TIMING gains `producer_wait`/`gen_overlap`; wandb config gains `async_rollout`
+- [ ] `megatron_trainer/train_full.sh` — `-e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}"` passthrough
+- [ ] `docs/megatron_trainer/trainer.md` — update §Data flow + hyperparameter table for async mode
+- [ ] Smoke: sync run (flag off, byte-identical) → async run (flag on) → compare TIMING lines; verify IS weights sane with off-by-one policies; no collectives in thread (hang = bug)
+- [ ] Future work (spec "Future work"): N-ahead window + staleness drop; DPPO masks; partial-rollout resume; separate orchestrator; teacher version stamps
+
 ## Make student thinking configurable (`STUDENT_THINKING`)
 
 Knob: `STUDENT_THINKING` (default `"0"`), truthy `"1"`. One flag flips **both** student and

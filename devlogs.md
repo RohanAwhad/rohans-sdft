@@ -1,5 +1,13 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-12 - Async rollout research (PRIME-RL + VERL) + spec
+
+- Deep-researched both async rollout engines (code-only, no web): `~/3_resources/external_libs/prime-rl` @ e8abfa26 and `verl` @ 535c4779 (volcengine fork, v1 era). Docs: `docs/research/RESEARCH_async_rollouts_prime_rl.md`, `RESEARCH_async_rollouts_verl.md`, `async_rollouts_porting_analysis.md`.
+- Key discovery: local prime-rl is a **full rewrite** (no SyncReplayBuffer / forward-only agents / executor dir — old design gone). New design: vLLM pool + CPU asyncio orchestrator + torchrun FSDP2 trainer, `max_async_level=1`, staleness cap `max_off_policy_steps=8`, token-ratio IS loss — architecturally closest to our SDFT layout.
+- verl v1: fire-and-forget agent loops + TransferQueue, `ReplayBufferAsync` staleness eviction (threshold 8, drop/wait), partial-rollout abort-resume (`FullyAsyncLLMServerClient`), Decoupled PPO `parameter_sync_step`, trainer modes sync/colocate_async/separate_async.
+- Porting recommendation: producer thread on rank 0, 1-ahead (sync-then-gen), keep broadcast handoff + existing `IS_WEIGHTING`/`IS_CAP`; ~100-line diff in `trainer.py`. N-ahead + DPPO masks + partial rollout = future work if gen-bound.
+- Spec written: `docs/megatron_trainer/async_rollouts.md` (`ASYNC_ROLLOUT` flag, off by default) + TODOS section. This work lives on branch `ra/async-rollout`.
+
 ## 2026-08-12 - Smoke on rh-h100-12 + repo sync
 
 - Smoke attempt on rh-h100-12: port 8001 taken by lab's trl vLLM (GPUs 6,7) → crash `Address already in use`. Patched `smoke_all_in_container.sh:15` to `VLLM_PORT=${VLLM_PORT:-8001}` (local + node sed). Port 8011 collided with the logprob **TCP** default (`LOGPROB_TCP_PORT`); 8012 taken; finally relaunched with `VLLM_PORT=8007` in tmux `sdft-smoke`. Result pending.
