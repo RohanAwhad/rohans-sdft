@@ -70,7 +70,6 @@ from megatron_trainer.model_utils import (
 )
 from megatron_trainer.logprob_client import (
     init_logprob_weight_engine,
-    request_teacher_log_probs_batch_http,
     request_teacher_log_probs_tcp,
     sync_weights_to_logprob_server,
     wait_for_logprob_server,

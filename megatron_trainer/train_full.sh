@@ -122,7 +122,6 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e TEACHER_MAX_PROMPT_LEN="${TEACHER_MAX_PROMPT_LEN:-2048}" \
     -e MAX_TOTAL_LEN="${MAX_TOTAL_LEN:-8192}" \
     -e ENV_TYPE="${ENV_TYPE:-rag}" \
-    -e LOGPROB_BATCH_SIZE="${LOGPROB_BATCH_SIZE:-4}" \
     "${OPTIONAL_ENVS[@]}" \
     -v "$WORKSPACE:/workspace${LABEL_SUFFIX}" \
     -v "$HF_CACHE:/root/.cache/huggingface${LABEL_SUFFIX}" \

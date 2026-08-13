@@ -62,14 +62,14 @@ Run config (`trainer.py:171-186`) omits several knobs and hardcodes `backend`. A
 - [x] `megatron_trainer/trainer.py` — `"backend": "fsdp"` (done via FSDP-only change)
 - [x] `megatron_trainer/trainer.py:183-208` — add to `config`: `max_grad_norm` (`MAX_GRAD_NORM`), `max_total_len` (`MAX_TOTAL_LEN`), `student_max_prompt_len` (`STUDENT_MAX_PROMPT_LEN`), `teacher_max_prompt_len` (`TEACHER_MAX_PROMPT_LEN`), `thinking_budget` (`THINKING_BUDGET`), `ema_alpha` (`EMA_ALPHA`), `teacher_model` (`TEACHER_MODEL_PATH`)
 
-## Remove `LOGPROB_BATCH_SIZE` (server-side batching)
+## Remove `LOGPROB_BATCH_SIZE` + batch logprob endpoint
 
-Removed from spec (`docs/megatron_trainer/launch_trainer.md`). Code usage still present — remove later.
+Removed from spec (`docs/megatron_trainer/launch_trainer.md`). Batch path is unused
+(trainer uses per-rank TCP) — deleted entirely.
 
-- [ ] `megatron_trainer/train_full.sh:106` — drop `-e LOGPROB_BATCH_SIZE=...` passthrough
-- [ ] `megatron_trainer/logprob_server.py:51` — drop the env read
-- [ ] `megatron_trainer/logprob_server.py:270,282-283` — `/logprobs_batch` no longer chunks; process the full batch in one pass
-- [ ] Verify single-pass batching holds on OLS-sized batches (GPU mem bound)
+- [x] `megatron_trainer/train_full.sh` — drop `-e LOGPROB_BATCH_SIZE=...` passthrough
+- [x] `megatron_trainer/logprob_server.py` — drop the env read, `BatchLogprobRequest`, and the whole `/logprobs_batch` endpoint
+- [x] `megatron_trainer/logprob_client.py` — delete `request_teacher_log_probs_batch_http`; `megatron_trainer/trainer.py` — drop its import
 
 ## Spec/code drift: `--max-model-len`
 
