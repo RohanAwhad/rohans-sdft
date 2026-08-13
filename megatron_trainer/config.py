@@ -51,6 +51,24 @@ if LR_SCHEDULER not in ("constant", "cosine"):
 BATCH_SIZE = 1  # always 1; effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
 GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", "32"))
 NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))
+
+# Async streaming rollouts (see docs/megatron_trainer/async_rollouts.md).
+# ASYNC_ROLLOUT=1 moves generation to a rank-0 producer thread feeding a
+# bounded queue; the main path consumes one microbatch (world_size samples)
+# at a time. ASYNC_IN_ORDER=1 keeps the deterministic batch-in-order producer
+# (Layer 1 verification mode). N_ASYNC bounds in-flight generations
+# (Magistral's conservative limit: 2 * step batch).
+ASYNC_ROLLOUT = os.environ.get("ASYNC_ROLLOUT", "0") == "1"
+ASYNC_IN_ORDER = os.environ.get("ASYNC_IN_ORDER", "0") == "1"
+N_ASYNC = int(os.environ.get("N_ASYNC", str(2 * GRAD_ACCUM_STEPS)))
+
+# Determinism knobs for A/B verification runs. Both unset = default
+# nondeterministic behavior. TRAINER_SEED fixes the dataloader shuffle;
+# VLLM_SEED fixes vLLM sampling (per-request seed).
+TRAINER_SEED = os.environ.get("TRAINER_SEED")
+TRAINER_SEED = int(TRAINER_SEED) if TRAINER_SEED else None
+VLLM_SEED = os.environ.get("VLLM_SEED")
+VLLM_SEED = int(VLLM_SEED) if VLLM_SEED else None
 MAX_GRAD_NORM = 1.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
 STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))
@@ -70,7 +88,7 @@ GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "1.0"))
 # Weights the reverse-KL loss by exp(policy_logp - rollout_logp), truncated at
 # IS_CAP (Truncated Importance Sampling, same scheme as TRL DistilTrainer).
 IS_WEIGHTING = os.environ.get("IS_WEIGHTING", "1") == "1"
-IS_CAP = float(os.environ.get("IS_CAP", "2.0"))
+IS_CAP = float(os.environ.get("IS_CAP", "5.0"))
 
 if STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS > MAX_TOTAL_LEN:
     raise ValueError(

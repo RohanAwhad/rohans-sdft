@@ -12,7 +12,7 @@ import requests
 import torch
 from loguru import logger
 
-from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS
+from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
 from megatron_trainer.model_utils import export_hf_weights_iter, get_hf_weight_metadata
 
 
@@ -67,6 +67,7 @@ def vllm_generate(
             "top_p": top_p,
             "logprobs": 1,
             "skip_special_tokens": False,
+            **({"seed": VLLM_SEED} if VLLM_SEED is not None else {}),
         },
         timeout=180,
     )

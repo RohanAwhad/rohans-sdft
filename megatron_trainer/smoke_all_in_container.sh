@@ -40,6 +40,14 @@ echo "=== SDFT DDP Smoke Test ==="
 echo "GPUs: vLLM=$GPU_VLLM, Trainers=$TRAINER_GPUS, Logprob=$GPU_LOGPROB"
 echo "NUM_TRAINERS=$NUM_TRAINERS"
 
+# Optional envs: only pass through when set
+OPTIONAL_ENVS=()
+for var in TRAINER_SEED VLLM_SEED; do
+    if [ -n "${!var:-}" ]; then
+        OPTIONAL_ENVS+=("-e" "$var=${!var}")
+    fi
+done
+
 cleanup() {
     podman stop sdft-smoke 2>/dev/null || true
     podman rm sdft-smoke 2>/dev/null || true
@@ -77,7 +85,11 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-enriched_user_response}" \
     -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/home/lab/rawhad/sdft_knowledge_ingestion_experiment/data/train_maas_sdft.jsonl}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-2048}" \
+    -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
+    -e ASYNC_IN_ORDER="${ASYNC_IN_ORDER:-0}" \
+    -e N_ASYNC="${N_ASYNC:-$((2 * (NUM_TRAINERS * 2)))}" \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    "${OPTIONAL_ENVS[@]}" \
     -v "$WORKSPACE:/workspace:z" \
     -v "$HF_CACHE:/root/.cache/huggingface:z" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \

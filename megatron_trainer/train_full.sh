@@ -62,7 +62,7 @@ mkdir -p "$WORKSPACE/logs"
 OPTIONAL_ENVS=()
 for var in WANDB_MODE WANDB_BASE_URL WANDB_ENTITY WANDB_API_KEY \
            VERTEXAI_PROJECT REFLECTOR_PROJECT_ID TEACHER_MODEL_PATH \
-           PYTORCH_CUDA_ALLOC_CONF; do
+           PYTORCH_CUDA_ALLOC_CONF TRAINER_SEED VLLM_SEED; do
     if [ -n "${!var:-}" ]; then
         OPTIONAL_ENVS+=("-e" "$var=${!var}")
     fi
@@ -112,7 +112,10 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-6144}" \
     -e IS_WEIGHTING="${IS_WEIGHTING:-1}" \
-    -e IS_CAP="${IS_CAP:-2.0}" \
+    -e IS_CAP="${IS_CAP:-5.0}" \
+    -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
+    -e ASYNC_IN_ORDER="${ASYNC_IN_ORDER:-0}" \
+    -e N_ASYNC="${N_ASYNC:-$((2 * ${GRAD_ACCUM_STEPS:-32}))}" \
     -e STUDENT_THINKING="${STUDENT_THINKING:-0}" \
     -e THINKING_BUDGET="${THINKING_BUDGET:-512}" \
     -e EMA_ALPHA="${EMA_ALPHA:-0.05}" \
