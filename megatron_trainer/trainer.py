@@ -284,6 +284,50 @@ def _produce_in_order(
         step_done_q.get()
 
 
+def _produce_streaming(
+    rollout_queue: queue.Queue,
+    data_iter,
+    success_cache: dict[str, str],
+    gen_times: deque,
+    tokenizer,
+    steps_per_epoch: int,
+) -> None:
+    """Streaming producer (ASYNC_IN_ORDER=0): N_ASYNC envs in flight,
+    per-sample push on completion — completion order, not dataset order
+    (the reordering is the feature). Submits exactly steps_per_epoch *
+    GRAD_ACCUM_STEPS samples (the same count the sync path trains), drains
+    in-flight work, then pushes the end-of-data sentinel."""
+    executor = ThreadPoolExecutor(max_workers=N_ASYNC)
+    window: dict = {}
+    sentinel = object()
+    submit_limit = steps_per_epoch * GRAD_ACCUM_STEPS
+    submitted = 0
+    while submitted < submit_limit:
+        item = next(data_iter, sentinel)
+        if item is sentinel:
+            break
+        env = _build_env(item, success_cache, tokenizer, submitted)
+        t_start = time.monotonic()
+        fut = executor.submit(env.run)
+        window[fut] = (env, t_start, _OPTIMIZER_STEP)
+        submitted += 1
+        while len(window) >= N_ASYNC:
+            done, _ = concurrent.futures.wait(
+                window.keys(), return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for fut in done:
+                env, t_start, version = window.pop(fut)
+                fut.result()
+                _push_sample(rollout_queue, env, version, success_cache)
+                gen_times.append(time.monotonic() - t_start)
+    for fut in concurrent.futures.as_completed(window):
+        env, t_start, version = window[fut]
+        fut.result()
+        _push_sample(rollout_queue, env, version, success_cache)
+        gen_times.append(time.monotonic() - t_start)
+    rollout_queue.put(_ROLLOUT_SENTINEL)
+
+
 # ---------------------------------------------------------------------------
 # Training helpers (shared by sync and async step loops)
 # ---------------------------------------------------------------------------
@@ -746,9 +790,15 @@ def train() -> None:
             rollout_queue = queue.Queue(maxsize=N_ASYNC + world_size + 1)
             step_done_q = queue.Queue(maxsize=1)
             gen_times = deque()
+            if ASYNC_IN_ORDER:
+                target = _produce_in_order
+                args = (rollout_queue, data_iter, success_cache, step_done_q, gen_times, tokenizer, world_size)
+            else:
+                target = _produce_streaming
+                args = (rollout_queue, data_iter, success_cache, gen_times, tokenizer, steps_per_epoch)
             producer_thread = threading.Thread(
-                target=_produce_in_order,
-                args=(rollout_queue, data_iter, success_cache, step_done_q, gen_times, tokenizer, world_size),
+                target=target,
+                args=args,
                 name="rollout-producer",
                 daemon=False,
             )
