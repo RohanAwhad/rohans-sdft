@@ -68,7 +68,9 @@ rewrite past entries, only add and update status.
 ## Step 4 — The loop, after an experiment finishes
 
 Spawn each sub-agent as a fresh session with the relevant skill attached and
-a task pointing at its input files. Sub-agents write only their artifact
+a task pointing at its input files. Pass the skill name explicitly to the
+sub-agent — e.g. "use the `autoresearch-failure-analysis` skill". Sub-agents
+write only their artifact
 file — they never touch the log, state, goal, or execute experiments.
 
 1. **Compile context** — spawn the `autoresearch-context` sub-agent to write

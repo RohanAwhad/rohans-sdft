@@ -35,8 +35,9 @@ The 20B student model fine-tuned via on-policy reverse-KL distillation from a fr
 - `MAX_GRAD_NORM=1.0`
 - `TRAINER_BACKEND=fsdp`
 - GPU layout: `train_full.sh 0 4 2`
-- Loss function: reverse KL (KL(student || teacher))
 - Teacher: `openai/gpt-oss-120b` (frozen)
+- vLLM logprobs mode: `--logprobs-mode processed_logprobs` only (raw_logprobs not allowed)
+- `IS_CAP=5.0` (fixed)
 
 # Finalized Knobs (locked by standup 2026-08-12)
 
@@ -48,13 +49,21 @@ The 20B student model fine-tuned via on-policy reverse-KL distillation from a fr
 
 # Still Tunable
 
+## Active focus (this phase)
+- **Loss function** (`megatron_trainer/chunked_head.py`) — primary experimental surface (reverse-KL base, no direction swap):
+  - SFT anchor term: reverse-KL + λ·NLL on golden answer (hybrid, anti-collapse)
+  - Per-token IS: apply ratio per-token, not per-sequence scalar (keeps IS_CAP=5.0 + processed_logprobs)
+  - Self-normalized IS weights: normalize across batch (keeps IS_CAP=5.0 + processed_logprobs)
+  - Alternative divergences: JSD / α-divergence (mass-covering, bounded; needs new backward)
+  - Length normalization: per-completion mean (current) vs per-token batch mean vs unnormalized
+- **Reflector prompt** (`megatron_trainer/reflector.py`) — system/user template, model
+
+## Parked (tunable, not active this phase)
 - `GEN_TEMPERATURE` (0.7, 1.0, 1.2)
 - `GEN_TOP_P` (0.95, 1.0)
-- Reflector prompt (`megatron_trainer/reflector.py`)
 - Dataset (k400 subset, combined 5002 examples)
 - `NUM_EPOCHS`
 - `GRAD_ACCUM_STEPS` (32 is default)
-- Loss function modifications (per-token normalization, auxiliary terms)
 
 # Datasets
 
