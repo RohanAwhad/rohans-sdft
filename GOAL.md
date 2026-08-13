@@ -147,14 +147,43 @@ When changing the reflector prompt in `megatron_trainer/reflector.py`, commit th
 | 29 | 1.5e-5 | const | 2.0 | 120b | 0.7 | enriched | 0.6894 | 0.7092 | 0.6948 | +0.5pp |
 | 30 | 2e-5 | const | 2.0 | 120b | 0.7 | enriched | 0.6697→0.6984(ep8) | — | — | 10ep validation, plateaued |
 | 31 | 2e-5 | const | 2.0 | 120b | 0.7 | **online_fb** | 0.6338 | 0.6750 | 0.6517 | +1.8pp (worse than enriched run_23) |
-| 32 | 2e-5 | cosine | 2.0 | 120b | 0.7 | **online_fb** | ? | ? | ? | in progress |
+| 32 | 2e-5 | cosine | 2.0 | 120b | 0.7 | **online_fb** | 0.6607 | 0.6535 | 0.6948 | +3.4pp (cosine > constant for online_fb) |
+| 33 | 2e-5 | const | 2.0 | 120b | 0.7 | **online_fb** | 0.6984 | 0.7092 | 0.6804 | 10ep: peak 0.7253@ep9, zigzag 0.67-0.73, no baseline beat |
+| 34 | 2e-5 | cosine | 2.0 | 120b | 0.7 | enriched | 0.6804 | 0.6589 | 0.6804 | 10ep: peak 0.7289@ep7, zigzag 0.66-0.73, no baseline beat |
+| 35 | 2e-5 | const | **5.0** | 120b | **1.2** | enriched | 0.6194 | 0.6230 | 0.6589 | 10ep: peak 0.7235@ep6-7, collapsed to 0.69 by ep10. Smooth climb but late-epoch overfit |
+| 36 | 2e-5 | **cosine** | **5.0** | 120b | **1.2** | **online_fb** | ? | ? | ? | 10ep. Locked config. Cosine to prevent late collapse |
+
+## Key Insight: IS Clipping May Be The Plateau Cause
+- Runs WITHOUT IS (run_3, run_4, run_13) beat baseline 0.7415. ALL IS runs plateau at 0.69-0.73.
+- IS ratio_mean ~0.97 across all IS runs — systematically <1.0 due to processed logprobs (vLLM --logprobs-mode processed_logprobs returns post-top-p renormalized logprobs, inflated vs raw training logprobs). Upper clamp rarely fires; real effect is uniform ~3% down-weighting of all loss.
+- clip_rate: cap=1.0 → ~20%, cap=2.0 → ~2%, cap=5.0 → ~0.3%
+- signal_mean (sdpo/signal_mean): run_4 (no IS) trended from -1.0 toward -0.4 over 500 steps. IS runs stay stuck at -0.8 to -1.0 for 120 steps. But at 120 steps run_4 also looked flat — breakthrough came after step 200+.
+
+## Finalized Knobs (locked, do not change)
+- `LEARNING_RATE=2e-5`
+- `LR_SCHEDULER=cosine`
+- `IS_CAP=5.0`
+- `HINDSIGHT_FIELD=online_feedback`
+- `REFLECTOR_PROJECT_ID=itpc-gcp-ai-eng-claude`
+
+## Still Tunable
+- `GEN_TEMPERATURE` (0.7, 1.0, 1.2)
+- `GEN_TOP_P` (0.95, 1.0)
+- Reflector prompt (`megatron_trainer/reflector.py`)
+- Dataset (k400, combined)
+- `NUM_EPOCHS`
+
+## Decision Gate (after run 35)
+- **run_35 peak ≥ 0.74** → go to large dataset with locked config (cosine + online_fb + IS_CAP=5.0 + temp TBD)
+- **run_35 peak < 0.74** → run 36: locked config with temp=1.2, 10ep k400. Keep iterating (temp, top_p, reflector prompt) until a run crosses 0.74, then large dataset.
+- **Deadline:** large dataset run must start by 2026-08-13 ~18:00 UTC
+- **Fallback:** if large dataset runs with enriched don't beat baseline 0.7415, switch to online_feedback
 
 ## Current Status
-- **run_31** done: online_feedback underperforms enriched (run_23: +8.8pp vs run_31: +1.8pp). Ep3 dipped from ep2.
-- **run_32** in progress (cosine + online_feedback) — testing if schedule helps
-- After 32: experiment with different reflector prompts
-- Commit each reflector prompt change before its run
-- Next run number: 33
+- **run_35** done: IS_CAP=5.0+temp=1.2, constant, enriched. Peak 0.7235@ep6-7, collapsed to 0.69. Below 0.74 gate.
+- **run_36** in progress: locked config (cosine+online_fb+IS_CAP=5.0+temp=1.2), 10ep k400. Cosine may prevent late collapse.
+- Large dataset: combined_dataset_train_sdft.jsonl (5002 examples), SAVE_EVERY=50, TRAIN_DATA_PATH=/workspace/data/analyze_research/combined_dataset_train_sdft.jsonl
+- Next run number: 36
 
 ## Phase 2 (later)
 Take surviving settings from Phase 1 and run longer (10+ epochs on k400, or full dataset ~5k examples). Goal: find a setting that beats baseline by >3pp with statistical significance.
