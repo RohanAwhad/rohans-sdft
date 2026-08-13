@@ -1,5 +1,17 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-13 - Streaming rollouts: Phases 0-2 implemented, Layer 1 in flight
+
+- Branch `ra/async-rollout` rebased onto v0.1.0. Plan finalized in `plan.md` (5 phases). Commits: 8d1f996 (config plumbing), 40ed0e0 (in-order restructure), 9e60237 (streaming producer).
+- **Phase 0**: `ASYNC_ROLLOUT` / `ASYNC_IN_ORDER` / `N_ASYNC` (default 2×GRAD_ACCUM_STEPS) in config.py; `IS_CAP` default 2.0→5.0; `TRAINER_SEED`/`VLLM_SEED` determinism knobs (vLLM per-request seed via completions API); passthrough in train_full.sh/smoke_all_in_container.sh/.env.example; wandb config gains async_rollout/async_in_order/n_async.
+- **Phase 1**: `produce()` extracted (sync + in-order share it — per-sample metas via `_sample_meta`/`_aggregate_pass_rate` keep stats identical between modes); `_train_sample()`/`_step_tail()` shared; rank-0 producer thread + bounded queue (`maxsize=N_ASYNC+W+1`) + per-microbatch `_pull_microbatch` (pop W, broadcast); in-order producer pushes column-major (`s = r*L + k`) so rank r sees exactly its sync-mode samples.
+- **Bug found via play.py sim**: done-Event check-then-block race — producer can set done while consumer is already blocked in `q.get()` → permanent hang. Fixed with a **queue sentinel** (`_ROLLOUT_SENTINEL` pushed last — signal travels through the queue, immune to the race). Sim verified: 12 steps, rank assignments bit-identical to sync slicing, 15 residual samples dropped.
+- In-order overlap prevention uses a **token queue** (`step_done_q`, maxsize=1) instead of an Event — a persistent Event accumulates stale sets and lets the producer run ahead (overlap → Layer 1 breaks).
+- **Phase 2**: `_produce_streaming` — ThreadPoolExecutor(N_ASYNC) + sliding window of futures, per-sample push on completion (completion-order reordering = the feature), `fut.result()` re-raise → crash-hard via excepthook; exact `submit_limit = steps_per_epoch * GRAD_ACCUM_STEPS`; sentinel at end. Sim verified: 384 pushed == consumed, completion-order reordering confirmed.
+- policy_version stamped at generation start (`_OPTIMIZER_STEP` global), `policy_lag` mean/max + TIMING `producer_wait`/`gen_overlap` logged (async only).
+- **Layer 1 on rh-h100-12** (in flight): sync baseline smoke (GPU 0-3, `HF_HOME=/mnt/nvme0n1/rawhad_hf`, `VLLM_PORT=8007`, `TRAINER_SEED=42 VLLM_SEED=42`, smoke_sdft.jsonl 64 samples, 16 steps) → then async in-order run → compare opt_step log lines + epoch_1 safetensors checksums.
+- Gotchas: tmux session died on first attempt (podman statfs error — HF_HOME unset); node was on stale branch `ra/analyze-kd-agentic-search` @ 41cef02 with local smoke tweak (equivalent change already in branch → discarded, `checkout -B` to origin).
+
 ## 2026-08-12 - Async rollout research (PRIME-RL + VERL) + spec
 
 - Deep-researched both async rollout engines (code-only, no web): `~/3_resources/external_libs/prime-rl` @ e8abfa26 and `verl` @ 535c4779 (volcengine fork, v1 era). Docs: `docs/research/RESEARCH_async_rollouts_prime_rl.md`, `RESEARCH_async_rollouts_verl.md`, `async_rollouts_porting_analysis.md`.
