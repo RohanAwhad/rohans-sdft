@@ -45,6 +45,9 @@ Branch: `ra/async-rollout`.
   adapter-history fields for the wandb table — extend the payload dict).
 - Bounded queue (`maxsize`), backpressure both ways; producer exception →
   crash hard (no try/except, house policy).
+- **Warmup**: pre-fill the queue with at least `world_size` samples (the first
+  microbatch) before the consumer loop starts — else the first microbatch
+  deadlocks on an empty queue.
 - Verify: local `py_compile`/`bash -n`; **Layer 1 on cluster**:
   `ASYNC_ROLLOUT=1 ASYNC_IN_ORDER=1` vs baseline — per-step loss, grad_norm,
   IS metrics bit-identical.
@@ -54,9 +57,11 @@ Branch: `ra/async-rollout`.
   (completion order — the reordering is the feature).
 - Version-stamp each sample at generation start; log `policy_lag` (mean/max)
   + IS stats (already wired via `chunked_head.py` metrics) per step; TIMING
-  line gains `producer_wait` / `gen_overlap`.
+  line gains `producer_wait` / `gen_overlap`. Health metrics are logged
+  rank-0 side only — never part of the all-reduce path.
 - Epoch semantics: producer drains `data_iter`, then drains in-flight; epoch
-  ends on exhaustion, not fixed counts.
+  ends on exhaustion, not fixed counts. Epoch-end `epoch_{N}` checkpoint
+  (`trainer.py:533-534`) still saves at drain-time — intentional.
 - Verify: local checks; cluster smoke `ASYNC_ROLLOUT=1` — TIMING shows gen
   overlapped behind training.
 
@@ -64,6 +69,9 @@ Branch: `ra/async-rollout`.
 - Layer 2: sync vs async, equal optimizer steps (e.g. 200), same
   `Qwen/Qwen3-8B` starting checkpoint, checkpoints every 50 → eval each with
   `eval_maas_sdft.py` on `test_maas_sdft.jsonl` (per EVAL.md) → curves.
+- **Config consistency**: both runs use identical env config, including the
+  new `IS_CAP=5.0` default (the default change applies to sync too) — no
+  other knobs differ.
 - Layer 3: sync vs async, 30 min wall-clock each → payoff claim.
 - Record: loss/grad_norm curves, IS clip-rate, policy_lag distribution.
 
@@ -84,6 +92,11 @@ Branch: `ra/async-rollout`.
 - No GPU reservation — throwaway runs; if kicked off the node, just stop.
 - Smoke via `smoke_all_in_container.sh` (NeMo container) with
   `VLLM_PORT=8007` as before.
+- Layer 3 eval needs EVAL.md prerequisites on the node: driver-compatible
+  eval venv (vLLM/torch pins per EVAL.md), `gcloud auth
+  application-default login`, `CLOUD_ML_REGION` /
+  `ANTHROPIC_VERTEX_PROJECT_ID`, and `test_maas_sdft.jsonl` from
+  `rh-h100-01`.
 
 ## Verification layers (summary)
 
