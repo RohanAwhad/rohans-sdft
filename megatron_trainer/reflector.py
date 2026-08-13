@@ -1,0 +1,99 @@
+"""Reflector: generates dynamic privileged feedback for the teacher.
+
+Given (question, golden_answer, model_response), an external LLM grades the
+response and produces a one-line feedback. Returns structured {verdict, feedback}.
+"""
+
+import json
+
+import anthropic
+from anthropic import AnthropicVertex
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from megatron_trainer.config import REFLECTOR_MODEL, REFLECTOR_REGION, REFLECTOR_PROJECT_ID
+
+
+REFLECTOR_SYSTEM_PROMPT = """\
+You are a grader comparing a model's response against the correct answer.
+Output EXACTLY this JSON format and nothing else:
+
+```json
+{"verdict": "PASS", "feedback": "detailed feedback text"}
+```
+
+Rules:
+- verdict must be PASS or FAIL.
+- feedback must be DETAILED: a multi-paragraph critique (roughly 150-250
+  words) that (1) states exactly what the response got right and where it
+  diverges from the correct answer, (2) pinpoints the concrete errors —
+  missing steps, wrong ordering, incorrect commands, malformed YAML, wrong
+  final answer, etc. — and (3) gives actionable, step-by-step guidance on
+  what the response should have done instead. Quote the correct answer's
+  relevant parts where useful.
+- No other text outside the json block."""
+
+REFLECTOR_USER_TEMPLATE = """\
+Question:
+{question}
+
+Correct Answer:
+{golden_answer}
+
+Model's Response:
+{model_response}"""
+
+
+_client: AnthropicVertex | None = None
+
+
+def _get_client() -> AnthropicVertex:
+    global _client
+    if _client is None:
+        _client = AnthropicVertex(
+            region=REFLECTOR_REGION,
+            project_id=REFLECTOR_PROJECT_ID,
+        )
+    return _client
+
+
+def _fallback_on_exhaustion(retry_state):
+    return None
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=0.2, max=10),
+    retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError, ValueError)),
+    retry_error_callback=_fallback_on_exhaustion,
+)
+def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
+    """Reflect on model_response vs golden_answer.
+
+    Returns: {"verdict": "PASS"|"FAIL", "feedback": "one line reason"}
+    """
+    client = _get_client()
+    user_content: str = REFLECTOR_USER_TEMPLATE.format(
+        question=question,
+        golden_answer=golden_answer,
+        model_response=model_response,
+    )
+    response = client.messages.create(
+        model=REFLECTOR_MODEL,
+        max_tokens=2048,
+        system=REFLECTOR_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    raw: str = response.content[0].text.strip()
+    if "```json" in raw:
+        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+    parsed: dict[str, str] = json.loads(raw)
+    if isinstance(parsed, list):
+        if len(parsed) == 1 and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        else:
+            raise ValueError(f"Reflector returned unexpected JSON list: {raw[:200]}")
+    if not isinstance(parsed, dict) or "verdict" not in parsed or "feedback" not in parsed:
+        raise ValueError(f"Reflector returned unexpected JSON: {raw[:200]}")
+    logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
+    return parsed

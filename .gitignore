@@ -1,2 +1,6 @@
-__pycache__
+logs/
+wandb/
+__pycache__/
+*.pyc
+data/analyze_research/
 .venv

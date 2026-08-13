@@ -1,0 +1,66 @@
+2026-08-08 12:43:12.786 | WARNING  | megatron_trainer.collator:__post_init__:211 - system + tools render is 2306 tokens, exceeding STUDENT_MAX_PROMPT_LEN=100; every example will be dropped by the protected-set filter
+2026-08-08 12:43:12.789 | WARNING  | megatron_trainer.collator:__post_init__:211 - system + tools render is 2306 tokens, exceeding STUDENT_MAX_PROMPT_LEN=100; every example will be dropped by the protected-set filter
+2026-08-08 12:43:12.830 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=0: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.833 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=1: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.837 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=2: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.840 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=3: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.843 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=4: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.846 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=5: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.849 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=6: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.853 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=7: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.856 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=8: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.860 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=9: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.864 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=10: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.867 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=11: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.871 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=12: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.875 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=13: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.879 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=14: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.883 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=15: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.886 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=16: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.889 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=17: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.892 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=18: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.896 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=19: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.899 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=20: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.902 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=21: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.905 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=22: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.908 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=23: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.911 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=24: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.914 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=25: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.917 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=26: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.920 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=27: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.923 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=28: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.927 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=29: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.930 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=30: system render 2339 > STUDENT_MAX_PROMPT_LEN 100
+2026-08-08 12:43:12.930 | WARNING  | megatron_trainer.collator:filter_dataset:285 - Dropped 31/31 examples (protected-set over budget)
+2026-08-08 12:43:12.930 | ERROR    | megatron_trainer.collator:filter_dataset:287 - All examples dropped by the protected-set filter; cannot train
+2026-08-08 12:43:12.939 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=0: system + hint render 3036 > TEACHER_MAX_PROMPT_LEN 2048
+2026-08-08 12:43:12.943 | WARNING  | megatron_trainer.collator:filter_dataset:283 - Dropping example idx=2: system + hint render 3036 > TEACHER_MAX_PROMPT_LEN 2048
+2026-08-08 12:43:12.944 | WARNING  | megatron_trainer.collator:filter_dataset:285 - Dropped 2/3 examples (protected-set over budget)
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[1] tool defs loaded + stripped: 28 defs, 0 descriptions
+[1c] protected-set drop filter: 0/31 dropped at OLS budgets
+[1b] truncation: 1 items dropped messages (max 2 msgs); normalized_messages = truncated
+[2] prompt tokens: 2382-13887, median 9541 — 0/31 > 14336 (0 after truncation), 0/31 > 16384
+[3] conditional tokens: 2490-14966, median 9632 — 0/31 > 15360 (0 after truncation), 0/31 > 16384
+[2b] completeness: system 31/31, hint 31/31, questions dropped 0/31
+[4] targets: all non-empty; tool-call lines = 88 (expect 88)
+[5] hint placement: 5 merged into last user msg, 26 appended as new user turn
+[6] tool_response body present in prompt render
+[7] family guard fires for gpt-oss + OLS shape: ValueError — New-format path (tools/tool_calls/tool_results) is not validated for model family openai/gpt-oss-20b; Qwen only
+[8] gpt-oss + old format (no tool shape): no guard fire, renders, final channel appended
+[9] old-format regression: renders, no tools block, hint merged into last user msg
+[10] _append_hint helper: merge path ok
+[11] init budget check warns (no raise) on tiny STUDENT_MAX_PROMPT_LEN
+[12] empty filtered dataset raises: ValueError — All examples dropped by protected-set filter; raise STUDENT_MAX_PROMPT...
+[13] drop filter: 2 over-budget hints dropped (warned), 1 kept
+
+ALL CHECKS PASSED
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   0%|          | 1/411 [00:00<02:38,  2.58it/s]Loading weights:   1%|▏         | 6/411 [00:00<00:39, 10.32it/s]Loading weights:   5%|▌         | 21/411 [00:00<00:10, 38.53it/s]Loading weights:   7%|▋         | 29/411 [00:00<00:09, 39.18it/s]Loading weights:   9%|▉         | 38/411 [00:01<00:07, 49.15it/s]Loading weights:  11%|█         | 45/411 [00:01<00:08, 44.91it/s]Loading weights:  13%|█▎        | 55/411 [00:01<00:06, 56.53it/s]Loading weights:  15%|█▌        | 63/411 [00:01<00:06, 51.10it/s]Loading weights:  18%|█▊        | 72/411 [00:01<00:05, 58.93it/s]Loading weights:  19%|█▉        | 79/411 [00:01<00:06, 51.26it/s]Loading weights:  22%|██▏       | 89/411 [00:01<00:05, 61.67it/s]Loading weights:  24%|██▎       | 97/411 [00:02<00:05, 54.33it/s]Loading weights:  26%|██▌       | 105/411 [00:02<00:05, 59.00it/s]Loading weights:  27%|██▋       | 112/411 [00:02<00:05, 50.33it/s]Loading weights:  29%|██▉       | 121/411 [00:02<00:05, 49.00it/s]Loading weights:  32%|███▏      | 132/411 [00:02<00:04, 60.80it/s]Loading weights:  34%|███▍      | 139/411 [00:02<00:04, 62.76it/s]Loading weights:  36%|███▌      | 146/411 [00:03<00:05, 52.50it/s]Loading weights:  38%|███▊      | 158/411 [00:03<00:05, 47.87it/s]Loading weights:  42%|████▏     | 174/411 [00:03<00:04, 50.37it/s]Loading weights:  46%|████▌     | 190/411 [00:03<00:03, 67.18it/s]Loading weights:  48%|████▊     | 199/411 [00:03<00:03, 60.29it/s]Loading weights:  50%|█████     | 207/411 [00:04<00:03, 63.44it/s]Loading weights:  52%|█████▏    | 215/411 [00:04<00:03, 56.83it/s]Loading weights:  55%|█████▍    | 225/411 [00:04<00:02, 65.12it/s]Loading weights:  57%|█████▋    | 233/411 [00:04<00:03, 57.51it/s]Loading weights:  59%|█████▊    | 241/411 [00:04<00:02, 60.91it/s]Loading weights:  60%|██████    | 248/411 [00:04<00:03, 52.06it/s]Loading weights:  63%|██████▎   | 259/411 [00:04<00:02, 64.02it/s]Loading weights:  65%|██████▍   | 267/411 [00:05<00:02, 55.92it/s]Loading weights:  68%|██████▊   | 278/411 [00:05<00:02, 51.23it/s]Loading weights:  71%|███████▏  | 293/411 [00:05<00:01, 69.53it/s]Loading weights:  73%|███████▎  | 302/411 [00:05<00:01, 62.84it/s]Loading weights:  75%|███████▌  | 310/411 [00:05<00:01, 65.76it/s]Loading weights:  77%|███████▋  | 318/411 [00:05<00:01, 56.19it/s]Loading weights:  79%|███████▉  | 325/411 [00:06<00:01, 58.99it/s]Loading weights:  81%|████████  | 332/411 [00:06<00:01, 51.25it/s]Loading weights:  83%|████████▎ | 342/411 [00:06<00:01, 60.51it/s]Loading weights:  85%|████████▍ | 349/411 [00:06<00:01, 51.48it/s]Loading weights:  88%|████████▊ | 361/411 [00:06<00:00, 65.63it/s]Loading weights:  90%|████████▉ | 369/411 [00:06<00:00, 55.43it/s]Loading weights:  92%|█████████▏| 377/411 [00:06<00:00, 60.59it/s]Loading weights:  93%|█████████▎| 384/411 [00:07<00:00, 52.78it/s]Loading weights:  96%|█████████▌| 395/411 [00:07<00:00, 64.67it/s]Loading weights:  98%|█████████▊| 403/411 [00:07<00:00, 55.83it/s]Loading weights: 100%|██████████| 411/411 [00:07<00:00, 55.35it/s]
+
+===== channel=analysis | 128 tokens | channels seen in output: ['final'] =====
+raw (special tokens): 'We need to write a Python function that checks if a string is a palindrome. Also explain approach in one paragraph. So output should include code and explanation. Probably a function like is_palindrome(s). Approach: compare string to its reverse, ignoring case and non-alphanumeric? The question didn\'t specify ignoring case or punctuation. But typical palindrome check might ignore case and non-alphanumeric. But we can mention that. Provide code. Explanation paragraph. Let\'s produce.<|end|><|start|>assistant<|channel|>final<|message|>**Python function**\n\n```python\nimport re\n\ndef is_palindrome(s: str) -> bool:\n    """\n    Return True if the input string is'
+clean completion: 'We need to write a Python function that checks if a string is a palindrome. Also explain approach in one paragraph. So output should include code and explanation. Probably a function like is_palindrome(s). Approach: compare string to its reverse, ignoring case and non-alphanumeric? The question didn\'t specify ignoring case or punctuation. But typical palindrome check might ignore case and non-alphanumeric. But we can mention that. Provide code. Explanation paragraph. Let\'s produce.assistantfinal**Python function**\n\n```python\nimport re\n\ndef is_palindrome(s: str) -> bool:\n    """\n    Return True if the input string is'
+
+===== channel=final | 128 tokens | channels seen in output: [] =====
+raw (special tokens): '**Python function**\n\n```python\ndef is_palindrome(s: str) -> bool:\n    """\n    Return True if the input string s is a palindrome, ignoring case,\n    whitespace, and punctuation; otherwise return False.\n    """\n    # Keep only alphanumeric characters and convert to lower case\n    cleaned = \'\'.join(ch.lower() for ch in s if ch.isalnum())\n    # A string is a palindrome if it reads the same forwards and backwards\n    return cleaned == cleaned[::-1]\n```\n\n**Explanation**\n\nThe function first normalises the input by removing any character that is not alphanumeric (`str.isalnum'
+clean completion: '**Python function**\n\n```python\ndef is_palindrome(s: str) -> bool:\n    """\n    Return True if the input string s is a palindrome, ignoring case,\n    whitespace, and punctuation; otherwise return False.\n    """\n    # Keep only alphanumeric characters and convert to lower case\n    cleaned = \'\'.join(ch.lower() for ch in s if ch.isalnum())\n    # A string is a palindrome if it reads the same forwards and backwards\n    return cleaned == cleaned[::-1]\n```\n\n**Explanation**\n\nThe function first normalises the input by removing any character that is not alphanumeric (`str.isalnum'

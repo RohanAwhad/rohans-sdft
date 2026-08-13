@@ -1,0 +1,389 @@
+"""On-policy SDFT collator: produces prompt_texts and conditional_texts.
+
+Completions are generated on-the-fly by vLLM, so the collator only prepares
+the two prompt variants (with and without privileged information).
+"""
+
+import copy
+import json
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from transformers import PreTrainedTokenizerBase
+
+from loguru import logger
+
+from megatron_trainer.config import (
+    IS_GPT_OSS,
+    IS_QWEN,
+    MODEL_NAME,
+    STUDENT_MAX_PROMPT_LEN,
+    STUDENT_THINKING,
+    TEACHER_MAX_PROMPT_LEN,
+    TRAIN_DATA_PATH,
+)
+
+
+FINAL_CHANNEL_SUFFIX = "<|channel|>final<|message|>"
+ANALYSIS_CHANNEL_SUFFIX = "<|channel|>analysis<|message|>"
+
+_CHANNEL_SUFFIX = ANALYSIS_CHANNEL_SUFFIX if STUDENT_THINKING else FINAL_CHANNEL_SUFFIX
+
+TOOL_SHAPE_KEYS = ("tool_calls", "tool_results")
+
+
+def _append_channel(text: str) -> str:
+    """Force gpt-oss generation into a specific channel.
+
+    The gpt-oss chat template ends the generation prompt on a bare
+    '<|start|>assistant' and the model picks a channel on its own; an explicit
+    channel start makes it deterministic. Analysis = thinking channel (the
+    model self-switches to final when done); final = answer-only. Trailing
+    whitespace is stripped so the suffix attaches directly to the assistant
+    start token.
+    """
+    if not text.rstrip().endswith(_CHANNEL_SUFFIX):
+        return text.rstrip() + _CHANNEL_SUFFIX
+    return text
+
+
+HINDSIGHT_TEMPLATES = {
+    "user_response": (
+        "The following is the correct answer. "
+        "Use this to guide your response: {o}"
+    ),
+    "enriched_user_response": (
+        "The following is the relevant documentation and the correct answer. "
+        "Use this to guide your response:\n\n"
+        "Documentation:\n{doc}\n\n"
+        "Answer:\n{answer}"
+    ),
+}
+
+
+def _normalize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Convert 'from/value' (WildChat) and 'tool_results' formats to 'role/content'.
+
+    Tool messages without normalization render an empty <tool_response> on Qwen3
+    (results silently vanish), so they are json-dumped into content.
+    """
+    normalized = []
+    for msg in messages:
+        if "tool_results" in msg and "content" not in msg:
+            normalized.append({"role": "tool", "content": json.dumps(msg["tool_results"])})
+        elif "value" in msg and "content" not in msg:
+            role_map = {"human": "user", "gpt": "assistant", "system": "system"}
+            original_role = msg.get("from", "user")
+            new_role = role_map.get(original_role, original_role)
+            normalized.append({"role": new_role, "content": msg["value"]})
+        else:
+            normalized.append(msg)
+    return normalized
+
+
+def _target_text(user_response: Dict[str, Any]) -> str:
+    """Hand-format the reference answer: one 'name(args_json)' line per tool
+    call plus the final content (newline-joined). No template render, no
+    tokenizer round-trip (avoids template boilerplate and special-token
+    stripping artifacts).
+    """
+    parts = []
+    for tc in user_response.get("tool_calls") or []:
+        parts.append(f"{tc['name']}({json.dumps(tc['arguments'])})")
+    content = (user_response.get("content") or user_response.get("value") or "").strip()
+    if content:
+        parts.append(content)
+    return "\n".join(parts)
+
+
+def _append_hint(messages: List[Dict[str, Any]], hint: str) -> List[Dict[str, Any]]:
+    """Append the privileged hint to a copy of the trajectory.
+
+    Merges into the last message's content when it is a user message (old
+    WildChat format); otherwise appends a fresh user message (new format: the
+    last message is a tool message, so the hint renders as its own user turn
+    right before the generation prompt, after all tool results).
+    """
+    history = copy.deepcopy(messages)
+    if history and history[-1]["role"] == "user":
+        history[-1]["content"] += "\n\n" + hint
+    else:
+        history.append({"role": "user", "content": hint})
+    return history
+
+
+def _render_tokens(
+    messages: List[Dict[str, Any]],
+    tokenizer: PreTrainedTokenizerBase,
+    render_kwargs: Dict[str, Any],
+) -> tuple[int, str]:
+    """Render a trajectory and count tokens exactly like the trainer does
+    (add_special_tokens=False, truncation applied by the caller's budget).
+    """
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=STUDENT_THINKING,
+        **render_kwargs,
+    )
+    return len(tokenizer.encode(text, add_special_tokens=False)), text
+
+
+def _truncate_to_budget(
+    messages: List[Dict[str, Any]],
+    tokenizer: PreTrainedTokenizerBase,
+    budget: int,
+    protect_last: bool,
+    render_kwargs: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], str]:
+    """Drop the earliest messages (after the system message) until the rendered
+    token count fits the budget. Mutates the passed list.
+
+    Message-level only — no partial-message cuts, no token-level slicing of the
+    rendered text. The system message (index 0) is never dropped; with
+    protect_last=True the last message (the privileged hint) is never dropped
+    either. Drop order: oldest turns first, and the last user message (the
+    question) is dropped only when every other message is gone. The protected
+    set is asserted to fit the budget upstream, so the loop always terminates
+    in budget (or with only the protected set left).
+    """
+    while True:
+        n_tokens, text = _render_tokens(messages, tokenizer, render_kwargs)
+        if n_tokens <= budget:
+            return messages, text
+        protected_last = len(messages) - 1 if protect_last else None
+        last_user = max(
+            (i for i, m in enumerate(messages) if m["role"] == "user"),
+            default=None,
+        )
+        candidates = [
+            i for i in range(1, len(messages))
+            if i != protected_last and i != last_user
+        ]
+        if not candidates:
+            candidates = [
+                i for i in range(1, len(messages)) if i != protected_last
+            ]
+        if not candidates:
+            return messages, text
+        del messages[min(candidates)]
+
+
+def _load_tool_defs() -> Optional[List[Dict[str, Any]]]:
+    """Load tool defs from tool_defs.json next to the train dataset.
+
+    Descriptions are stripped (top-level + per-property): full OLS defs cost
+    ~7,214 tokens/prompt, stripped ~2,332 (validated). Absent file -> None,
+    meaning no <tools> block is rendered.
+    """
+    path = os.path.join(os.path.dirname(TRAIN_DATA_PATH), "tool_defs.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        tool_defs = json.load(f)
+    for d in tool_defs:
+        fn = d.get("function", d)
+        fn.pop("description", None)
+        for prop in fn.get("parameters", {}).get("properties", {}).values():
+            prop.pop("description", None)
+    return tool_defs
+
+
+TOOL_DEFS = _load_tool_defs()
+
+
+@dataclass
+class SDFTCollator:
+    """Collator for on-policy SDFT.
+
+    Returns:
+        prompt_texts: list[str]       — student context (question only)
+        conditional_texts: list[str]   — teacher context (question + privileged info)
+    """
+
+    tokenizer: PreTrainedTokenizerBase
+    hindsight_field: str = "enriched_user_response"
+
+    def _render_kwargs(self) -> Dict[str, Any]:
+        return {"tools": TOOL_DEFS} if TOOL_DEFS is not None else {}
+
+    def __post_init__(self) -> None:
+        n_tokens, _ = _render_tokens(
+            [{"role": "system", "content": ""}], self.tokenizer, self._render_kwargs()
+        )
+        if n_tokens > STUDENT_MAX_PROMPT_LEN:
+            logger.warning(
+                f"system + tools render is {n_tokens} tokens, exceeding "
+                f"STUDENT_MAX_PROMPT_LEN={STUDENT_MAX_PROMPT_LEN}; every example "
+                "will be dropped by the protected-set filter"
+            )
+
+    def _golden_chunk_for(self, ex: Dict[str, Any]) -> str:
+        """Extract the golden chunk (enriched_user_response value/content), or ''."""
+        doc_data = ex.get("enriched_user_response")
+        if not doc_data:
+            return ""
+        return (doc_data.get("value") or doc_data.get("content") or "").strip()
+
+    def _hint_for(self, ex: Dict[str, Any]) -> Optional[str]:
+        """Build the privileged hint for an example, or None for online_feedback."""
+        if self.hindsight_field == "online_feedback":
+            return None
+        template = HINDSIGHT_TEMPLATES[self.hindsight_field]
+        if self.hindsight_field == "enriched_user_response":
+            doc = self._golden_chunk_for(ex)
+            answer_data = ex["user_response"]
+            answer = (answer_data.get("value") or answer_data.get("content") or "").strip()
+            return template.format(doc=doc, answer=answer)
+        o = _target_text(ex[self.hindsight_field])
+        return template.format(o=o)
+
+    def _drop_reason(self, ex: Dict[str, Any]) -> Optional[str]:
+        """Reason to drop an example (protected set over budget), or None.
+
+        The protected set — system + tools, and (unless online_feedback) the
+        privileged hint — is never truncated, so an example whose protected
+        render exceeds its budget cannot fit. Such examples are dropped at
+        dataset load instead of raising.
+        """
+        clean_prompt = _normalize_messages(ex["prompt"])
+        system_msgs: list[dict] = []
+        if clean_prompt and clean_prompt[0]["role"] == "system":
+            system_msgs.append(clean_prompt[0])
+            n_tokens, _ = _render_tokens(
+                system_msgs, self.tokenizer, self._render_kwargs()
+            )
+            if n_tokens > STUDENT_MAX_PROMPT_LEN:
+                return (
+                    f"system render {n_tokens} > STUDENT_MAX_PROMPT_LEN "
+                    f"{STUDENT_MAX_PROMPT_LEN}"
+                )
+        hint = self._hint_for(ex)
+        if self.hindsight_field == "online_feedback":
+            if not _target_text(ex.get("user_response") or {}):
+                return (
+                    "empty golden answer (user_response) required for "
+                    "online_feedback"
+                )
+        if hint is None:
+            return None
+        n_tokens, _ = _render_tokens(
+            system_msgs + [{"role": "user", "content": hint}],
+            self.tokenizer,
+            self._render_kwargs(),
+        )
+        if n_tokens > TEACHER_MAX_PROMPT_LEN:
+            return (
+                f"system + hint render {n_tokens} > TEACHER_MAX_PROMPT_LEN "
+                f"{TEACHER_MAX_PROMPT_LEN}"
+            )
+        return None
+
+    def filter_dataset(self, dataset, rank: int = 0):
+        """Drop examples whose protected set exceeds a budget, at load time.
+
+        One-time startup pass before the DataLoader is built. Dropped examples
+        are logged as warnings and never trained on. A fully-dropped dataset
+        cannot train — log an error and raise.
+        """
+        total = len(dataset)
+        valid_indices = []
+        dropped = 0
+        for idx in range(total):
+            reason = self._drop_reason(dataset[idx])
+            if reason is None:
+                valid_indices.append(idx)
+            else:
+                dropped += 1
+                if rank == 0:
+                    logger.warning(f"Dropping example idx={idx}: {reason}")
+        if rank == 0 and dropped:
+            logger.warning(f"Dropped {dropped}/{total} examples (protected-set over budget)")
+        if not valid_indices:
+            logger.error(
+                "All examples dropped by the protected-set filter; cannot train"
+            )
+            raise ValueError(
+                "All examples dropped by protected-set filter; raise "
+                "STUDENT_MAX_PROMPT_LEN / TEACHER_MAX_PROMPT_LEN"
+            )
+        return dataset.select(valid_indices)
+
+    def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        prompt_texts: list[str] = []
+        conditional_texts: list[str] = []
+        raw_questions: list[str] = []
+        golden_answers: list[str] = []
+        golden_chunks: list[str] = []
+        normalized_messages: list[list[dict[str, str]]] = []
+
+        render_kwargs = self._render_kwargs()
+
+        for ex in examples:
+            clean_prompt = _normalize_messages(ex["prompt"])
+
+            # Family guard: tools / tool_calls / tool_results are only validated
+            # for Qwen. gpt-oss fails silently on this shape (drops tool calls
+            # 2..N, crashes on content|tojson), so fail loudly instead.
+            if not IS_QWEN and (
+                TOOL_DEFS is not None
+                or any(
+                    any(k in m for k in TOOL_SHAPE_KEYS) for m in ex["prompt"]
+                )
+            ):
+                raise ValueError(
+                    "New-format path (tools/tool_calls/tool_results) is not "
+                    f"validated for model family {MODEL_NAME}; Qwen only"
+                )
+
+            golden_answers.append(_target_text(ex["user_response"]))
+            golden_chunks.append(self._golden_chunk_for(ex))
+
+            # --- Student prompt (x) ---
+            student_prompt, p_text = _truncate_to_budget(
+                copy.deepcopy(clean_prompt),
+                self.tokenizer,
+                STUDENT_MAX_PROMPT_LEN,
+                protect_last=False,
+                render_kwargs=render_kwargs,
+            )
+            if IS_GPT_OSS:
+                p_text = _append_channel(p_text)
+            prompt_texts.append(p_text)
+
+            # Raw data for env: truncated trajectory, last question, golden answer
+            normalized_messages.append(student_prompt)
+            raw_questions.append(
+                next(m["content"] for m in reversed(student_prompt) if m["role"] == "user")
+            )
+
+            # --- Teacher prompt (x, o) — append privileged info ---
+            # online_feedback: conditional_text is built dynamically by the env
+            # after rollout, so we skip it here.
+            if self.hindsight_field == "online_feedback":
+                conditional_texts.append(None)
+            else:
+                hint = self._hint_for(ex)
+
+                conditional_history = _append_hint(clean_prompt, hint)
+                _, xo_text = _truncate_to_budget(
+                    conditional_history,
+                    self.tokenizer,
+                    TEACHER_MAX_PROMPT_LEN,
+                    protect_last=True,
+                    render_kwargs=render_kwargs,
+                )
+                if IS_GPT_OSS:
+                    xo_text = _append_channel(xo_text)
+                conditional_texts.append(xo_text)
+
+        return {
+            "prompt_texts": prompt_texts,
+            "conditional_texts": conditional_texts,
+            "raw_questions": raw_questions,
+            "golden_answers": golden_answers,
+            "golden_chunks": golden_chunks,
+            "normalized_messages": normalized_messages,
+        }
