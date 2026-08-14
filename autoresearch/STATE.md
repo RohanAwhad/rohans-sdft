@@ -1,4 +1,4 @@
-# Belief State -- updated after E040
+# Belief State -- updated after E042
 
 ## Current Best
 
@@ -17,16 +17,18 @@
 ### Strong evidence
 - LR=2e-5 is the only LR that scales with thinking mode
 - 120b frozen teacher is essential (EMA self-distill fails at all LRs)
-- temp=0.7 >> temp=1.0 for rollout quality
-- GRAD_ACCUM=32 >> 16
 - Cosine schedule prevents late-epoch collapse
 - Data scale alone does NOT break the plateau (E037 large dataset = same range)
 - SFT anchor term (M5) REFUTED -- NLL gradient competes with and degrades reverse-KL distillation at both lambda=0.1 and lambda=0.01
+- Per-token IS (M4) CONFIRMED -- per-token ratios vary wildly (0.006-5.0, std 0.19-1.54) and per-sequence averaging was losing real signal
+- But raw per-token IS causes late-epoch collapse (E040: -2.9pp, E041: -3.2pp)
+- Self-normalized IS prevents collapse (E042: only -1.8pp) but doesn't improve peak
 
 ### Moderate evidence
-- Per-token IS (M4) CONFIRMED -- per-token ratios vary wildly (0.006-5.0, std 0.44-1.54) and per-sequence averaging was losing real signal. ratio_mean is ~1.1-1.5 (not 0.97 as previously believed -- the per-sequence mean was biased low)
-- But raw per-token IS doesn't improve peak accuracy (0.7217 vs 0.7235) and causes late-epoch collapse (noisier gradients from 12-15% clip rate)
-- online_feedback doesn't outperform enriched_user_response on k400
+- The 0.72-0.73 plateau is robust across ALL IS variants tested (per-sequence, per-token raw, per-token lower cap, per-token self-normalized)
+- Per-sequence IS (E036) remains the best stable approach at 0.71-0.72
+- Per-token IS accelerates early learning but peaks lower and/or collapses
+- Self-normalized IS is the most stable per-token variant but peaks at 0.7056
 
 ### Refuted
 - EMA teacher (E021, E024)
@@ -36,31 +38,34 @@
 - LR=1.5e-5 (E029)
 - Constant schedule for 10-epoch runs (E030, E035)
 - Large dataset alone breaks plateau (E037)
-- SFT anchor term at lambda=0.1 (E038 -- KL destabilized) and lambda=0.01 (E039 -- accuracy 4.3pp worse)
+- SFT anchor term (E038, E039)
+- Per-token IS as a plateau breaker (E040, E041, E042)
 
 ## Current Failure Distribution
 
-- **IS plateau (0.69-0.73):** 100% of IS-enabled runs, both k400 and large dataset
-- **Late-epoch collapse with per-token IS:** E040 collapsed from 0.7217 to 0.6930 after ep5
+- **IS plateau (0.69-0.73):** 100% of IS-enabled runs across all IS variants
+- **Late-epoch collapse:** Only with raw per-token IS (E040, E041). Self-normalized (E042) and per-sequence (E036) are stable.
 - **Zigzag oscillation:** Most runs show +/-2-3pp noise
-- **SFT anchor interference:** E038, E039 -- SFT NLL degrades KL distillation
 
 ## Active Candidate Mechanisms
 
-- **M1: Loss/IS mechanism is the bottleneck, not data scale:** SUPPORTED
-- **M3: IS mechanism itself caps performance:** UNTESTED (non-IS runs beat baseline but confounded)
-- **M4: Per-token IS ratio variation lost by per-sequence averaging:** SUPPORTED (ratio_std 0.44-1.54, per-token range 0.006-5.0). But raw per-token IS is too noisy.
-- **M5: SFT anchor provides direct gradient toward correct tokens:** REFUTED (competes with KL, degrades accuracy)
-- **M6 (new): Per-token IS needs stabilization:** UNTESTED. Lower IS_CAP or self-normalized IS might preserve the per-token signal while reducing noise.
+- **M1: Loss/IS mechanism is the bottleneck:** SUPPORTED. No IS variant breaks the plateau.
+- **M3: IS mechanism itself caps performance:** UNTESTED. Non-IS runs (3, 4, 13) beat baseline but confounded. IS_WEIGHTING=0 is locked.
+- **M4: Per-token IS ratio variation lost by per-sequence averaging:** SUPPORTED (ratio_std confirmed). But exploiting it (per-token IS) doesn't improve peak.
+- **M5: SFT anchor provides direct gradient toward correct tokens:** REFUTED.
+- **M6: Self-normalized IS stabilizes per-token gradients:** SUPPORTED (stability confirmed) but doesn't improve peak.
 
 ## Highest-Value Unknowns
 
-1. Would per-token IS with lower IS_CAP (e.g. 2.0) reduce clip rate and stabilize late training?
-2. Would self-normalized IS weights smooth the per-token signal?
-3. Is IS itself the problem? (Direct IS on/off at locked config -- IS_WEIGHTING=0 is locked, needs GOAL.md amendment)
-4. Would combining per-token IS with a lower temp (0.7 instead of 1.2) reduce rollout noise?
+1. Is IS itself the problem? Direct IS on/off at locked config (needs GOAL.md amendment -- IS_WEIGHTING=0 is locked)
+2. Would JSD or alpha-divergence (mass-covering, bounded) work better than reverse-KL (mode-seeking)?
+3. Would length normalization change the gradient distribution?
+4. Is the 0.73 ceiling a fundamental limit of reverse-KL distillation on this task?
 
 ## Next Experiment
 
-- **E041:** Per-token IS with IS_CAP=2.0 (lower cap to reduce clip rate from 12-15% to ~2-4%, stabilizing late training while preserving per-token correction). Same locked config otherwise. Pre-registered: peak > 0.74, no late collapse (ep8-10 within 2pp of peak).
-- **Alternative E042:** Per-token IS with temp=0.7 (reduce rollout noise to compensate for noisier per-token gradients).
+- **E043:** Run the autoresearch loop to decide. Options:
+  - (a) IS on/off at locked config (requires GOAL.md amendment)
+  - (b) JSD/alpha-divergence (new backward, bigger implementation)
+  - (c) Length normalization (simpler, untested)
+  - (d) Accept the plateau and optimize for stability (E036 config is most stable at 0.71)
