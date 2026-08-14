@@ -29,9 +29,14 @@ Branch: `ra/async-rollout`.
 - Phase 2 ✅ streaming producer (9e60237) — smoke shows gen fully overlapped
   (producer_wait=0.0s, gen_overlap=11.4s), epoch drains cleanly, 16 steps in
   ~3 min vs sync ~15 min.
-- Phase 3 ⬜ Layer 2/3 A/B campaign (200-step matched + 30-min wall-clock, evals).
-- Phase 4 ⬜ N_ASYNC tuning + close-out.
-- Phase 5 ⬜ create producer-refactor issue (rollout_stream.py).
+- Phase 3 🔄 Layer 2 done (training): async 200 steps in ~12 min vs sync ~55
+  min (3.6 vs ~12-18 s/step, ~4-5x), loss 0.80→0.27 both modes, clip_rate
+  ~0.001, lag_mean 3.8/max 4.5, producer_wait 0.10s (N_ASYNC=16 suffices).
+  Evals running (base + steps 50/100/150/200 ×2, 4 GPU lanes). Layer 3
+  (matched wall-clock) pending eval completion.
+- Phase 4 ⬜ close-out from Layer 3 results (N_ASYNC tuning verdict: not
+  needed — producer keeps up).
+- Phase 5 ✅ issue #15 (rollout_stream.py refactor).
 
 ## Phases
 
