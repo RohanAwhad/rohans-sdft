@@ -710,6 +710,10 @@ def train() -> None:
         model,
     )
     logger.info("MCore FSDP wrapping complete.")
+    # The Megatron bridge closes stray file descriptors during model load,
+    # silently killing the loguru file sink opened at boot (writes fail after
+    # "Loading model"). Re-open it so logs/trainer.log covers the training loop.
+    logger.add("logs/trainer.log", level=log_level)
 
     # ---- Optimizer (FSDP: torch AdamW) ----
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
