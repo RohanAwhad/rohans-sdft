@@ -89,13 +89,24 @@ smoke test), same data, same env config.
 - Claim: per-step loss, grad_norm, and IS weights are **bit-identical** to
   `ASYNC_ROLLOUT=0`. Proves the thread/queue/per-microbatch-broadcast plumbing
   changes nothing about the math.
-- **Verification runs use `GEN_TEMPERATURE=0` (greedy)** + `TRAINER_SEED`
-  (fixed shuffle): empirically, vLLM 0.23's per-request `seed` is *not*
-  cross-restart deterministic (two fresh engines, same prompts, same seed →
-  different completions; in-session repeats do match). Greedy sampling is
-  argmax over identical logits → identical completions across restarts,
-  which is what bit-identity requires. The stochastic sampling path is
-  exercised by Layers 2/3 at the default temperature.
+- **Determinism reality (verified empirically)**: vLLM 0.23's per-request
+  `seed` is *not* cross-restart deterministic (two fresh engines, same
+  prompts, same seed → different completions). With `GEN_TEMPERATURE=0`
+  (greedy) + `TRAINER_SEED` (fixed shuffle), batch 0 and step-1 metrics are
+  exactly identical across runs; from batch 1 onward training-kernel numerics
+  (flash-attn/TE atomics, sub-1e-4) accumulate and flip greedy argmax ties —
+  so cross-run equality beyond step 1 is statistical, not bit-exact.
+- **Therefore Layer 1 is verified in three parts** (via
+  `DEBUG_ROLLOUT_HASH=1`):
+  1. *Cross-run exact*: batch-0 produced hashes + step-1 loss/grad_norm/IS
+     metrics identical (sync vs async in-order).
+  2. *Within-run exact*: `CONSUME_HASH` (step, rank, microbatch) matches the
+     produced `ROLLOUT_HASH` (batch, idx) under the column-major map
+     `rank r, microbatch k ← sample r·L + k` — every rank trains exactly the
+     samples the sync slicing gives it, verified on every microbatch of the
+     run (no cross-run comparison needed).
+  3. *Statistical*: steps 2+ loss/grad_norm curves track each other (same
+     numerics drift as sync-vs-sync).
 
 ### Layer 2 — matched-step A/B
 

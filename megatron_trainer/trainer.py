@@ -197,6 +197,15 @@ def _log_rollout_hash(batch_id: int, idx: int, env) -> None:
     )
 
 
+def _log_consume_hash(step: int, rank: int, micro: int, item_data: dict) -> None:
+    if not DEBUG_ROLLOUT_HASH:
+        return
+    h = hashlib.sha256(
+        (item_data["prompt_text"] + "\x00" + (item_data["completion_text"] or "")).encode("utf-8")
+    ).hexdigest()[:12]
+    logger.info(f"CONSUME_HASH step={step} rank={rank} micro={micro} hash={h}")
+
+
 def produce(items: list[dict], success_cache: dict[str, str], policy_version: int, tokenizer):
     """Rank-0 rollout for one batch of items.
 
@@ -857,6 +866,7 @@ def train() -> None:
                     if rank == 0:
                         step_metas.append(item_data["_meta"])
                         policy_lags.append(_OPTIMIZER_STEP - item_data["policy_version"])
+                    _log_consume_hash(_OPTIMIZER_STEP, rank, micro, item_data)
                     result = _train_sample(
                         item_data, micro, local_accum_steps, fsdp_model, model,
                         tokenizer, vocab_size, device,
@@ -932,6 +942,7 @@ def train() -> None:
                 t_loss_bwd_sum: float = 0.0
 
                 for micro_step, item_data in enumerate(my_items):
+                    _log_consume_hash(optimizer_step, rank, micro_step, item_data)
                     result = _train_sample(
                         item_data, micro_step, local_accum_steps, fsdp_model, model,
                         tokenizer, vocab_size, device,
