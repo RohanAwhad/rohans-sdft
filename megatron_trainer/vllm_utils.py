@@ -205,7 +205,7 @@ def _sync_weights_to_single_vllm(
 
     names, dtype_names, shapes = get_hf_weight_metadata(model)
 
-    requests.post(f"{base_url}/pause", timeout=60).raise_for_status()
+    requests.post(f"{base_url}/pause?mode=keep", timeout=60).raise_for_status()
     requests.post(f"{base_url}/start_weight_update", json={}, timeout=60).raise_for_status()
 
     def _trigger_recv():
