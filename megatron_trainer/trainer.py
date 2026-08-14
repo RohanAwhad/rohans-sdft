@@ -627,6 +627,8 @@ def _step_tail(
         )
         if ASYNC_ROLLOUT:
             timing += f" producer_wait={t_producer_wait:.1f}s gen_overlap={t_generation - t_producer_wait:.1f}s"
+            if policy_lags:
+                timing += f" lag_mean={sum(policy_lags) / len(policy_lags):.1f} lag_max={max(policy_lags)}"
         logger.info(timing)
     return optimizer_step
 
