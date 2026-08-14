@@ -217,5 +217,4 @@ judge, 100 test questions).
   trade-off Layer 3 was designed to expose.
 
 Tooling: `megatron_trainer/verify_layer1.py` (Layer 1 replay checks),
-`parse_log.py` (trainer.log → per-step CSV), `analyze_campaign.py` (curve +
-eval summary).
+`parse_log.py` (trainer.log → per-step CSV).
