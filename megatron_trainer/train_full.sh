@@ -104,6 +104,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-32}" \
     -e SAVE_EVERY="${SAVE_EVERY:-200}" \
     -e VLLM_SERVER_DEV_MODE=1 \
+    -e VLLM_USE_V1="${VLLM_USE_V1:-0}" \
     -e BNB_CUDA_VERSION=130 \
     -e WANDB_PROJECT="${WANDB_PROJECT:-sdft-online}" \
     -e WANDB_NAME="${WANDB_NAME:-sdft-ddp-$(basename $MODEL_NAME)-t${NUM_TRAINERS}-e${NUM_EPOCHS:-10}}" \
