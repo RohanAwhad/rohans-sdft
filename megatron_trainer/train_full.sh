@@ -19,6 +19,7 @@ GPU_START=${1:-3}
 NUM_TRAINERS=${2:-2}
 NUM_VLLM_GPUS=${3:-1}
 GPU_LOGPROB=$((GPU_START + NUM_VLLM_GPUS + NUM_TRAINERS))
+CONTAINER_NAME=${CONTAINER_NAME:-sdft-megatron-train}
 
 # Build vLLM GPU device flags and port list
 VLLM_DEVICES=""
@@ -78,7 +79,7 @@ else
 fi
 
 TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
-    --name sdft-megatron-train \
+    --name "$CONTAINER_NAME" \
     $VLLM_DEVICES \
     $TRAINER_DEVICES \
     --device "nvidia.com/gpu=$GPU_LOGPROB" \
@@ -90,10 +91,11 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e RAYON_NUM_THREADS=1 \
     -e TOKENIZERS_PARALLELISM=false \
     -e MASTER_ADDR=127.0.0.1 \
+    -e MASTER_PORT="${MASTER_PORT:-29500}" \
     -e PYTHONPATH=/workspace \
     -e MODEL_NAME="$MODEL_NAME" \
     -e HF_MODEL_PATH="$MODEL_NAME" \
-    -e LOGPROB_PORT=8010 \
+    -e LOGPROB_PORT="${LOGPROB_PORT:-8010}" \
     -e LOGPROB_TCP_PORT="${LOGPROB_TCP_PORT:-8011}" \
     -e VLLM_PORT="$VLLM_PORT_BASE" \
     -e VLLM_PORTS="$VLLM_PORTS_LIST" \
