@@ -19,6 +19,20 @@ Branch: `ra/async-rollout`.
   `rollout_stream.py` is a separate future PR (Phase 5 creates the issue).
 - **policy_lag logging**: mean + max per step.
 
+## Status (2026-08-14)
+
+- Phase 0 ✅ config plumbing (8d1f996) — regression smoke ASYNC_ROLLOUT=0 passes.
+- Phase 1 ✅ in-order restructure (40ed0e0) — Layer 1 PASS via replay procedure
+  (see "Verification" note in async_rollouts.md): within-run assignment exact
+  on both modes, cross-mode produced streams identical, steps 1-2 bit-identical
+  (steps 3+ track at 3 decimals — kernel numerics, same as sync-vs-sync).
+- Phase 2 ✅ streaming producer (9e60237) — smoke shows gen fully overlapped
+  (producer_wait=0.0s, gen_overlap=11.4s), epoch drains cleanly, 16 steps in
+  ~3 min vs sync ~15 min.
+- Phase 3 ⬜ Layer 2/3 A/B campaign (200-step matched + 30-min wall-clock, evals).
+- Phase 4 ⬜ N_ASYNC tuning + close-out.
+- Phase 5 ⬜ create producer-refactor issue (rollout_stream.py).
+
 ## Phases
 
 ### Phase 0 — Config plumbing

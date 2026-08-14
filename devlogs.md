@@ -1,5 +1,15 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-14 - Phases 0-2 complete: Layer 1 PASS + streaming overlap verified
+
+- **Phase 2 verified on rh-h100-12** (64-sample smoke, ASYNC_ROLLOUT=1, temp=1.0): 16 steps, epoch drained cleanly, `TIMING ... producer_wait=0.0s gen_overlap=11.4s` — generation fully hidden behind training; whole run ~3 min vs sync ~15 min.
+- **Two bugs found + fixed by the streaming smoke**:
+  1. Rust tokenizer is **not thread-safe** ("Already borrowed"): in async mode the collator runs in the producer thread while the main thread encodes — fixed with a separate tokenizer instance for the producer side (collator + envs + produce()).
+  2. `step_done_q` token put in streaming mode would deadlock the main path (maxsize=1, nobody consumes) — now gated on `ASYNC_IN_ORDER`.
+- `verify_layer1.py` added to the repo (Layer 1 script: within-run assignment + cross-mode stream checks).
+- Commits: 96fec5c (devlogs), f2bc1a8 (tokenizer + step_done_q fixes), 4586195 (verify tool + lag on TIMING).
+- Remaining per plan: Phase 3 verification campaign (Layer 2/3 A/B + evals), Phase 4 tuning, Phase 5 producer-refactor issue.
+
 ## 2026-08-14 - Layer 1 verification: determinism findings + replay-based PASS
 
 - **Determinism rabbit hole (important findings, all verified on rh-h100-12)**:
