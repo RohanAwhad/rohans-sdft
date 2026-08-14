@@ -19,6 +19,7 @@ GPU_START=${1:-3}
 NUM_TRAINERS=${2:-2}
 NUM_VLLM_GPUS=${3:-1}
 GPU_LOGPROB=$((GPU_START + NUM_VLLM_GPUS + NUM_TRAINERS))
+CONTAINER_NAME=${CONTAINER_NAME:-sdft-megatron-train}
 
 # Build vLLM GPU device flags and port list
 VLLM_DEVICES=""
@@ -62,7 +63,7 @@ mkdir -p "$WORKSPACE/logs"
 OPTIONAL_ENVS=()
 for var in WANDB_MODE WANDB_BASE_URL WANDB_ENTITY WANDB_API_KEY \
            VERTEXAI_PROJECT REFLECTOR_PROJECT_ID TEACHER_MODEL_PATH \
-           PYTORCH_CUDA_ALLOC_CONF; do
+           PYTORCH_CUDA_ALLOC_CONF TRAINER_SEED VLLM_SEED; do
     if [ -n "${!var:-}" ]; then
         OPTIONAL_ENVS+=("-e" "$var=${!var}")
     fi
@@ -77,7 +78,7 @@ else
 fi
 
 TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
-    --name sdft-megatron-train \
+    --name "$CONTAINER_NAME" \
     $VLLM_DEVICES \
     $TRAINER_DEVICES \
     --device "nvidia.com/gpu=$GPU_LOGPROB" \
@@ -89,10 +90,12 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e RAYON_NUM_THREADS=1 \
     -e TOKENIZERS_PARALLELISM=false \
     -e MASTER_ADDR=127.0.0.1 \
+    -e MASTER_PORT="${MASTER_PORT:-29500}" \
+    -e VLLM_DIST_PORT_BASE="${VLLM_DIST_PORT_BASE:-29500}" \
     -e PYTHONPATH=/workspace \
     -e MODEL_NAME="$MODEL_NAME" \
     -e HF_MODEL_PATH="$MODEL_NAME" \
-    -e LOGPROB_PORT=8010 \
+    -e LOGPROB_PORT="${LOGPROB_PORT:-8010}" \
     -e LOGPROB_TCP_PORT="${LOGPROB_TCP_PORT:-8011}" \
     -e VLLM_PORT="$VLLM_PORT_BASE" \
     -e VLLM_PORTS="$VLLM_PORTS_LIST" \
@@ -101,6 +104,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-32}" \
     -e SAVE_EVERY="${SAVE_EVERY:-200}" \
     -e VLLM_SERVER_DEV_MODE=1 \
+    -e VLLM_USE_V1="${VLLM_USE_V1:-0}" \
     -e BNB_CUDA_VERSION=130 \
     -e WANDB_PROJECT="${WANDB_PROJECT:-sdft-online}" \
     -e WANDB_NAME="${WANDB_NAME:-sdft-ddp-$(basename $MODEL_NAME)-t${NUM_TRAINERS}-e${NUM_EPOCHS:-10}}" \
@@ -112,7 +116,9 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-6144}" \
     -e IS_WEIGHTING="${IS_WEIGHTING:-1}" \
-    -e IS_CAP="${IS_CAP:-2.0}" \
+    -e IS_CAP="${IS_CAP:-5.0}" \
+    -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
+    -e N_ASYNC="${N_ASYNC:-$((2 * ${GRAD_ACCUM_STEPS:-32}))}" \
     -e STUDENT_THINKING="${STUDENT_THINKING:-0}" \
     -e THINKING_BUDGET="${THINKING_BUDGET:-512}" \
     -e EMA_ALPHA="${EMA_ALPHA:-0.05}" \
@@ -152,7 +158,7 @@ VLLM_PIDS=""
 IFS=',' read -ra PORTS <<< \"\$VLLM_PORTS\"
 for i in \$(seq 0 \$((NUM_VLLM - 1))); do
     PORT=\${PORTS[\$i]}
-    DIST_PORT=\$((29500 + i * 100))
+    DIST_PORT=\$((\${VLLM_DIST_PORT_BASE:-29500} + i * 100))
     echo \"=== Starting vLLM instance \$i on internal GPU \$i, port \$PORT, dist_port \$DIST_PORT ===\"
     CUDA_VISIBLE_DEVICES=\$i python /workspace/megatron_trainer/start_vllm_patched.py \\
         --model \"\$MODEL_NAME\" \\

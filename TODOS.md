@@ -2,6 +2,18 @@
 
 Checklist of pending cleanups / follow-ups. Tick items off as they land.
 
+## Async rollouts (producer thread, N-ahead window)
+
+Spec: `docs/megatron_trainer/async_rollouts.md` (research: `docs/research/async_rollouts_porting_analysis.md`).
+Feature flag `ASYNC_ROLLOUT` (default `0`, off); sync path preserved byte-identical.
+
+- [x] `megatron_trainer/config.py` — `ASYNC_ROLLOUT = os.environ.get("ASYNC_ROLLOUT", "0") == "1"` (+ `N_ASYNC` in-flight bound, default `2*GRAD_ACCUM_STEPS`)
+- [x] `megatron_trainer/trainer.py` — rank-0 producer thread; bounded `queue.Queue(maxsize=N_ASYNC+world_size+1)`; per-sample streaming pushes; `_ROLLOUT_SENTINEL` epoch-end; main path `get()` → broadcast → train → sync; meta (`full_pass_rate`, `reflector_fallback_count`, `success_cache`) ships with the batch; TIMING gains `producer_wait`/`gen_overlap`; wandb config gains `async_rollout` (supersedes the original `Queue(1)` + `Event`/`gen_ready.set()` design — see async_rollouts.md)
+- [x] `megatron_trainer/train_full.sh` — `-e ASYNC_ROLLOUT` + `-e N_ASYNC` passthrough
+- [x] Docs — `docs/megatron_trainer/async_rollouts.md` (design, layers, verdicts) + README §streaming async rollouts
+- [x] Smoke: sync run (flag off, byte-identical) → async run (flag on) → compare TIMING lines; verify IS weights sane with off-by-one policies; no collectives in thread (hang = bug) — full Layer 1-3 campaign + eval table in async_rollouts.md
+- [ ] Future work (spec "Future work"): staleness-aware drop / DPPO masks; partial-rollout resume; separate orchestrator; teacher version stamps (N-ahead window implemented; `policy_version`/`policy_lag` landed)
+
 ## Make student thinking configurable (`STUDENT_THINKING`)
 
 Knob: `STUDENT_THINKING` (default `"0"`), truthy `"1"`. One flag flips **both** student and

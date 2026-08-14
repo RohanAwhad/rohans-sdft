@@ -1,5 +1,72 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-14 - Phase 3 in progress: Layer 2 runs + eval infra (rh-h100-12)
+
+- **Campaign setup** (rh-h100-12, 8×H100, no reservation): repo worktrees
+  `rohans-sdft-{sync,async}`; data relayed from rh-h100-01 (train/test maas
+  sdft jsonl, md5 of test = 708d0def9dd758640db12707278d6d2d); ADC copied;
+  eval venv built via container uv (vllm 0.24.0 + torch 2.11 cu130 +
+  transformers 5.15 + anthropic; host python 3.12 via uv-managed install;
+  **ninja must be on PATH** — same gotcha as vLLM spawn).
+- train_full.sh gained CONTAINER_NAME / LOGPROB_PORT / MASTER_PORT /
+  VLLM_DIST_PORT_BASE / VLLM_USE_V1=0 params (bf9f28f, 0457f98) for parallel runs.
+- **Port 8001 on rh-h100-12 is taken** by a lab MCP server (PID 1770774, since
+  Apr 24) — use 8051.
+- **Layer 2 config**: GA=8 (400 samples → 50 steps/epoch exactly in both
+  modes), 4 epochs = 200 steps, SAVE_EVERY=50, TRAINER_SEED=1234,
+  enriched_user_response, IS_CAP 5.0, temp 1.0.
+- **Layer 2 async results (200 steps, ~12 min)**: 3.5s/step vs sync 12-18s/step
+  (~4-5x). producer_wait mean 0.11s (N_ASYNC=16 keeps up — no tuning needed),
+  lag_mean 3.8 steps (max 5), clip_rate ~0, gen_overlap mean ~38.5s/step fully
+  hidden. 200 opt_step + TIMING lines all present in training.log.
+- **FSDP checkpoint saves are slow on this node's disk** (~1.5-10 min for
+  16GB safetensors; final save ran ~12:18→12:20+). Plan evals around it.
+- Eval lanes (4×GPUs) fire on async container exit: base + a50/a100/a150/a200
+  + sync ckpts as they land.
+
+## 2026-08-14 - Phases 0-2 complete: Layer 1 PASS + streaming overlap verified
+
+- **Phase 2 verified on rh-h100-12** (64-sample smoke, ASYNC_ROLLOUT=1, temp=1.0): 16 steps, epoch drained cleanly, `TIMING ... producer_wait=0.0s gen_overlap=11.4s` — generation fully hidden behind training; whole run ~3 min vs sync ~15 min.
+- **Two bugs found + fixed by the streaming smoke**:
+  1. Rust tokenizer is **not thread-safe** ("Already borrowed"): in async mode the collator runs in the producer thread while the main thread encodes — fixed with a separate tokenizer instance for the producer side (collator + envs + produce()).
+  2. `step_done_q` token put in streaming mode would deadlock the main path (maxsize=1, nobody consumes) — now gated on `ASYNC_IN_ORDER`.
+- `verify_layer1.py` added to the repo (Layer 1 script: within-run assignment + cross-mode stream checks).
+- Commits: 96fec5c (devlogs), f2bc1a8 (tokenizer + step_done_q fixes), 4586195 (verify tool + lag on TIMING).
+- Remaining per plan: Phase 3 verification campaign (Layer 2/3 A/B + evals), Phase 4 tuning, Phase 5 producer-refactor issue.
+
+## 2026-08-14 - Layer 1 verification: determinism findings + replay-based PASS
+
+- **Determinism rabbit hole (important findings, all verified on rh-h100-12)**:
+  - vLLM 0.23 per-request `seed` is **not cross-restart deterministic**: two fresh engines, same prompts, same seed → different completions (in-session repeats DO match). Confirmed with a standalone boot→generate→kill→boot→generate test.
+  - With `GEN_TEMPERATURE=0` (greedy) + `TRAINER_SEED` (fixed shuffle): sync-vs-sync runs match exactly on **batch 0 + step 1**, then drift — training-kernel numerics (flash-attn/TE atomics) accumulate and flip greedy argmax ties from batch 1 on. Cross-run bit-identity beyond step 1 is impossible without `use_deterministic_algorithms` (breaks the TE stack).
+  - Even batch-0 greedy differs sync-vs-async (different arrival dynamics → different chunked-prefill batching → argmax flips). vLLM-internal numerics are not cross-process-structure reproducible.
+- **Layer 1 restructured into a replay-based procedure** (this is now the canonical verification):
+  - `RECORD_ROLLOUT_PATH` dumps every vLLM result keyed by prompt hash; `ROLLOUT_REPLAY_PATH` replays them — both modes train on byte-identical rollout data, isolating the plumbing from vLLM numerics.
+  - `DEBUG_ROLLOUT_HASH` logs `ROLLOUT_HASH` (produced, batch/idx) + `CONSUME_HASH` (consumed, step/rank/micro) on every rank.
+  - Results on 16-sample smoke (G=4, W=2): sync within-run assignment **PASS**, async in-order within-run assignment **PASS** (column-major `r*L+k` verified on every microbatch), cross-mode produced hash streams **identical**, cross-mode step-1/2 loss/grad_norm **bit-identical**, steps 3-4 match to 3 decimals (kernel-numerics drift, same as sync-vs-sync). **Layer 1 PASS.**
+- Commits: 03f4d3b (greedy + docs), ee05039 (CONSUME_HASH + 3-part Layer 1), 8af1979 (replay mode), c2c94ee (removed accidentally committed bench_forward.py).
+- Streaming smoke (ASYNC_ROLLOUT=1, real temp=1.0, 64 samples) launched — Phase 2 verification in flight.
+
+## 2026-08-13 - Streaming rollouts: Phases 0-2 implemented, Layer 1 in flight
+
+- Branch `ra/async-rollout` rebased onto v0.1.0. Plan finalized in `plan.md` (5 phases). Commits: 8d1f996 (config plumbing), 40ed0e0 (in-order restructure), 9e60237 (streaming producer).
+- **Phase 0**: `ASYNC_ROLLOUT` / `ASYNC_IN_ORDER` / `N_ASYNC` (default 2×GRAD_ACCUM_STEPS) in config.py; `IS_CAP` default 2.0→5.0; `TRAINER_SEED`/`VLLM_SEED` determinism knobs (vLLM per-request seed via completions API); passthrough in train_full.sh/smoke_all_in_container.sh/.env.example; wandb config gains async_rollout/async_in_order/n_async.
+- **Phase 1**: `produce()` extracted (sync + in-order share it — per-sample metas via `_sample_meta`/`_aggregate_pass_rate` keep stats identical between modes); `_train_sample()`/`_step_tail()` shared; rank-0 producer thread + bounded queue (`maxsize=N_ASYNC+W+1`) + per-microbatch `_pull_microbatch` (pop W, broadcast); in-order producer pushes column-major (`s = r*L + k`) so rank r sees exactly its sync-mode samples.
+- **Bug found via play.py sim**: done-Event check-then-block race — producer can set done while consumer is already blocked in `q.get()` → permanent hang. Fixed with a **queue sentinel** (`_ROLLOUT_SENTINEL` pushed last — signal travels through the queue, immune to the race). Sim verified: 12 steps, rank assignments bit-identical to sync slicing, 15 residual samples dropped.
+- In-order overlap prevention uses a **token queue** (`step_done_q`, maxsize=1) instead of an Event — a persistent Event accumulates stale sets and lets the producer run ahead (overlap → Layer 1 breaks).
+- **Phase 2**: `_produce_streaming` — ThreadPoolExecutor(N_ASYNC) + sliding window of futures, per-sample push on completion (completion-order reordering = the feature), `fut.result()` re-raise → crash-hard via excepthook; exact `submit_limit = steps_per_epoch * GRAD_ACCUM_STEPS`; sentinel at end. Sim verified: 384 pushed == consumed, completion-order reordering confirmed.
+- policy_version stamped at generation start (`_OPTIMIZER_STEP` global), `policy_lag` mean/max + TIMING `producer_wait`/`gen_overlap` logged (async only).
+- **Layer 1 on rh-h100-12** (in flight): sync baseline smoke (GPU 0-3, `HF_HOME=/mnt/nvme0n1/rawhad_hf`, `VLLM_PORT=8007`, `TRAINER_SEED=42 VLLM_SEED=42`, smoke_sdft.jsonl 64 samples, 16 steps) → then async in-order run → compare opt_step log lines + epoch_1 safetensors checksums.
+- Gotchas: tmux session died on first attempt (podman statfs error — HF_HOME unset); node was on stale branch `ra/analyze-kd-agentic-search` @ 41cef02 with local smoke tweak (equivalent change already in branch → discarded, `checkout -B` to origin).
+
+## 2026-08-12 - Async rollout research (PRIME-RL + VERL) + spec
+
+- Deep-researched both async rollout engines (code-only, no web): `~/3_resources/external_libs/prime-rl` @ e8abfa26 and `verl` @ 535c4779 (volcengine fork, v1 era). Docs: `docs/research/RESEARCH_async_rollouts_prime_rl.md`, `RESEARCH_async_rollouts_verl.md`, `async_rollouts_porting_analysis.md`.
+- Key discovery: local prime-rl is a **full rewrite** (no SyncReplayBuffer / forward-only agents / executor dir — old design gone). New design: vLLM pool + CPU asyncio orchestrator + torchrun FSDP2 trainer, `max_async_level=1`, staleness cap `max_off_policy_steps=8`, token-ratio IS loss — architecturally closest to our SDFT layout.
+- verl v1: fire-and-forget agent loops + TransferQueue, `ReplayBufferAsync` staleness eviction (threshold 8, drop/wait), partial-rollout abort-resume (`FullyAsyncLLMServerClient`), Decoupled PPO `parameter_sync_step`, trainer modes sync/colocate_async/separate_async.
+- Porting recommendation: producer thread on rank 0, 1-ahead (sync-then-gen), keep broadcast handoff + existing `IS_WEIGHTING`/`IS_CAP`; ~100-line diff in `trainer.py`. N-ahead + DPPO masks + partial rollout = future work if gen-bound.
+- Spec written: `docs/megatron_trainer/async_rollouts.md` (`ASYNC_ROLLOUT` flag, off by default) + TODOS section. This work lives on branch `ra/async-rollout`.
+
 ## 2026-08-12 - Smoke on rh-h100-12 + repo sync
 
 - Smoke attempt on rh-h100-12: port 8001 taken by lab's trl vLLM (GPUs 6,7) → crash `Address already in use`. Patched `smoke_all_in_container.sh:15` to `VLLM_PORT=${VLLM_PORT:-8001}` (local + node sed). Port 8011 collided with the logprob **TCP** default (`LOGPROB_TCP_PORT`); 8012 taken; finally relaunched with `VLLM_PORT=8007` in tmux `sdft-smoke`. Result pending.

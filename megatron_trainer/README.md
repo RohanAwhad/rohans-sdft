@@ -2,6 +2,28 @@
 
 SDFT training with Megatron Bridge inside NeMo container. All 3 processes (vLLM, trainer, logprob server) run in one container.
 
+## Streaming async rollouts
+
+`ASYNC_ROLLOUT=1` moves generation to a rank-0 producer thread feeding a
+bounded queue (Magistral-style); the main path consumes one microbatch
+(world_size samples) at a time. Epoch = dataset exhaustion (producer drains
+`data_iter` + in-flight, then sentinel). See
+`docs/megatron_trainer/async_rollouts.md` for the design and the Layer 1-3
+verification layers.
+
+Relevant envs: `ASYNC_ROLLOUT`, `N_ASYNC` (in-flight bound, default
+`2*GRAD_ACCUM_STEPS`), `TRAINER_SEED`/`VLLM_SEED` (A/B determinism).
+
+Verified on Qwen3-8B (GA=8, 400-sample maas sdft): 200 steps in ~12 min vs
+~55 min sync (~4-5x), `producer_wait` ~0.1s, `policy_lag` mean 3.8 steps,
+IS clip-rate ~0.002. Per-step metrics (`opt_step ... loss/grad_norm/is/*/
+lag_*`) and `TIMING` lines are in `logs/training.log`.
+
+Parallel runs on one node need distinct `VLLM_PORT`, `LOGPROB_PORT`,
+`LOGPROB_TCP_PORT`, `MASTER_PORT`, `VLLM_DIST_PORT_BASE`, `CONTAINER_NAME`
+(all parameterized in `train_full.sh`). Note: rh-h100-12's port 8001 is held
+by a lab MCP server — use 8051.
+
 ## Prerequisites
 
 ```bash

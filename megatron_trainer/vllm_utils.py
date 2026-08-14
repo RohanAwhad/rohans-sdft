@@ -5,6 +5,7 @@ Megatron parameter format to HuggingFace format before sending to vLLM, since
 vLLM expects HF-format parameter names.
 """
 
+import json
 import threading
 import time
 
@@ -12,7 +13,7 @@ import requests
 import torch
 from loguru import logger
 
-from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS
+from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
 from megatron_trainer.model_utils import export_hf_weights_iter, get_hf_weight_metadata
 
 
@@ -67,6 +68,7 @@ def vllm_generate(
             "top_p": top_p,
             "logprobs": 1,
             "skip_special_tokens": False,
+            **({"seed": VLLM_SEED} if VLLM_SEED is not None else {}),
         },
         timeout=180,
     )
@@ -159,7 +161,7 @@ def _sync_weights_to_single_vllm(
 
     names, dtype_names, shapes = get_hf_weight_metadata(model)
 
-    requests.post(f"{base_url}/pause", timeout=60).raise_for_status()
+    requests.post(f"{base_url}/pause?mode=keep", timeout=60).raise_for_status()
     requests.post(f"{base_url}/start_weight_update", json={}, timeout=60).raise_for_status()
 
     def _trigger_recv():
