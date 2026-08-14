@@ -73,6 +73,15 @@ VLLM_SEED = int(VLLM_SEED) if VLLM_SEED else None
 # Debug: log a hash of every rolled-out (prompt, completion) pair with its
 # batch/step index — lets verification runs diff the exact data stream.
 DEBUG_ROLLOUT_HASH = os.environ.get("DEBUG_ROLLOUT_HASH", "0") == "1"
+
+# Rollout replay for Layer 1 verification: RECORD_ROLLOUT_PATH dumps every
+# vLLM generation result (keyed by prompt hash) to a jsonl file;
+# ROLLOUT_REPLAY_PATH replays those results instead of hitting vLLM — both
+# modes then train on byte-identical rollout data, making the cross-mode
+# comparison exact (vLLM's internal batching numerics are not cross-run
+# reproducible, so replay is the only way to isolate the plumbing).
+RECORD_ROLLOUT_PATH = os.environ.get("RECORD_ROLLOUT_PATH", "")
+ROLLOUT_REPLAY_PATH = os.environ.get("ROLLOUT_REPLAY_PATH", "")
 MAX_GRAD_NORM = 1.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
 STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))
