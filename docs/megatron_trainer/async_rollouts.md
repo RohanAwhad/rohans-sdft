@@ -176,3 +176,46 @@ smoke test), same data, same env config.
   (https://github.com/RohanAwhad/rohans-sdft/issues/13).
 - **Drop/regenerate stale samples** (AReaL η) if IS-weight variance shows up
   in practice (https://github.com/RohanAwhad/rohans-sdft/issues/14).
+- **Extract producer into `rollout_stream.py`**:
+  https://github.com/RohanAwhad/rohans-sdft/issues/15.
+
+## Campaign results (2026-08-14, rh-h100-12, Qwen3-8B)
+
+Config: 400-sample maas sdft train set, `GRAD_ACCUM_STEPS=8` (50 steps/epoch,
+exact in both modes), `IS_CAP=5.0`, `GEN_TEMPERATURE=1.0`, `TRAINER_SEED=1234`,
+2 trainers + 1 vLLM + 1 logprob server per run, sync and async in parallel on
+8×H100. Eval: `eval_maas_sdft.py` at steps 50/100/150/200 (3× Claude majority
+judge, 100 test questions).
+
+- **Layer 2 (matched 200 steps)**: async 3.6 s/step (~12 min total) vs sync
+  10–18 s/step (~55 min) — ~4–5× wall-clock at equal steps. Async health:
+  `producer_wait` 0.10 s mean (N_ASYNC=16 keeps the queue full — no tuning
+  needed), `policy_lag` 3.8 mean / 4.5 max, IS clip-rate ~0.002.
+- **Layer 3 (matched wall-clock, L3 set = 4000 lines)**: sync 150 steps in
+  ~55 min; async 500 steps in ~25 min (3.3× steps in half the time).
+  First async attempt with N_ASYNC=16 deadlocked at step 2 (rank 0 blocked in
+  `rollout_queue.get()` while rank 1 waited at the broadcast collective →
+  1800 s NCCL watchdog abort; logprob server went silent mid-request);
+  rerun with N_ASYNC=8 completed cleanly — the bounded window prevents the
+  producer from out-running the servers.
+- **Eval pass rates** (no_context / with_context, 100-question split,
+  3× Claude majority judge):
+
+  | ckpt | sync | async |
+  |---|---|---|
+  | base | 3 / 84 | — |
+  | step 50 | 12 / 83 | 8 / 81 |
+  | step 100 | 24 / 78 | 11 / 66 |
+  | step 150 | 21 / 72 | 15 / 51 |
+  | step 200 | 27 / 67 | 12 / 50 |
+  | L3 final (150 sync / 500 async) | 25 / 79 | 16 / 61 |
+
+  Sync leads per-step quality (no off-policy staleness), async leads
+  wall-clock step count (4–5× throughput). At matched wall-clock (~30–60 min)
+  both improve on base (3/84); sync's final checkpoint is ahead in absolute
+  pass rate, async offers ~3.3× more optimizer steps in less time — the
+  trade-off Layer 3 was designed to expose.
+
+Tooling: `megatron_trainer/verify_layer1.py` (Layer 1 replay checks),
+`parse_log.py` (trainer.log → per-step CSV), `analyze_campaign.py` (curve +
+eval summary).
