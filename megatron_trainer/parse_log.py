@@ -67,7 +67,7 @@ def main() -> None:
         print(f"{path}: {n} steps -> {out}")
         if "gen_overlap_s" in keys:
             overlap = [r["gen_overlap_s"] for r in rows if r.get("gen_overlap_s", 0) > 0]
-            waits = [r["producer_wait_s"] for r in rows]
+            waits = [r.get("producer_wait_s", 0) for r in rows]
             lags = [r["lag_mean"] for r in rows if r.get("lag_mean")]
             print(f"  gen_overlap mean={sum(overlap)/max(len(overlap),1):.1f}s "
                   f"producer_wait mean={sum(waits)/max(len(waits),1):.2f}s "
