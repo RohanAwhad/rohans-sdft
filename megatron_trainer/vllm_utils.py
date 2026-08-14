@@ -12,7 +12,7 @@ import requests
 import torch
 from loguru import logger
 
-from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
+from megatron_trainer.config import DEBUG_ROLLOUT_HASH, GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
 from megatron_trainer.model_utils import export_hf_weights_iter, get_hf_weight_metadata
 
 
@@ -57,6 +57,12 @@ def vllm_generate(
     tokens), or None if the server did not return logprobs. Used as the
     rollout proposal logp for importance sampling.
     """
+    if DEBUG_ROLLOUT_HASH:
+        logger.debug(
+            f"vLLM completions request: base_url={base_url} max_tokens={max_tokens} "
+            f"temperature={temperature} top_p={top_p} seed={VLLM_SEED} "
+            f"plen={len(prompt_text)}"
+        )
     resp = requests.post(
         f"{base_url}/v1/completions",
         json={

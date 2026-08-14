@@ -89,6 +89,13 @@ smoke test), same data, same env config.
 - Claim: per-step loss, grad_norm, and IS weights are **bit-identical** to
   `ASYNC_ROLLOUT=0`. Proves the thread/queue/per-microbatch-broadcast plumbing
   changes nothing about the math.
+- **Verification runs use `GEN_TEMPERATURE=0` (greedy)** + `TRAINER_SEED`
+  (fixed shuffle): empirically, vLLM 0.23's per-request `seed` is *not*
+  cross-restart deterministic (two fresh engines, same prompts, same seed →
+  different completions; in-session repeats do match). Greedy sampling is
+  argmax over identical logits → identical completions across restarts,
+  which is what bit-identity requires. The stochastic sampling path is
+  exercised by Layers 2/3 at the default temperature.
 
 ### Layer 2 — matched-step A/B
 

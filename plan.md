@@ -50,7 +50,10 @@ Branch: `ra/async-rollout`.
   deadlocks on an empty queue.
 - Verify: local `py_compile`/`bash -n`; **Layer 1 on cluster**:
   `ASYNC_ROLLOUT=1 ASYNC_IN_ORDER=1` vs baseline — per-step loss, grad_norm,
-  IS metrics bit-identical.
+  IS metrics bit-identical. Layer 1 runs use `GEN_TEMPERATURE=0` (greedy) —
+  vLLM's per-request seed is not cross-restart deterministic (verified
+  empirically on 0.23), greedy is argmax-deterministic; `TRAINER_SEED` fixes
+  the shuffle.
 
 ### Phase 2 — True streaming
 - Producer keeps `N_ASYNC` envs in flight; per-sample push on completion

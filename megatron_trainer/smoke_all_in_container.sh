@@ -85,6 +85,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e HINDSIGHT_FIELD="${HINDSIGHT_FIELD:-enriched_user_response}" \
     -e TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/home/lab/rawhad/sdft_knowledge_ingestion_experiment/data/train_maas_sdft.jsonl}" \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-2048}" \
+    -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
     -e ASYNC_IN_ORDER="${ASYNC_IN_ORDER:-0}" \
     -e N_ASYNC="${N_ASYNC:-$((2 * (NUM_TRAINERS * 2)))}" \
