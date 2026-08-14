@@ -316,3 +316,30 @@
 6. **Analysis:** Lower cap reduced ratio_std (0.33-0.57 vs E040's 0.44-1.54) but clip_rate remained high (5-18%). Peak was lower (0.7038 vs 0.7217) -- tighter cap trimmed useful signal. Still collapsed in late epochs. Both per-token IS variants (cap=5.0 and cap=2.0) peak at ep5 then decline. The per-sequence IS (E036) stays stable through ep10.
 7. **Conclusion:** REFUTED. Lower cap doesn't prevent collapse and reduces peak. Per-token IS is fundamentally less stable than per-sequence IS in late training. The per-token signal is real (M4 confirmed) but the raw per-token approach introduces gradient noise that accumulates over epochs.
 8. **New questions:** Is the per-sequence IS scalar actually the right approach after all? E036 (per-seq, cap=5.0) is the most stable run at 0.71-0.72. Should we accept the 0.72-0.73 plateau and focus on other axes (temp, dataset, schedule)? Or try self-normalized IS as a middle ground?
+
+
+---
+
+## #E042 [RUNNING]
+
+1. **Motivation:** Per-token IS (E040/E041) confirmed per-token signal is real (ratio_std 0.44-1.54) but causes late-epoch collapse. Self-normalized IS normalizes gradient magnitude while preserving per-token correction.
+2. **Hypothesis (M6):** Self-normalized per-token IS (kl*ratio).sum()/ratio.sum() preserves per-token correction while preventing the magnitude fluctuations that cause late collapse.
+3. **Prediction:** Peak > 0.74. No late collapse (ep8-10 within 2pp of peak). Falsified if: peak <= 0.73 or late collapse (>3pp drop from peak to ep10).
+4. **Design:** IS_PER_TOKEN=1, IS_SELF_NORMALIZED=1, IS_CAP=5.0. Same locked config (cosine, online_feedback, 120b teacher, temp=1.2, 10ep k400).
+5. **Results:** (pending)
+6. **Analysis:** (pending)
+7. **Conclusion:** (pending)
+8. **New questions:** (pending)
+
+---
+
+## #E042 [DONE]
+
+1. **Motivation:** Per-token IS (E040/E041) confirmed per-token signal is real (ratio_std 0.44-1.54) but causes late-epoch collapse. Self-normalized IS normalizes gradient magnitude while preserving per-token correction.
+2. **Hypothesis (M6):** Self-normalized per-token IS (kl*ratio).sum()/ratio.sum() preserves per-token correction while preventing the magnitude fluctuations that cause late collapse.
+3. **Prediction:** Peak > 0.74. No late collapse (ep8-10 within 2pp of peak). Falsified if: peak <= 0.73 or late collapse (>3pp drop from peak to ep10).
+4. **Design:** IS_PER_TOKEN=1, IS_SELF_NORMALIZED=1, IS_CAP=5.0. Same locked config (cosine, online_feedback, 120b teacher, temp=1.2, 10ep k400).
+5. **Results:** ep1=0.5889, ep2=0.6230, ep3=0.6535, ep4=0.6984, ep5=0.7056, ep6=0.7038, ep7=0.7038, ep8=0.7056, ep9=0.6948, ep10=0.7038. Peak 0.7056@ep5. Drop from peak to ep10: -1.8pp (stable!). ratio_std=0.19-1.49, ratio_mean=1.0-1.6.
+6. **Analysis:** Self-normalization WORKS for stability -- only 1.8pp drop from peak to ep10 (vs E040's 2.9pp, E041's 3.2pp). But peak is lower (0.7056 vs E040's 0.7217, E036's 0.7235). The normalization smooths gradients but also reduces the effective signal strength. E042 is the most stable per-token IS variant but doesn't break the plateau.
+7. **Conclusion:** WEAKLY SUPPORTED (stability confirmed) but REFUTED (peak <= 0.73). Self-normalized IS prevents collapse but at the cost of peak accuracy. The per-token IS approach (raw, lower cap, self-normalized) has been thoroughly tested -- none break the 0.73 plateau. REVERT to per-sequence IS.
+8. **New questions:** All IS loss-function variants (per-sequence, per-token raw, per-token lower cap, per-token self-normalized) plateau at 0.70-0.73. Is the problem NOT in the IS aggregation but in the IS mechanism itself? Should we test IS on/off at the locked config? (Requires GOAL.md amendment since IS_WEIGHTING=1 is locked.) Or explore other loss functions (JSD, length normalization)?
