@@ -1,5 +1,29 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-14 - Phase 3 in progress: Layer 2 runs + eval infra (rh-h100-12)
+
+- **Campaign setup** (rh-h100-12, 8×H100, no reservation): repo worktrees
+  `rohans-sdft-{sync,async}`; data relayed from rh-h100-01 (train/test maas
+  sdft jsonl, md5 of test = 708d0def9dd758640db12707278d6d2d); ADC copied;
+  eval venv built via container uv (vllm 0.24.0 + torch 2.11 cu130 +
+  transformers 5.15 + anthropic; host python 3.12 via uv-managed install;
+  **ninja must be on PATH** — same gotcha as vLLM spawn).
+- train_full.sh gained CONTAINER_NAME / LOGPROB_PORT / MASTER_PORT /
+  VLLM_DIST_PORT_BASE / VLLM_USE_V1=0 params (bf9f28f, 0457f98) for parallel runs.
+- **Port 8001 on rh-h100-12 is taken** by a lab MCP server (PID 1770774, since
+  Apr 24) — use 8051.
+- **Layer 2 config**: GA=8 (400 samples → 50 steps/epoch exactly in both
+  modes), 4 epochs = 200 steps, SAVE_EVERY=50, TRAINER_SEED=1234,
+  enriched_user_response, IS_CAP 5.0, temp 1.0.
+- **Layer 2 async results (200 steps, ~12 min)**: 3.5s/step vs sync 12-18s/step
+  (~4-5x). producer_wait mean 0.11s (N_ASYNC=16 keeps up — no tuning needed),
+  lag_mean 3.8 steps (max 5), clip_rate ~0, gen_overlap mean ~38.5s/step fully
+  hidden. 200 opt_step + TIMING lines all present in training.log.
+- **FSDP checkpoint saves are slow on this node's disk** (~1.5-10 min for
+  16GB safetensors; final save ran ~12:18→12:20+). Plan evals around it.
+- Eval lanes (4×GPUs) fire on async container exit: base + a50/a100/a150/a200
+  + sync ckpts as they land.
+
 ## 2026-08-14 - Phases 0-2 complete: Layer 1 PASS + streaming overlap verified
 
 - **Phase 2 verified on rh-h100-12** (64-sample smoke, ASYNC_ROLLOUT=1, temp=1.0): 16 steps, epoch drained cleanly, `TIMING ... producer_wait=0.0s gen_overlap=11.4s` — generation fully hidden behind training; whole run ~3 min vs sync ~15 min.
