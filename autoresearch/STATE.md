@@ -1,4 +1,4 @@
-# Belief State — updated after E036
+# Belief State -- updated after E040
 
 ## Current Best
 
@@ -15,49 +15,52 @@
 ## What We Currently Believe
 
 ### Strong evidence
-- LR=2e-5 is the only LR that scales with thinking mode (1e-5, 1.5e-5, 3e-5 all fail)
+- LR=2e-5 is the only LR that scales with thinking mode
 - 120b frozen teacher is essential (EMA self-distill fails at all LRs)
 - temp=0.7 >> temp=1.0 for rollout quality
 - GRAD_ACCUM=32 >> 16
-- Cosine schedule prevents late-epoch collapse and is better than constant for 10-epoch runs
-- Reflector fallback patch works reliably (~0.5-1.3% fallback rate)
+- Cosine schedule prevents late-epoch collapse
+- Data scale alone does NOT break the plateau (E037 large dataset = same range)
+- SFT anchor term (M5) REFUTED -- NLL gradient competes with and degrades reverse-KL distillation at both lambda=0.1 and lambda=0.01
 
 ### Moderate evidence
-- IS_CAP=2.0 is best for 3-epoch runs, but IS_CAP=5.0 may be better for longer runs (smoother climb in E035 until collapse)
-- online_feedback doesn't outperform enriched_user_response on k400 (tested at 3ep and 10ep)
-- k400 dataset (400 examples) is too small — all configs plateau at 0.69-0.73 after epoch 3
+- Per-token IS (M4) CONFIRMED -- per-token ratios vary wildly (0.006-5.0, std 0.44-1.54) and per-sequence averaging was losing real signal. ratio_mean is ~1.1-1.5 (not 0.97 as previously believed -- the per-sequence mean was biased low)
+- But raw per-token IS doesn't improve peak accuracy (0.7217 vs 0.7235) and causes late-epoch collapse (noisier gradients from 12-15% clip rate)
+- online_feedback doesn't outperform enriched_user_response on k400
 
 ### Refuted
 - EMA teacher (E021, E024)
 - temp=1.0 (E025)
-- IS_CAP=1.0 (E027 — clips too aggressively)
+- IS_CAP=1.0 (E027)
 - GRAD_ACCUM=16 (E028)
-- LR=1.5e-5 (E029 — doesn't scale)
-- Constant schedule for 10-epoch runs (E030 — zigzags, E035 — collapses)
+- LR=1.5e-5 (E029)
+- Constant schedule for 10-epoch runs (E030, E035)
+- Large dataset alone breaks plateau (E037)
+- SFT anchor term at lambda=0.1 (E038 -- KL destabilized) and lambda=0.01 (E039 -- accuracy 4.3pp worse)
 
 ## Current Failure Distribution
 
-- **Plateau at 0.69-0.73:** 100% of 10-epoch k400 runs (E030, E033, E034, E035, E036)
-- **Zigzag oscillation:** Most runs show ±2-3pp noise between adjacent epochs
-- **Late-epoch collapse:** Constant schedule + IS_CAP=5.0 (E035)
-- **Early large dataset signal:** Same range as k400 (E037 partial)
+- **IS plateau (0.69-0.73):** 100% of IS-enabled runs, both k400 and large dataset
+- **Late-epoch collapse with per-token IS:** E040 collapsed from 0.7217 to 0.6930 after ep5
+- **Zigzag oscillation:** Most runs show +/-2-3pp noise
+- **SFT anchor interference:** E038, E039 -- SFT NLL degrades KL distillation
 
 ## Active Candidate Mechanisms
 
-- **IS ratio systematic bias (ratio_mean ~0.97):** UNTESTED. vLLM processed logprobs inflate student logprobs, making all IS weights <1.0. This uniformly down-weights all gradients by ~3%.
-- **IS clipping as plateau cause:** UNTESTED at scale. Non-IS runs (3, 4, 13) beat baseline, IS runs don't. But those runs used different configs too.
-- **Dataset diversity bottleneck:** UNTESTED. k400 has only 400 examples — model may memorize/oscillate. Large dataset has 12.5x more.
-- **Loss function shape (reverse KL oscillation):** UNTESTED. Pure reverse KL is mode-seeking and may oscillate between modes, causing the zigzag.
-- **Per-token vs per-example loss normalization:** UNTESTED. Longer completions may dominate gradients.
+- **M1: Loss/IS mechanism is the bottleneck, not data scale:** SUPPORTED
+- **M3: IS mechanism itself caps performance:** UNTESTED (non-IS runs beat baseline but confounded)
+- **M4: Per-token IS ratio variation lost by per-sequence averaging:** SUPPORTED (ratio_std 0.44-1.54, per-token range 0.006-5.0). But raw per-token IS is too noisy.
+- **M5: SFT anchor provides direct gradient toward correct tokens:** REFUTED (competes with KL, degrades accuracy)
+- **M6 (new): Per-token IS needs stabilization:** UNTESTED. Lower IS_CAP or self-normalized IS might preserve the per-token signal while reducing noise.
 
 ## Highest-Value Unknowns
 
-1. Does the large dataset break the plateau? (E037 testing, but with wrong config)
-2. Would the locked config (cosine + online_fb + IS_CAP=5.0) perform differently on large dataset?
-3. Is the IS ratio bias (0.97 mean) the real issue, not the cap?
-4. Would loss function modifications help?
+1. Would per-token IS with lower IS_CAP (e.g. 2.0) reduce clip rate and stabilize late training?
+2. Would self-normalized IS weights smooth the per-token signal?
+3. Is IS itself the problem? (Direct IS on/off at locked config -- IS_WEIGHTING=0 is locked, needs GOAL.md amendment)
+4. Would combining per-token IS with a lower temp (0.7 instead of 1.2) reduce rollout noise?
 
 ## Next Experiment
 
-- Stop E037 (wrong config), relaunch with locked knobs: cosine, online_feedback, IS_CAP=5.0, on large dataset
-- OR: let E037 finish since it's already running, then run the locked config as E038
+- **E041:** Per-token IS with IS_CAP=2.0 (lower cap to reduce clip rate from 12-15% to ~2-4%, stabilizing late training while preserving per-token correction). Same locked config otherwise. Pre-registered: peak > 0.74, no late collapse (ep8-10 within 2pp of peak).
+- **Alternative E042:** Per-token IS with temp=0.7 (reduce rollout noise to compensate for noisier per-token gradients).

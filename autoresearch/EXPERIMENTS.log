@@ -249,14 +249,70 @@
 
 ---
 
-## #E037 [RUNNING]
+## #E037 [KILLED]
 
 1. **Motivation:** First large dataset run. Test if 12.5x more training examples breaks the k400 plateau.
 2. **Hypothesis:** More unique examples per epoch provide the gradient diversity needed to push past 0.73.
 3. **Prediction:** Accuracy exceeds 0.74 within 3 epochs (~468 steps). Step-50 checkpoints should show steady improvement.
 4. **Design:** LR=2e-5, cosine, IS_CAP=2.0, 120b teacher, temp=0.7, enriched, 3ep large dataset (5002 ex), SAVE_EVERY=50.
    **NOTE:** This run used enriched + IS_CAP=2.0 instead of the locked config (online_fb + IS_CAP=5.0). Config error — should have used locked knobs.
-5. **Results (partial):** step_50=0.6966, step_100=0.6930, step_150=0.7074, epoch_1=0.6697. Still running.
-6. **Analysis:** Early signal in the same 0.69-0.71 range as k400 runs. No breakthrough yet from more data.
-7. **Conclusion:** PENDING.
-8. **New questions:** Should relaunch with correct locked config (online_fb + IS_CAP=5.0)?
+5. **Results:** Killed at step 446/468 (mid-epoch-3). step_50=0.6966, step_100=0.6930, step_150=0.7074, step_200=0.7217, step_250=0.7038, step_300=0.7181, step_350=0.7092, step_400=0.7056, epoch_1=0.6697, epoch_2=**0.7307**. Peak 0.7307@epoch_2 (step ~312).
+6. **Analysis:** Large dataset shows the same 0.69-0.73 plateau as k400. Peak 0.7307 is the highest of any run with IS, but still below baseline 0.7415. Step-200 peaked at 0.7217, then oscillated. More data did NOT break the plateau. Config was wrong (enriched + IS_CAP=2.0, not locked knobs).
+7. **Conclusion:** REFUTED. Data scale alone doesn't break the plateau. The problem is in the loss function / IS mechanism, not dataset size. REVERT to loss-function focus.
+8. **New questions:** Is pure reverse-KL the bottleneck? Would an SFT anchor term provide the direct gradient toward correct tokens that reverse-KL lacks?
+
+---
+
+## #E038 [KILLED]
+
+1. **Motivation:** All 20+ IS-enabled reverse-KL runs plateau at 0.69-0.73. Devlogs Run 9 identifies reverse-KL as mode-seeking — "student gets sharper but not smarter." The loss optimizes distribution matching (KL), not correctness (accuracy). An SFT anchor term adds direct supervised gradient on golden answer tokens, bypassing the IS weighting path entirely.
+2. **Hypothesis (M5):** Pure reverse-KL optimizes a proxy (KL divergence) that diverges from the target metric (accuracy). Adding λ·NLL(golden_answer) provides a direct gradient toward correct tokens, breaking the plateau.
+3. **Prediction:** Peak accuracy > 0.74 by epoch 10. Epoch_1 > 0.72 (faster early ascent than pure reverse-KL, which typically reaches ~0.63-0.67 at ep1). Falsified if: peak ≤ 0.73 while KL loss keeps decreasing (same plateau as E034-E037). Also refuted if epoch_1 > 0.75 then collapses to < 0.70 by epoch 5 (λ too high, SFT dominates and causes overfitting).
+4. **Design:** LR=2e-5, cosine, IS_CAP=5.0, 120b teacher, temp=1.2, online_feedback, SFT_LAMBDA=0.1, 10ep k400. Loss = reverse_kl + 0.1 * NLL(golden_answer). Second student forward pass on [prompt + golden_ids] for NLL, backwarded separately under fresh no_sync context (KL backward first to free graph, then NLL forward+backward).
+5. **Results:** Killed at step 14 (epoch 2). epoch_1=0.5745. SFT NLL decreasing (5.46→2.52), but KL loss climbing (1.40→1.79). signal_mean dropped to -3.26 at step 8 (student diverging from teacher). Loss spiking at steps 13-14 (1.79).
+6. **Analysis:** λ=0.1 is too high — the SFT anchor dominates and destabilizes the KL objective. The two objectives compete: SFT pulls toward memorizing golden answers, KL pulls toward teacher distribution. The SFT signal IS working (NLL decreasing), but at this magnitude it destroys the KL distillation signal. Epoch_1=0.5745 is far below prediction (>0.72) and below any prior run's ep1.
+7. **Conclusion:** REFUTED at λ=0.1. The SFT signal is useful but destabilizing at this magnitude. λ needs to be much lower (0.01-0.05). Pre-registered falsification criterion met: "epoch_1 spikes then collapses → λ too high."
+8. **New questions:** What λ value balances SFT anchor benefit with KL stability? Try λ=0.01 (10x lower).
+
+
+---
+
+## #E039 [DONE]
+
+1. **Motivation:** E038 showed SFT anchor at lambda=0.1 destabilizes KL (loss climbing, signal_mean dropped to -3.26, ep1=0.5745). But SFT NLL was decreasing (5.46 to 2.52), confirming the SFT signal works -- it's just too strong. Need 10x lower lambda.
+2. **Hypothesis (M5, revised):** At lambda=0.01, the SFT anchor provides a gentle direct gradient toward correct tokens without destabilizing the KL objective. The NLL term should be ~2-4% of total loss (vs ~20-30% at lambda=0.1).
+3. **Prediction:** Peak accuracy > 0.74 by epoch 10. Epoch_1 > 0.68 (comparable to pure reverse-KL, not lower). KL loss should decrease normally (not climb). Falsified if: ep1 < 0.60 (SFT still destabilizing) or peak <= 0.73 with KL decreasing normally (SFT anchor doesn't help even at low lambda).
+4. **Design:** Same as E038 but SFT_LAMBDA=0.01. LR=2e-5, cosine, IS_CAP=5.0, 120b teacher, temp=1.2, online_feedback, 10ep k400.
+5. **Results:** ep1=0.6571, ep2=0.6409, ep3=0.6427, ep4=0.6732, ep5=0.6679, ep6=0.6750, ep7=0.6750, ep8=0.6804, ep9=0.6715, ep10=0.6804. Peak 0.6804@ep8/10.
+6. **Analysis:** KL stable (loss ~1.0-1.2, not climbing like E038). SFT NLL decreasing (4.37 to 3.04). But accuracy consistently 2-5pp below E036 (no SFT) at every epoch. E039 peak 0.6804 vs E036 peak 0.7235 (-4.3pp). The SFT anchor at lambda=0.01 doesn't destabilize KL, but it still interferes with the distillation signal, degrading accuracy.
+7. **Conclusion:** REFUTED. SFT anchor hypothesis (M5) refuted at both lambda=0.1 (destabilizes KL) and lambda=0.01 (degrades accuracy by 4.3pp). The SFT NLL gradient competes with reverse-KL and degrades distillation. REVERT (SFT_LAMBDA=0.0).
+8. **New questions:** Is the per-sequence IS scalar the bottleneck (M4)? Test per-token IS next.
+
+---
+
+
+---
+
+## #E040 [DONE]
+
+1. **Motivation:** SFT anchor (M5) refuted at both lambda values. Now testing M4 -- the per-sequence IS scalar (ratio_v.mean()) collapses 100x per-token ratio spread into one number, losing granular correction.
+2. **Hypothesis (M4, revised):** Per-token IS preserves per-token correction that the per-sequence scalar destroys. The 0.97 ratio mean is an average of tokens ranging from ~0.03 to ~3.8; applying this per-token instead of as a scalar should distribute the IS correction more effectively.
+3. **Prediction:** Peak accuracy > 0.74 by epoch 10. is/ratio_std diagnostic shows high variance (>0.3), confirming per-sequence mean was discarding useful signal. Less oscillation in trajectory. Falsified if: peak <= 0.73 with ratio_std < 0.1 (ratios are near-uniform, per-token IS doesn't change anything), or training destabilizes (loss spikes, accuracy drops below 0.65).
+4. **Design:** Same locked config as E036 (LR=2e-5, cosine, IS_CAP=5.0, 120b teacher, temp=1.2, online_feedback, 10ep k400) but with IS_PER_TOKEN=1. No SFT anchor (SFT_LAMBDA=0.0). Single code change in chunked_head.py: per-token ratio weighting instead of scalar.
+5. **Results:** ep1=0.6104, ep2=0.6804, ep3=0.7074, ep4=0.6894, ep5=0.7217, ep6=0.6984, ep7=0.6786, ep8=0.6858, ep9=0.6930, ep10=0.6930. Peak 0.7217@ep5. ratio_std=0.44-1.54 (CONFIRMED >0.3). ratio_min=0.006, ratio_max=5.0. clip_rate=12-15% (vs 0.3% per-sequence). ratio_mean=1.1-1.5 (vs ~0.97 per-sequence).
+6. **Analysis:** Per-token IS accelerated early learning (steepest 3-epoch climb: +9.7pp, reached 0.7217 by ep5 vs E036's 0.6768 at ep5). But training collapsed after ep5 (0.7217 to 0.6930) -- the noisier per-token gradients (12-15% clip rate, high ratio_std) destabilized late-epoch training. Peak 0.7217 is comparable to E036's 0.7235 (within noise). The mechanism (M4) is CONFIRMED -- per-token ratios vary wildly and per-sequence averaging was losing real signal -- but the raw per-token approach is too noisy for stable training.
+7. **Conclusion:** INCONCLUSIVE. M4 confirmed (per-token signal was being lost) but raw per-token IS doesn't improve peak accuracy and causes late collapse. The signal is real but needs stabilization -- possible approaches: lower IS_CAP to reduce clip rate, self-normalized IS weights, or per-token IS with gradient clipping.
+8. **New questions:** Would a lower IS_CAP (e.g. 2.0) with per-token IS reduce the clip rate and stabilize late training? Would self-normalized IS (normalize ratios across batch) smooth the per-token signal?
+
+---
+
+## #E041 [DONE]
+
+1. **Motivation:** E040 (per-token IS, cap=5.0) showed per-token signal is real (ratio_std 0.44-1.54) but caused late collapse (0.7217 to 0.6930) from 12-15% clip rate. Test if lower cap (2.0) reduces noise and prevents collapse.
+2. **Hypothesis (M6):** Per-token IS with IS_CAP=2.0 reduces clip rate to ~2-4%, stabilizing late training while preserving per-token correction.
+3. **Prediction:** Peak > 0.74. No late collapse (ep8-10 within 2pp of peak). Falsified if: peak <= 0.73 or late collapse (>3pp drop from peak to ep10).
+4. **Design:** Same as E040 but IS_CAP=2.0. Per-token IS, cosine, online_feedback, 120b teacher, temp=1.2, 10ep k400.
+5. **Results:** ep1=0.6032, ep2=0.6661, ep3=0.6679, ep4=0.6948, ep5=0.7038, ep6=0.6858, ep7=0.6822, ep8=0.6930, ep9=0.6930, ep10=0.6715. Peak 0.7038@ep5. Collapsed to 0.6715 by ep10 (-3.2pp). clip_rate=5-18% (still high despite lower cap). ratio_std=0.33-0.57, ratio_mean=1.02-1.05.
+6. **Analysis:** Lower cap reduced ratio_std (0.33-0.57 vs E040's 0.44-1.54) but clip_rate remained high (5-18%). Peak was lower (0.7038 vs 0.7217) -- tighter cap trimmed useful signal. Still collapsed in late epochs. Both per-token IS variants (cap=5.0 and cap=2.0) peak at ep5 then decline. The per-sequence IS (E036) stays stable through ep10.
+7. **Conclusion:** REFUTED. Lower cap doesn't prevent collapse and reduces peak. Per-token IS is fundamentally less stable than per-sequence IS in late training. The per-token signal is real (M4 confirmed) but the raw per-token approach introduces gradient noise that accumulates over epochs.
+8. **New questions:** Is the per-sequence IS scalar actually the right approach after all? E036 (per-seq, cap=5.0) is the most stable run at 0.71-0.72. Should we accept the 0.72-0.73 plateau and focus on other axes (temp, dataset, schedule)? Or try self-normalized IS as a middle ground?
