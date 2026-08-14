@@ -19,8 +19,7 @@ for Layer 1), `N_ASYNC` (in-flight bound, default `2*GRAD_ACCUM_STEPS`),
 Verified on Qwen3-8B (GA=8, 400-sample maas sdft): 200 steps in ~12 min vs
 ~55 min sync (~4-5x), `producer_wait` ~0.1s, `policy_lag` mean 3.8 steps,
 IS clip-rate ~0.002. Per-step metrics (`opt_step ... loss/grad_norm/is/*/
-lag_*`) and `TIMING` lines are in `logs/training.log` — parse with
-`megatron_trainer/parse_log.py`.
+lag_*`) and `TIMING` lines are in `logs/training.log`.
 
 Parallel runs on one node need distinct `VLLM_PORT`, `LOGPROB_PORT`,
 `LOGPROB_TCP_PORT`, `MASTER_PORT`, `VLLM_DIST_PORT_BASE`, `CONTAINER_NAME`

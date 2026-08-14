@@ -215,6 +215,3 @@ judge, 100 test questions).
   both improve on base (3/84); sync's final checkpoint is ahead in absolute
   pass rate, async offers ~3.3× more optimizer steps in less time — the
   trade-off Layer 3 was designed to expose.
-
-Tooling: `megatron_trainer/verify_layer1.py` (Layer 1 replay checks),
-`parse_log.py` (trainer.log → per-step CSV).
