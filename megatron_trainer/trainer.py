@@ -670,8 +670,13 @@ def train() -> None:
                 f"local_accum_steps={local_accum_steps}")
 
     # ---- Model + tokenizer ----
+    # Two tokenizer instances: the Rust tokenizers library is NOT thread-safe
+    # (overlapping mutating calls raise "Already borrowed"). In async mode the
+    # producer thread builds envs + runs the collator, while the main thread
+    # encodes in _train_sample — so the producer side gets its own instance.
     logger.info(f"Loading model: {HF_MODEL_PATH}")
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_PATH)
+    producer_tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_PATH)
     model = load_model(HF_MODEL_PATH)
     model.train()
 
@@ -704,7 +709,7 @@ def train() -> None:
     # ---- Dataset (all ranks load, only rank 0 iterates) ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
     dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
-    collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
+    collator = SDFTCollator(tokenizer=producer_tokenizer, hindsight_field=HINDSIGHT_FIELD)
     # Drop examples whose protected set (system + hint) exceeds the budgets —
     # logged as warnings, never trained on. Deterministic across ranks.
     dataset = collator.filter_dataset(dataset, rank=rank)
@@ -819,10 +824,10 @@ def train() -> None:
             gen_times = deque()
             if ASYNC_IN_ORDER:
                 target = _produce_in_order
-                args = (rollout_queue, data_iter, success_cache, step_done_q, gen_times, tokenizer, world_size)
+                args = (rollout_queue, data_iter, success_cache, step_done_q, gen_times, producer_tokenizer, world_size)
             else:
                 target = _produce_streaming
-                args = (rollout_queue, data_iter, success_cache, gen_times, tokenizer, steps_per_epoch)
+                args = (rollout_queue, data_iter, success_cache, gen_times, producer_tokenizer, steps_per_epoch)
             producer_thread = threading.Thread(
                 target=target,
                 args=args,
@@ -906,7 +911,7 @@ def train() -> None:
                     t_step_start=t_step_start, t_generation=t_generation,
                     t_producer_wait=t_producer_wait,
                 )
-                if rank == 0:
+                if rank == 0 and ASYNC_IN_ORDER:
                     step_done_q.put(True)
         else:
             for _step in range(steps_per_epoch):
@@ -917,7 +922,7 @@ def train() -> None:
                 if rank == 0:
                     items = [next(data_iter) for _ in range(GRAD_ACCUM_STEPS)]
                     rollout_data, metas, batch_meta = produce(
-                        items, success_cache, _OPTIMIZER_STEP, tokenizer,
+                        items, success_cache, _OPTIMIZER_STEP, producer_tokenizer,
                     )
                 else:
                     rollout_data = [None] * GRAD_ACCUM_STEPS
