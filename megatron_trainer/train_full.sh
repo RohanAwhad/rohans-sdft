@@ -92,6 +92,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e TOKENIZERS_PARALLELISM=false \
     -e MASTER_ADDR=127.0.0.1 \
     -e MASTER_PORT="${MASTER_PORT:-29500}" \
+    -e VLLM_DIST_PORT_BASE="${VLLM_DIST_PORT_BASE:-29500}" \
     -e PYTHONPATH=/workspace \
     -e MODEL_NAME="$MODEL_NAME" \
     -e HF_MODEL_PATH="$MODEL_NAME" \
@@ -159,7 +160,7 @@ VLLM_PIDS=""
 IFS=',' read -ra PORTS <<< \"\$VLLM_PORTS\"
 for i in \$(seq 0 \$((NUM_VLLM - 1))); do
     PORT=\${PORTS[\$i]}
-    DIST_PORT=\$((29500 + i * 100))
+    DIST_PORT=\$((\${VLLM_DIST_PORT_BASE:-29500} + i * 100))
     echo \"=== Starting vLLM instance \$i on internal GPU \$i, port \$PORT, dist_port \$DIST_PORT ===\"
     CUDA_VISIBLE_DEVICES=\$i python /workspace/megatron_trainer/start_vllm_patched.py \\
         --model \"\$MODEL_NAME\" \\
