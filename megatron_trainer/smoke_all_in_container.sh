@@ -42,7 +42,7 @@ echo "NUM_TRAINERS=$NUM_TRAINERS"
 
 # Optional envs: only pass through when set
 OPTIONAL_ENVS=()
-for var in TRAINER_SEED VLLM_SEED DEBUG_ROLLOUT_HASH RECORD_ROLLOUT_PATH ROLLOUT_REPLAY_PATH; do
+for var in TRAINER_SEED VLLM_SEED; do
     if [ -n "${!var:-}" ]; then
         OPTIONAL_ENVS+=("-e" "$var=${!var}")
     fi
@@ -87,7 +87,6 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-2048}" \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
-    -e ASYNC_IN_ORDER="${ASYNC_IN_ORDER:-0}" \
     -e N_ASYNC="${N_ASYNC:-$((2 * (NUM_TRAINERS * 2)))}" \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "${OPTIONAL_ENVS[@]}" \

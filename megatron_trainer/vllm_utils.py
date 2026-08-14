@@ -5,7 +5,6 @@ Megatron parameter format to HuggingFace format before sending to vLLM, since
 vLLM expects HF-format parameter names.
 """
 
-import hashlib
 import json
 import threading
 import time
@@ -14,7 +13,7 @@ import requests
 import torch
 from loguru import logger
 
-from megatron_trainer.config import DEBUG_ROLLOUT_HASH, GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, RECORD_ROLLOUT_PATH, ROLLOUT_REPLAY_PATH, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
+from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
 from megatron_trainer.model_utils import export_hf_weights_iter, get_hf_weight_metadata
 
 
@@ -43,23 +42,6 @@ def wait_for_vllm(timeout: int = 300) -> None:
 # Generation
 # ---------------------------------------------------------------------------
 
-def _prompt_hash(prompt_text: str) -> str:
-    return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()[:16]
-
-
-_replay_cache: dict[str, tuple[str, str, list[float] | None]] = {}
-if ROLLOUT_REPLAY_PATH:
-    with open(ROLLOUT_REPLAY_PATH) as _f:
-        for _line in _f:
-            _entry = json.loads(_line)
-            _replay_cache[_entry["prompt_hash"]] = (
-                _entry["text"], _entry["finish_reason"], _entry["logprobs"],
-            )
-    logger.info(f"Rollout replay: loaded {len(_replay_cache)} completions from {ROLLOUT_REPLAY_PATH}")
-
-_record_lock = threading.Lock()
-
-
 def vllm_generate(
     prompt_text: str,
     base_url: str = VLLM_BASE_URL,
@@ -75,23 +57,7 @@ def vllm_generate(
     under the actual sampling distribution (1:1 aligned with the output
     tokens), or None if the server did not return logprobs. Used as the
     rollout proposal logp for importance sampling.
-
-    With ROLLOUT_REPLAY_PATH set, returns the recorded completion for the
-    prompt instead of calling vLLM (Layer 1 verification).
     """
-    if ROLLOUT_REPLAY_PATH:
-        entry = _replay_cache.get(_prompt_hash(prompt_text))
-        if entry is not None:
-            if DEBUG_ROLLOUT_HASH:
-                logger.debug(f"vLLM replay hit: plen={len(prompt_text)} clen={len(entry[0])}")
-            return entry
-        logger.warning(f"vLLM replay MISS for prompt plen={len(prompt_text)} — falling back to live vLLM")
-    if DEBUG_ROLLOUT_HASH:
-        logger.debug(
-            f"vLLM completions request: base_url={base_url} max_tokens={max_tokens} "
-            f"temperature={temperature} top_p={top_p} seed={VLLM_SEED} "
-            f"plen={len(prompt_text)}"
-        )
     resp = requests.post(
         f"{base_url}/v1/completions",
         json={
@@ -113,16 +79,6 @@ def vllm_generate(
     logprobs = None
     if choice.get("logprobs") is not None:
         logprobs = choice["logprobs"].get("token_logprobs")
-    if RECORD_ROLLOUT_PATH:
-        entry = {
-            "prompt_hash": _prompt_hash(prompt_text),
-            "text": choice["text"],
-            "finish_reason": choice["finish_reason"],
-            "logprobs": logprobs,
-        }
-        with _record_lock:
-            with open(RECORD_ROLLOUT_PATH, "a") as f:
-                f.write(json.dumps(entry) + "\n")
     return choice["text"], choice["finish_reason"], logprobs
 
 

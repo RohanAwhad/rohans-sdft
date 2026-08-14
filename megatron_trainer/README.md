@@ -11,10 +11,8 @@ bounded queue (Magistral-style); the main path consumes one microbatch
 `docs/megatron_trainer/async_rollouts.md` for the design and the Layer 1-3
 verification layers.
 
-Relevant envs: `ASYNC_ROLLOUT`, `ASYNC_IN_ORDER` (deterministic in-order mode
-for Layer 1), `N_ASYNC` (in-flight bound, default `2*GRAD_ACCUM_STEPS`),
-`TRAINER_SEED`/`VLLM_SEED`, `DEBUG_ROLLOUT_HASH`, `RECORD_ROLLOUT_PATH` /
-`ROLLOUT_REPLAY_PATH` (Layer 1 replay procedure).
+Relevant envs: `ASYNC_ROLLOUT`, `N_ASYNC` (in-flight bound, default
+`2*GRAD_ACCUM_STEPS`), `TRAINER_SEED`/`VLLM_SEED` (A/B determinism).
 
 Verified on Qwen3-8B (GA=8, 400-sample maas sdft): 200 steps in ~12 min vs
 ~55 min sync (~4-5x), `producer_wait` ~0.1s, `policy_lag` mean 3.8 steps,

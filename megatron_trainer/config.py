@@ -55,11 +55,8 @@ NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "10"))
 # Async streaming rollouts (see docs/megatron_trainer/async_rollouts.md).
 # ASYNC_ROLLOUT=1 moves generation to a rank-0 producer thread feeding a
 # bounded queue; the main path consumes one microbatch (world_size samples)
-# at a time. ASYNC_IN_ORDER=1 keeps the deterministic batch-in-order producer
-# (Layer 1 verification mode). N_ASYNC bounds in-flight generations
-# (Magistral's conservative limit: 2 * step batch).
+# at a time. N_ASYNC bounds in-flight generations.
 ASYNC_ROLLOUT = os.environ.get("ASYNC_ROLLOUT", "0") == "1"
-ASYNC_IN_ORDER = os.environ.get("ASYNC_IN_ORDER", "0") == "1"
 N_ASYNC = int(os.environ.get("N_ASYNC", str(2 * GRAD_ACCUM_STEPS)))
 
 # Determinism knobs for A/B verification runs. Both unset = default
@@ -70,18 +67,6 @@ TRAINER_SEED = int(TRAINER_SEED) if TRAINER_SEED else None
 VLLM_SEED = os.environ.get("VLLM_SEED")
 VLLM_SEED = int(VLLM_SEED) if VLLM_SEED else None
 
-# Debug: log a hash of every rolled-out (prompt, completion) pair with its
-# batch/step index — lets verification runs diff the exact data stream.
-DEBUG_ROLLOUT_HASH = os.environ.get("DEBUG_ROLLOUT_HASH", "0") == "1"
-
-# Rollout replay for Layer 1 verification: RECORD_ROLLOUT_PATH dumps every
-# vLLM generation result (keyed by prompt hash) to a jsonl file;
-# ROLLOUT_REPLAY_PATH replays those results instead of hitting vLLM — both
-# modes then train on byte-identical rollout data, making the cross-mode
-# comparison exact (vLLM's internal batching numerics are not cross-run
-# reproducible, so replay is the only way to isolate the plumbing).
-RECORD_ROLLOUT_PATH = os.environ.get("RECORD_ROLLOUT_PATH", "")
-ROLLOUT_REPLAY_PATH = os.environ.get("ROLLOUT_REPLAY_PATH", "")
 MAX_GRAD_NORM = 1.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
 STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))

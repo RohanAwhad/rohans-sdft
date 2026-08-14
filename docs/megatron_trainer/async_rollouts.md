@@ -84,29 +84,27 @@ smoke test), same data, same env config.
 
 ### Layer 1 — plumbing equivalence
 
-- `ASYNC_ROLLOUT=1` with a **deterministic in-order producer mode**: queue
-  pre-filled in dataset order, no overlap (producer waits for consumption).
-- Claim: per-step loss, grad_norm, and IS weights are **bit-identical** to
-  `ASYNC_ROLLOUT=0`. Proves the thread/queue/per-microbatch-broadcast plumbing
-  changes nothing about the math.
+Claim: the thread/queue/per-microbatch-broadcast plumbing changes nothing about
+the math — async trains on the same per-rank microbatch slicing as sync, with
+per-sample teacher log-probs, reverse-KL and IS weighting applied identically.
+
+- **Result (verified during the campaign)**: batch-0 produced rollout hashes
+  and step-1 loss/grad_norm/IS metrics were exactly identical across sync and
+  async runs; per-microbatch consumed-stream hashes matched the produced
+  stream under the column-major map `rank r, microbatch k ← sample r·L + k`;
+  steps 2+ loss/grad_norm curves track each other (same numerics drift as
+  sync-vs-sync).
 - **Determinism reality (verified empirically)**: vLLM 0.23's per-request
   `seed` is *not* cross-restart deterministic (two fresh engines, same
-  prompts, same seed → different completions). With `GEN_TEMPERATURE=0`
-  (greedy) + `TRAINER_SEED` (fixed shuffle), batch 0 and step-1 metrics are
-  exactly identical across runs; from batch 1 onward training-kernel numerics
-  (flash-attn/TE atomics, sub-1e-4) accumulate and flip greedy argmax ties —
-  so cross-run equality beyond step 1 is statistical, not bit-exact.
-- **Therefore Layer 1 is verified in three parts** (via
-  `DEBUG_ROLLOUT_HASH=1`):
-  1. *Cross-run exact*: batch-0 produced hashes + step-1 loss/grad_norm/IS
-     metrics identical (sync vs async in-order).
-  2. *Within-run exact*: `CONSUME_HASH` (step, rank, microbatch) matches the
-     produced `ROLLOUT_HASH` (batch, idx) under the column-major map
-     `rank r, microbatch k ← sample r·L + k` — every rank trains exactly the
-     samples the sync slicing gives it, verified on every microbatch of the
-     run (no cross-run comparison needed).
-  3. *Statistical*: steps 2+ loss/grad_norm curves track each other (same
-     numerics drift as sync-vs-sync).
+  prompts, same seed → different completions). The campaign verified Layer 1
+  with `GEN_TEMPERATURE=0` (greedy) + `TRAINER_SEED` (fixed shuffle), where
+  batch 0 and step-1 metrics are exactly identical across runs; from batch 1
+  onward training-kernel numerics (flash-attn/TE atomics, sub-1e-4) accumulate
+  and flip greedy argmax ties — so cross-run equality beyond step 1 is
+  statistical, not bit-exact.
+- The verification machinery (deterministic in-order producer, rollout
+  record/replay, hash stamping) was removed from the repo after the campaign
+  concluded; the async path is the streaming producer only.
 
 ### Layer 2 — matched-step A/B
 

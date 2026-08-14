@@ -13,15 +13,12 @@ Orchestrates:
 
 With ASYNC_ROLLOUT=1 the rollout moves to a rank-0 producer thread feeding a
 bounded queue; the main path consumes one microbatch (world_size samples) at
-a time. ASYNC_IN_ORDER=1 keeps the deterministic batch-in-order producer
-(Layer 1 plumbing-equivalence mode). See
-docs/megatron_trainer/async_rollouts.md.
+a time. See docs/megatron_trainer/async_rollouts.md.
 
 Launch: torchrun --nproc_per_node=N -m megatron_trainer.trainer
 """
 
 import concurrent.futures
-import hashlib
 import os
 import queue
 import sys
@@ -43,10 +40,8 @@ import wandb
 from megatron_trainer.collator import SDFTCollator
 from megatron_trainer.chunked_head import make_kl_processor
 from megatron_trainer.config import (
-    ASYNC_IN_ORDER,
     ASYNC_ROLLOUT,
     BATCH_SIZE,
-    DEBUG_ROLLOUT_HASH,
     EMA_ALPHA,
     ENV_TYPE,
     GEN_MAX_NEW_TOKENS,
@@ -185,27 +180,6 @@ def _aggregate_pass_rate(metas: list[dict]) -> float | None:
     return sum(vals) / len(vals)
 
 
-def _log_rollout_hash(batch_id: int, idx: int, env) -> None:
-    if not DEBUG_ROLLOUT_HASH:
-        return
-    h = hashlib.sha256(
-        (env.prompt_text + "\x00" + (env.completion_text or "")).encode("utf-8")
-    ).hexdigest()[:12]
-    logger.info(
-        f"ROLLOUT_HASH batch={batch_id} idx={idx} hash={h} "
-        f"plen={len(env.prompt_text or '')} clen={len(env.completion_text or '')}"
-    )
-
-
-def _log_consume_hash(step: int, rank: int, micro: int, item_data: dict) -> None:
-    if not DEBUG_ROLLOUT_HASH:
-        return
-    h = hashlib.sha256(
-        (item_data["prompt_text"] + "\x00" + (item_data["completion_text"] or "")).encode("utf-8")
-    ).hexdigest()[:12]
-    logger.info(f"CONSUME_HASH step={step} rank={rank} micro={micro} hash={h}")
-
-
 def produce(items: list[dict], success_cache: dict[str, str], policy_version: int, tokenizer):
     """Rank-0 rollout for one batch of items.
 
@@ -217,9 +191,6 @@ def produce(items: list[dict], success_cache: dict[str, str], policy_version: in
 
     with ThreadPoolExecutor(max_workers=min(32, len(envs))) as executor:
         list(executor.map(lambda e: e.run(), envs))
-
-    for i, env in enumerate(envs):
-        _log_rollout_hash(policy_version, i, env)
 
     if ENV_TYPE == "api_adapter":
         # Cache successful adapter responses
@@ -249,9 +220,8 @@ def produce(items: list[dict], success_cache: dict[str, str], policy_version: in
     return rollout_data, metas, batch_meta
 
 
-def _push_sample(rollout_queue: queue.Queue, env, policy_version: int, success_cache: dict[str, str], sample_idx: int = 0) -> None:
+def _push_sample(rollout_queue: queue.Queue, env, policy_version: int, success_cache: dict[str, str]) -> None:
     """Post-process one completed env and push its payload (with _meta) to the queue."""
-    _log_rollout_hash(policy_version, sample_idx, env)
     if ENV_TYPE == "api_adapter":
         if env.episode_result and env.completion_text:
             parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
@@ -269,48 +239,6 @@ def _push_sample(rollout_queue: queue.Queue, env, policy_version: int, success_c
     rollout_queue.put(payload)
 
 
-def _produce_in_order(
-    rollout_queue: queue.Queue,
-    data_iter,
-    success_cache: dict[str, str],
-    step_done_q: queue.Queue,
-    gen_times: deque,
-    tokenizer,
-    world_size: int,
-) -> None:
-    """In-order producer (ASYNC_IN_ORDER=1): full GRAD_ACCUM_STEPS batches in
-    dataset order, column-major pushes, no overlap with training — the
-    plumbing equivalent of the sync path (Layer 1 mode).
-
-    step_done_q is a 1:1 signal queue: the main path puts one token per
-    completed optimizer step; the producer consumes one per batch, so the
-    next batch's generation never starts before the previous step finished
-    (a persistent Event would accumulate stale sets and allow overlap).
-    Ends by pushing _ROLLOUT_SENTINEL (no Event-based done flag).
-    """
-    local_accum = GRAD_ACCUM_STEPS // world_size
-    sentinel = object()
-    while True:
-        items = []
-        for _ in range(GRAD_ACCUM_STEPS):
-            item = next(data_iter, sentinel)
-            if item is sentinel:
-                break
-            items.append(item)
-        if len(items) < GRAD_ACCUM_STEPS:
-            rollout_queue.put(_ROLLOUT_SENTINEL)
-            return
-        t0 = time.monotonic()
-        rollout_data, metas, _ = produce(items, success_cache, _OPTIMIZER_STEP, tokenizer)
-        gen_times.append(time.monotonic() - t0)
-        for k in range(local_accum):
-            for r in range(world_size):
-                s = r * local_accum + k
-                rollout_data[s]["_meta"] = metas[s]
-                rollout_queue.put(rollout_data[s])
-        step_done_q.get()
-
-
 def _produce_streaming(
     rollout_queue: queue.Queue,
     data_iter,
@@ -319,11 +247,11 @@ def _produce_streaming(
     tokenizer,
     steps_per_epoch: int,
 ) -> None:
-    """Streaming producer (ASYNC_IN_ORDER=0): N_ASYNC envs in flight,
-    per-sample push on completion — completion order, not dataset order
-    (the reordering is the feature). Submits exactly steps_per_epoch *
-    GRAD_ACCUM_STEPS samples (the same count the sync path trains), drains
-    in-flight work, then pushes the end-of-data sentinel."""
+    """Streaming producer: N_ASYNC envs in flight, per-sample push on
+    completion — completion order, not dataset order (the reordering is the
+    feature). Submits exactly steps_per_epoch * GRAD_ACCUM_STEPS samples (the
+    same count the sync path trains), drains in-flight work, then pushes the
+    end-of-data sentinel."""
     executor = ThreadPoolExecutor(max_workers=N_ASYNC)
     window: dict = {}
     sentinel = object()
@@ -345,12 +273,12 @@ def _produce_streaming(
             for fut in done:
                 env, t_start, version = window.pop(fut)
                 fut.result()
-                _push_sample(rollout_queue, env, version, success_cache, submitted - len(window) - 1)
+                _push_sample(rollout_queue, env, version, success_cache)
                 gen_times.append(time.monotonic() - t_start)
     for fut in concurrent.futures.as_completed(window):
         env, t_start, version = window[fut]
         fut.result()
-        _push_sample(rollout_queue, env, version, success_cache, submit_limit)
+        _push_sample(rollout_queue, env, version, success_cache)
         gen_times.append(time.monotonic() - t_start)
     rollout_queue.put(_ROLLOUT_SENTINEL)
 
@@ -787,7 +715,6 @@ def train() -> None:
                 "is_weighting": IS_WEIGHTING,
                 "is_cap": IS_CAP,
                 "async_rollout": ASYNC_ROLLOUT,
-                "async_in_order": ASYNC_IN_ORDER,
                 "n_async": N_ASYNC,
                 "loss": "reverse_kl",
                 "dataset": TRAIN_DATA_PATH,
@@ -827,23 +754,15 @@ def train() -> None:
         data_iter = iter(dataloader) if rank == 0 else None
 
         rollout_queue: queue.Queue | None = None
-        step_done_q: queue.Queue | None = None
         gen_times: deque | None = None
 
         if ASYNC_ROLLOUT and rank == 0:
             threading.excepthook = _crash_hard_on_thread_error
             rollout_queue = queue.Queue(maxsize=N_ASYNC + world_size + 1)
-            step_done_q = queue.Queue(maxsize=1)
             gen_times = deque()
-            if ASYNC_IN_ORDER:
-                target = _produce_in_order
-                args = (rollout_queue, data_iter, success_cache, step_done_q, gen_times, producer_tokenizer, world_size)
-            else:
-                target = _produce_streaming
-                args = (rollout_queue, data_iter, success_cache, gen_times, producer_tokenizer, steps_per_epoch)
             producer_thread = threading.Thread(
-                target=target,
-                args=args,
+                target=_produce_streaming,
+                args=(rollout_queue, data_iter, success_cache, gen_times, producer_tokenizer, steps_per_epoch),
                 name="rollout-producer",
                 daemon=False,
             )
@@ -884,7 +803,6 @@ def train() -> None:
                     if rank == 0:
                         step_metas.append(item_data["_meta"])
                         policy_lags.append(_OPTIMIZER_STEP - item_data["policy_version"])
-                    _log_consume_hash(_OPTIMIZER_STEP, rank, micro, item_data)
                     result = _train_sample(
                         item_data, micro, local_accum_steps, fsdp_model, model,
                         tokenizer, vocab_size, device,
@@ -924,8 +842,6 @@ def train() -> None:
                     t_step_start=t_step_start, t_generation=t_generation,
                     t_producer_wait=t_producer_wait,
                 )
-                if rank == 0 and ASYNC_IN_ORDER:
-                    step_done_q.put(True)
         else:
             for _step in range(steps_per_epoch):
                 t_step_start = time.monotonic()
@@ -960,7 +876,6 @@ def train() -> None:
                 t_loss_bwd_sum: float = 0.0
 
                 for micro_step, item_data in enumerate(my_items):
-                    _log_consume_hash(optimizer_step, rank, micro_step, item_data)
                     result = _train_sample(
                         item_data, micro_step, local_accum_steps, fsdp_model, model,
                         tokenizer, vocab_size, device,
