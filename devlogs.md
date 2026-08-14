@@ -1,5 +1,18 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-14 - Layer 1 verification: determinism findings + replay-based PASS
+
+- **Determinism rabbit hole (important findings, all verified on rh-h100-12)**:
+  - vLLM 0.23 per-request `seed` is **not cross-restart deterministic**: two fresh engines, same prompts, same seed → different completions (in-session repeats DO match). Confirmed with a standalone boot→generate→kill→boot→generate test.
+  - With `GEN_TEMPERATURE=0` (greedy) + `TRAINER_SEED` (fixed shuffle): sync-vs-sync runs match exactly on **batch 0 + step 1**, then drift — training-kernel numerics (flash-attn/TE atomics) accumulate and flip greedy argmax ties from batch 1 on. Cross-run bit-identity beyond step 1 is impossible without `use_deterministic_algorithms` (breaks the TE stack).
+  - Even batch-0 greedy differs sync-vs-async (different arrival dynamics → different chunked-prefill batching → argmax flips). vLLM-internal numerics are not cross-process-structure reproducible.
+- **Layer 1 restructured into a replay-based procedure** (this is now the canonical verification):
+  - `RECORD_ROLLOUT_PATH` dumps every vLLM result keyed by prompt hash; `ROLLOUT_REPLAY_PATH` replays them — both modes train on byte-identical rollout data, isolating the plumbing from vLLM numerics.
+  - `DEBUG_ROLLOUT_HASH` logs `ROLLOUT_HASH` (produced, batch/idx) + `CONSUME_HASH` (consumed, step/rank/micro) on every rank.
+  - Results on 16-sample smoke (G=4, W=2): sync within-run assignment **PASS**, async in-order within-run assignment **PASS** (column-major `r*L+k` verified on every microbatch), cross-mode produced hash streams **identical**, cross-mode step-1/2 loss/grad_norm **bit-identical**, steps 3-4 match to 3 decimals (kernel-numerics drift, same as sync-vs-sync). **Layer 1 PASS.**
+- Commits: 03f4d3b (greedy + docs), ee05039 (CONSUME_HASH + 3-part Layer 1), 8af1979 (replay mode), c2c94ee (removed accidentally committed bench_forward.py).
+- Streaming smoke (ASYNC_ROLLOUT=1, real temp=1.0, 64 samples) launched — Phase 2 verification in flight.
+
 ## 2026-08-13 - Streaming rollouts: Phases 0-2 implemented, Layer 1 in flight
 
 - Branch `ra/async-rollout` rebased onto v0.1.0. Plan finalized in `plan.md` (5 phases). Commits: 8d1f996 (config plumbing), 40ed0e0 (in-order restructure), 9e60237 (streaming producer).
