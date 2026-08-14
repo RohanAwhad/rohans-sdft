@@ -599,7 +599,14 @@ def _step_tail(
             log_dict["episode/sample"] = table
 
         wandb.log(log_dict, step=optimizer_step)
-        logger.info(f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f} grad_norm={global_grad_norm:.4f}")
+        metrics_str = " ".join(f"{k}={sum(vals) / len(vals):.4f}" for k, vals in sorted(accum_metrics.items()))
+        lag_str = ""
+        if policy_lags:
+            lag_str = f" lag_mean={sum(policy_lags) / len(policy_lags):.1f} lag_max={max(policy_lags)}"
+        logger.info(
+            f"opt_step={optimizer_step} loss={avg_loss:.4f} comp_len={avg_comp_len:.0f} "
+            f"grad_norm={global_grad_norm:.4f}{lag_str} {metrics_str}".rstrip()
+        )
 
     # ---- Sync weights + checkpoint (all ranks — FSDP export/gather
     #      passes are collectives) ----
