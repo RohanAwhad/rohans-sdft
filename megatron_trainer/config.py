@@ -69,6 +69,10 @@ TRAINER_SEED = os.environ.get("TRAINER_SEED")
 TRAINER_SEED = int(TRAINER_SEED) if TRAINER_SEED else None
 VLLM_SEED = os.environ.get("VLLM_SEED")
 VLLM_SEED = int(VLLM_SEED) if VLLM_SEED else None
+
+# Debug: log a hash of every rolled-out (prompt, completion) pair with its
+# batch/step index — lets verification runs diff the exact data stream.
+DEBUG_ROLLOUT_HASH = os.environ.get("DEBUG_ROLLOUT_HASH", "0") == "1"
 MAX_GRAD_NORM = 1.0
 EMA_ALPHA = float(os.environ.get("EMA_ALPHA", "0.05"))
 STUDENT_MAX_PROMPT_LEN = int(os.environ.get("STUDENT_MAX_PROMPT_LEN", "2048"))

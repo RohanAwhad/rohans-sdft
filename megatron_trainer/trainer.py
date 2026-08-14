@@ -21,6 +21,7 @@ Launch: torchrun --nproc_per_node=N -m megatron_trainer.trainer
 """
 
 import concurrent.futures
+import hashlib
 import os
 import queue
 import sys
@@ -45,6 +46,7 @@ from megatron_trainer.config import (
     ASYNC_IN_ORDER,
     ASYNC_ROLLOUT,
     BATCH_SIZE,
+    DEBUG_ROLLOUT_HASH,
     EMA_ALPHA,
     ENV_TYPE,
     GEN_MAX_NEW_TOKENS,
@@ -183,6 +185,18 @@ def _aggregate_pass_rate(metas: list[dict]) -> float | None:
     return sum(vals) / len(vals)
 
 
+def _log_rollout_hash(batch_id: int, idx: int, env) -> None:
+    if not DEBUG_ROLLOUT_HASH:
+        return
+    h = hashlib.sha256(
+        (env.prompt_text + "\x00" + (env.completion_text or "")).encode("utf-8")
+    ).hexdigest()[:12]
+    logger.info(
+        f"ROLLOUT_HASH batch={batch_id} idx={idx} hash={h} "
+        f"plen={len(env.prompt_text or '')} clen={len(env.completion_text or '')}"
+    )
+
+
 def produce(items: list[dict], success_cache: dict[str, str], policy_version: int, tokenizer):
     """Rank-0 rollout for one batch of items.
 
@@ -194,6 +208,9 @@ def produce(items: list[dict], success_cache: dict[str, str], policy_version: in
 
     with ThreadPoolExecutor(max_workers=min(32, len(envs))) as executor:
         list(executor.map(lambda e: e.run(), envs))
+
+    for i, env in enumerate(envs):
+        _log_rollout_hash(policy_version, i, env)
 
     if ENV_TYPE == "api_adapter":
         # Cache successful adapter responses
@@ -223,8 +240,9 @@ def produce(items: list[dict], success_cache: dict[str, str], policy_version: in
     return rollout_data, metas, batch_meta
 
 
-def _push_sample(rollout_queue: queue.Queue, env, policy_version: int, success_cache: dict[str, str]) -> None:
+def _push_sample(rollout_queue: queue.Queue, env, policy_version: int, success_cache: dict[str, str], sample_idx: int = 0) -> None:
     """Post-process one completed env and push its payload (with _meta) to the queue."""
+    _log_rollout_hash(policy_version, sample_idx, env)
     if ENV_TYPE == "api_adapter":
         if env.episode_result and env.completion_text:
             parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
@@ -318,12 +336,12 @@ def _produce_streaming(
             for fut in done:
                 env, t_start, version = window.pop(fut)
                 fut.result()
-                _push_sample(rollout_queue, env, version, success_cache)
+                _push_sample(rollout_queue, env, version, success_cache, submitted - len(window) - 1)
                 gen_times.append(time.monotonic() - t_start)
     for fut in concurrent.futures.as_completed(window):
         env, t_start, version = window[fut]
         fut.result()
-        _push_sample(rollout_queue, env, version, success_cache)
+        _push_sample(rollout_queue, env, version, success_cache, submit_limit)
         gen_times.append(time.monotonic() - t_start)
     rollout_queue.put(_ROLLOUT_SENTINEL)
 

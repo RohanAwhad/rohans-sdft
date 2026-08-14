@@ -42,7 +42,7 @@ echo "NUM_TRAINERS=$NUM_TRAINERS"
 
 # Optional envs: only pass through when set
 OPTIONAL_ENVS=()
-for var in TRAINER_SEED VLLM_SEED; do
+for var in TRAINER_SEED VLLM_SEED DEBUG_ROLLOUT_HASH; do
     if [ -n "${!var:-}" ]; then
         OPTIONAL_ENVS+=("-e" "$var=${!var}")
     fi
