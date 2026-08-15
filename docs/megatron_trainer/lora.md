@@ -172,6 +172,14 @@ are preallocated from it; memory scales linearly — don't oversize).
 - Exported `adapter_model.safetensors` triplicates `lora_A` across
   q/k/v (fused `linear_qkv` → per-projection split) — expected, ~3× attention
   adapter size on disk, don't "fix" it.
+- **MoE fused gate_up (gpt-oss) export layout**: bridge's `save_hf_adapter`
+  writes the fused expert gate_up adapter (`experts.base_layer.lora_A/B`) with
+  `lora_A` carrying the fused output dim (2 × intermediate) and `lora_B` the
+  input (hidden) dim, transposed — vLLM's MoE loader rejects it
+  (`tensor a (2880) vs tensor b (5760)`, gpt-oss-20b). `save_hf_adapter_checkpoint`
+  repairs the pair (swap + transpose) via `_fix_fused_expert_gate_up_adapter_layout`
+  — see issue #22. Detection is shape-based (A's larger last dim), so a future
+  bridge fix passes through untouched.
 - `lora_path` must be an absolute path on the vLLM host.
 - DoRA (`peft_scheme="dora"`) is NOT servable by vLLM — LoRA mode only.
 - Export materializes in float32 by design (bf16 merges give ~1e-3 weight
@@ -194,6 +202,13 @@ are preallocated from it; memory scales linearly — don't oversize).
 4. **Metrics**: sync payload size (16 GB → MBs), per-step sync wall time,
    vLLM rollout downtime per sync (~0 with hot-swap). Adapter swap latency is
    observable via `adapter/swap_latency_ms` in trainer logs.
+5. **MoE gate_up layout gate (gpt-oss)**: `save_hf_adapter_checkpoint` logs
+   per-layer "Fixed fused expert gate_up adapter layout" lines when the
+   bridge's swapped layout is detected and repaired; absence of those lines
+   (or no `experts.base_layer` keys at all) means the export was already
+   PEFT-correct. Value-level parity (exported tensors vs the live bridge
+   adapter's `linear_in`/`linear_out`) was verified once for gpt-oss-20b —
+   see issue #22 PR.
 
 ## References
 
