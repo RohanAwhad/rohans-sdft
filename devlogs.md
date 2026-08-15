@@ -1,5 +1,41 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-15 - Issue #22: gpt-oss MoE LoRA export layout fix (v0.3.0)
+
+- **Repro (node 12, rh-h100-12)**: `TRAIN_MODE=lora` + `MODEL_NAME=unsloth/gpt-oss-20b-BF16`
+  → bootstrap adapter push 500: `The size of tensor a (2880) must match the size of
+  tensor b (5760) at non-singleton dimension 2` (exact issue #22 error). Chain: export
+  OK → vLLM `/v1/load_lora_adapter` 500 → adapter never loads → rollout 404
+  (`The model 'sdft-policy' does not exist`) → producer thread crash.
+- **RCA**: gpt-oss-20b is MoE (32 experts, top-4, intermediate=2880; hidden=2880, 64 q
+  heads / 8 kv heads, head_dim=64). Bridge `save_hf_adapter` writes the expert LoRA
+  with `lora_A` carrying the fused output dim (2×intermediate) and `lora_B` the input
+  (hidden), both transposed — vLLM `_stack_moe_lora_weights` (lora/model_manager.py)
+  expects `lora_A (E×r, hidden)`, `lora_B (2N, E×r)` → `copy_` dim-2 mismatch. Affects
+  BOTH `experts.base_layer` (gate_up, non-square → load crash) and `experts`
+  (down_proj, square → silently swapped values, shape-invisible). Attention q/k/v/o
+  export correctly (q=4096, kv=512 — issue's GQA hypothesis was close but not the bug).
+- **Fix** (`model_utils.py`): `_fix_fused_expert_gate_up_adapter_layout` post-processes
+  the exported `adapter_model.safetensors` after `save_hf_adapter` — for each layer
+  where gate_up shows the swapped layout (shape-based: A's last dim > B's first dim),
+  swap+transpose both the gate_up pair AND the same-layer down_proj pair.
+  `new_A = old_B.T`, `new_B = old_A.T` (expert-block layout preserved by transpose).
+- **Verified on node 12**: after fix, `POST /v1/load_lora_adapter` → `HTTP 200 Success`.
+  Value-level: fixed file `lora_A` == live bridge `linear_in` (max|Δ|≈0), `lora_B` ==
+  `linear_out` (bootstrap zeros) — for both gate_up and down_proj.
+- **Fix value-parity (verify_issue22_fix.py, gpt-oss-20b)**: layer-0 expert0, fixed
+  file vs live adapter: gate_up A vs linear_in max|Δ|=0.00e+00, B vs linear_out
+  0.00e+00; down_proj same (0.00e+00 both) — the swap+transpose is semantically
+  exact, not just shape-valid. Bootstrap semantics preserved (file lora_B zeros).
+- **20-step validation run (node 12, GPUs 3/4/5, GA=16, 400 samples → 25 steps)**:
+  **COMPLETE 25/25 steps, `Training complete.`** (19:00 UTC): 26/26 adapter pushes
+  `Success` (bootstrap + per-step), 0 push failures, 0 vLLM 4xx/5xx, 400 completions
+  served, loss 0.464→0.210, swap_latency_ms≈190-540, wsync≈5s, total ≈200-216s/step
+  (gen-bound). PR #23 (fix/issue-22-gptoss-moe-lora-export → ra/autoresearch-loop).
+- **Env notes**: node 12 lab user occupies ports 8001-8005 (MCP/trl) — use ≥8021.
+  HF cache is lab-owned → download to `/mnt/nvme5n1/rawhad/hf-cache` (rawhad-writable).
+  gpt-oss-20b downloads in ~40s (39G).
+
 ## 2026-08-15 - LoRA training mode implemented + node-12 verification in progress
 
 - **Implementation (issue #11, branch ra/lora-support)**: `TRAIN_MODE=full|lora`

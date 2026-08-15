@@ -343,6 +343,79 @@ def save_hf_checkpoint(model: torch.nn.Module, save_dir: str, tokenizer=None, ra
         logger.info(f"HF checkpoint saved: {save_dir} ({len(weights)} tensors)")
 
 
+def _fix_fused_expert_gate_up_adapter_layout(save_dir: str) -> None:
+    """Repair bridge's fused-expert LoRA export layout in place (gpt-oss MoE).
+
+    Bridge's ``save_hf_adapter`` writes the MoE expert adapters with
+    ``lora_A`` carrying the fused output dim (2 * intermediate for gate_up)
+    and ``lora_B`` carrying the input dim (hidden), both transposed relative
+    to the PEFT on-disk layout. This affects BOTH expert projections:
+    ``experts.base_layer`` (fused gate_up, non-square → vLLM load 500) and
+    ``experts`` (down_proj, square → shapes look fine but values are swapped).
+    vLLM's MoE LoRA loader (``_stack_moe_lora_weights``) expects ``lora_A``
+    ``(num_experts * rank, hidden)`` and ``lora_B``
+    ``(2 * intermediate, num_experts * rank)``; the gate_up mismatch crashes
+    ``POST /v1/load_lora_adapter`` with e.g.
+    ``The size of tensor a (2880) must match the size of tensor b (5760)
+    at non-singleton dimension 2`` (gpt-oss-20b: hidden=2880, intermediate=2880).
+
+    Fix = swap + transpose the pair: ``new_A = old_B.T``, ``new_B = old_A.T``
+    (the expert-block layout is preserved by the transpose). Detection is
+    shape-based on gate_up (the fused out-side is always the larger dim), so
+    already-correct exports (or a future bridge fix) pass through untouched;
+    when gate_up is detected as swapped, the same transform is applied to the
+    square down_proj pair on the same layer (shape-ambiguous there). Rank-0
+    only, after the collective bridge export.
+    """
+    st_path = os.path.join(save_dir, "adapter_model.safetensors")
+    if not os.path.exists(st_path):
+        return
+
+    from safetensors.torch import load_file, save_file
+
+    weights = load_file(st_path)
+    changed = False
+
+    def _swap_pair(a_key: str, b_key: str) -> None:
+        nonlocal changed
+        lora_a, lora_b = weights[a_key], weights[b_key]
+        if lora_a.ndim != 2 or lora_b.ndim != 2:
+            return
+        weights[a_key] = lora_b.transpose(0, 1).contiguous()
+        weights[b_key] = lora_a.transpose(0, 1).contiguous()
+        changed = True
+        logger.info(
+            f"Fixed fused expert adapter layout: {a_key} "
+            f"{tuple(lora_a.shape)}/{tuple(lora_b.shape)} -> "
+            f"{tuple(weights[a_key].shape)}/{tuple(weights[b_key].shape)}"
+        )
+
+    for key in list(weights):
+        if not key.endswith(".experts.base_layer.lora_A.weight"):
+            continue
+        b_key = key.replace("lora_A", "lora_B")
+        if b_key not in weights:
+            continue
+        lora_a, lora_b = weights[key], weights[b_key]
+        if lora_a.ndim != 2 or lora_b.ndim != 2:
+            continue
+        # Buggy layout: A (E*r, 2*intermediate), B (hidden, E*r).
+        # Correct layout: A (E*r, hidden), B (2*intermediate, E*r).
+        # The fused out-side (2*intermediate) is always the larger dim, so
+        # A carrying it signals the swap (model-agnostic, no config needed).
+        if not (lora_a.shape[0] == lora_b.shape[1] and lora_a.shape[1] > lora_b.shape[0]):
+            continue
+        _swap_pair(key, b_key)
+        # Same bug on the square down_proj pair (shapes can't reveal it).
+        down_a = key.replace(".base_layer.lora_A", ".lora_A")
+        down_b = down_a.replace("lora_A", "lora_B")
+        if down_a in weights and down_b in weights:
+            _swap_pair(down_a, down_b)
+    if changed:
+        save_file(weights, st_path)
+        logger.info(f"Re-saved {save_dir}/adapter_model.safetensors with fixed expert layout")
+
+
 def save_hf_adapter_checkpoint(model: torch.nn.Module, save_dir: str, rank: int = 0) -> None:
     """Export LoRA adapter weights as an HF PEFT directory (TRAIN_MODE=lora).
 
@@ -364,6 +437,7 @@ def save_hf_adapter_checkpoint(model: torch.nn.Module, save_dir: str, rank: int 
         show_progress=False,
     )
     if rank == 0:
+        _fix_fused_expert_gate_up_adapter_layout(save_dir)
         logger.info(f"LoRA adapter saved: {save_dir}")
 
 
