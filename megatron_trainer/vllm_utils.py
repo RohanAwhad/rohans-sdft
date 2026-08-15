@@ -6,6 +6,7 @@ vLLM expects HF-format parameter names.
 """
 
 import json
+import os
 import threading
 import time
 
@@ -13,7 +14,17 @@ import requests
 import torch
 from loguru import logger
 
-from megatron_trainer.config import GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE, GEN_TOP_P, MODEL_NAME, VLLM_BASE_URL, VLLM_BASE_URLS, VLLM_SEED
+from megatron_trainer.config import (
+    GEN_MAX_NEW_TOKENS,
+    GEN_TEMPERATURE,
+    GEN_TOP_P,
+    LORA_ADAPTER_NAME,
+    MODEL_NAME,
+    TRAIN_MODE,
+    VLLM_BASE_URL,
+    VLLM_BASE_URLS,
+    VLLM_SEED,
+)
 from megatron_trainer.model_utils import export_hf_weights_iter, get_hf_weight_metadata
 
 
@@ -57,11 +68,15 @@ def vllm_generate(
     under the actual sampling distribution (1:1 aligned with the output
     tokens), or None if the server did not return logprobs. Used as the
     rollout proposal logp for importance sampling.
+
+    In TRAIN_MODE=lora requests select the hot-swapped policy adapter via
+    "model": LORA_ADAPTER_NAME (unknown adapter name → 404, never a silent
+    base fallback).
     """
     resp = requests.post(
         f"{base_url}/v1/completions",
         json={
-            "model": MODEL_NAME,
+            "model": LORA_ADAPTER_NAME if TRAIN_MODE == "lora" else MODEL_NAME,
             "prompt": prompt_text,
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -219,3 +234,61 @@ def sync_weights_to_vllm(
         get_hf_weight_metadata(model)
         for _ in export_hf_weights_iter(model):
             pass
+
+
+# ---------------------------------------------------------------------------
+# LoRA adapter sync (TRAIN_MODE=lora) — hot-swap instead of weight transfer
+# ---------------------------------------------------------------------------
+
+def push_lora_adapter(
+    model: torch.nn.Module,
+    adapter_dir: str,
+    rank: int = 0,
+) -> None:
+    """Export the LoRA adapter and hot-swap it into all vLLM instances.
+
+    Collective export (all ranks participate in the adapter gather — the
+    bridge save_hf_adapter is collective); rank 0 does the HTTP push.
+
+    Push protocol per instance:
+        1. Drain barrier: /pause (mode=keep) — in-flight rollouts finish
+           before the swap. vLLM has no per-request adapter versioning; a
+           request spanning the swap would silently continue with new weights.
+        2. POST /v1/load_lora_adapter {lora_name, lora_path, load_inplace}
+           — same name keeps the preallocated GPU slot; zero new allocation.
+           load-before-remove: a failed load keeps the OLD adapter serving.
+        3. /resume
+
+    NOTE: never use /unload_lora_adapter + load instead of load_inplace —
+    unload is frontend-only and in-flight requests resurrect the old path.
+    """
+    from megatron_trainer.model_utils import save_hf_adapter_checkpoint
+
+    save_hf_adapter_checkpoint(model, adapter_dir, rank=rank)
+    if rank != 0:
+        return
+
+    for url in VLLM_BASE_URLS:
+        t0 = time.monotonic()
+        requests.post(f"{url}/pause?mode=keep", timeout=60).raise_for_status()
+        r = requests.post(
+            f"{url}/v1/load_lora_adapter",
+            json={
+                "lora_name": LORA_ADAPTER_NAME,
+                "lora_path": os.path.abspath(adapter_dir),
+                "load_inplace": True,
+            },
+            timeout=120,
+        )
+        if not r.ok:
+            # Failed load keeps the old adapter serving (load-before-remove);
+            # log the raw body and retry next step. Never crash the loop.
+            logger.error(
+                f"LoRA push failed to {url} ({r.status_code}): {r.text} — "
+                f"old adapter keeps serving"
+            )
+        else:
+            logger.info(f"LoRA adapter pushed to {url}: {r.text.strip()}")
+        requests.post(f"{url}/resume", timeout=60).raise_for_status()
+        swap_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"adapter/swap_latency_ms={swap_ms:.0f} url={url}")

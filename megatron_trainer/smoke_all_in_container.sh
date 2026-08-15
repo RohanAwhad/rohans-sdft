@@ -88,6 +88,13 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
     -e N_ASYNC="${N_ASYNC:-$((2 * (NUM_TRAINERS * 2)))}" \
+    -e TRAIN_MODE="${TRAIN_MODE:-full}" \
+    -e LORA_DIM="${LORA_DIM:-32}" \
+    -e LORA_ALPHA="${LORA_ALPHA:-32}" \
+    -e LORA_DROPOUT="${LORA_DROPOUT:-0.0}" \
+    -e LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-linear_qkv,linear_proj,linear_fc1,linear_fc2}" \
+    -e LORA_ADAPTER_NAME="${LORA_ADAPTER_NAME:-sdft-policy}" \
+    -e VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "${OPTIONAL_ENVS[@]}" \
     -v "$WORKSPACE:/workspace:z" \
@@ -108,6 +115,10 @@ LOGPROB_GPU=\$((NUM_GPUS - 1))
 TRAINER_LAST=\$((NUM_GPUS - 2))
 
 echo \"=== Starting vLLM on internal GPU 0 ===\"
+LORA_ARGS=""
+if [ \"\$TRAIN_MODE\" = \"lora\" ]; then
+    LORA_ARGS=\"--enable-lora --max-lora-rank \$LORA_DIM --max-loras 1 --max-cpu-loras 2\"
+fi
 CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py \\
     --model \"\$MODEL_NAME\" \\
     --port \"\$VLLM_PORT\" \\
@@ -117,6 +128,7 @@ CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py 
     --weight-transfer-config '{\"backend\":\"nccl\"}' \\
     --enforce-eager \\
     --no-enable-log-requests \\
+    \$LORA_ARGS \\
     &>/workspace/logs/vllm_smoke.log &
 VLLM_PID=\$!
 

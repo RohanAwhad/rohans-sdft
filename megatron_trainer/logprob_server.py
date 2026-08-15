@@ -43,8 +43,13 @@ from megatron_trainer.config import (
     LOGPROB_PORT,
     LOGPROB_TCP_PORT,
     TEACHER_MODEL_PATH,
+    TRAIN_MODE,
 )
-from megatron_trainer.model_utils import init_distributed_standalone, load_model
+from megatron_trainer.model_utils import (
+    apply_lora_transform,
+    init_distributed_standalone,
+    load_model,
+)
 
 DEVICE = torch.device("cuda:0")
 
@@ -138,6 +143,11 @@ def main() -> None:
     else:
         model = load_model(HF_MODEL_PATH)
         logger.info("Teacher = student model loaded via Megatron bridge.")
+        if TRAIN_MODE == "lora":
+            # Same frozen base + identical LoRA transform as the trainer —
+            # adapter params appear in the same order in model.parameters()
+            # (required for the trainable-only NCCL sync).
+            model = apply_lora_transform(model)
     model.eval()
     logger.info("Model loaded and set to eval mode.")
 
@@ -295,6 +305,10 @@ def main() -> None:
 
         with model_lock:
             for param in model.parameters():
+                if not param.requires_grad:
+                    # Frozen base (LoRA mode): only adapter params are synced
+                    # (trainer side applies the same requires_grad filter).
+                    continue
                 incoming = torch.empty_like(param.data)
                 logprob_nccl_comm.broadcast(incoming, src=0)
                 param.data.lerp_(incoming, EMA_ALPHA)
