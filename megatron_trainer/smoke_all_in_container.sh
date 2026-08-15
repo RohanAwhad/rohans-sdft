@@ -48,6 +48,14 @@ for var in TRAINER_SEED VLLM_SEED; do
     fi
 done
 
+# SELinux enforcing nodes need :z (relabel) on bind mounts; permissive/disabled
+# nodes reject the relabel (rootless podman lsetxattr EPERM).
+if [ "$(getenforce 2>/dev/null || echo Enforcing)" = "Enforcing" ]; then
+    LABEL_SUFFIX=":z"
+else
+    LABEL_SUFFIX=""
+fi
+
 cleanup() {
     podman stop sdft-smoke 2>/dev/null || true
     podman rm sdft-smoke 2>/dev/null || true
@@ -97,8 +105,8 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "${OPTIONAL_ENVS[@]}" \
-    -v "$WORKSPACE:/workspace:z" \
-    -v "$HF_CACHE:/root/.cache/huggingface:z" \
+    -v "$WORKSPACE:/workspace${LABEL_SUFFIX}" \
+    -v "$HF_CACHE:/root/.cache/huggingface${LABEL_SUFFIX}" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
     -v "$HOME/.netrc:/root/.netrc:ro" \
