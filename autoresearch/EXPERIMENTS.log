@@ -530,8 +530,17 @@ directly.
    harness-comparability flag worth investigating (different eval dataset
    version, generation settings, or judge variance vs. whatever measured
    0.7415 originally) — noted, not yet root-caused, doesn't block E047.
-6. **Analysis:** _pending — awaiting attempt 4's stability confirmation and
-   first real (non-step-0) checkpoint eval._
+   **Attempt 4 succeeded**: `opt_step=1` completed cleanly —
+   `total=595.0s` (just under the 600s timeout that killed attempts 2/3),
+   `producer_wait=567.4s`, checkpoint saved+pushed, process continued
+   into step 2's generation without crashing. First-ever stable real
+   (non-smoke) GRPO optimizer step for this campaign. Step 1's group was
+   degenerate (`grpo/frac_reward_zero_std=1.0`, `loss=0.0`,
+   `grad_norm=0.0`) — expected occasionally at G=8/pass-rate~0.65-0.74,
+   not itself concerning; watching subsequent steps. Other metrics sane:
+   `grpo/entropy=0.7831`, `grpo/clip_frac=0.0082`, `is/ratio_mean=0.9995`.
+6. **Analysis:** _in progress — monitoring steps 2+ for sustained
+   stability before calling attempt 4 the confirmed working config._
 7. **Conclusion:** _pending._
 8. **New questions:** Why does step_0 (merged, untrained) score 0.6553 vs
    the 0.7415 baseline under the same `poll_eval.sh`/`eval_with_retrieval.py`
