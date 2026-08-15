@@ -558,9 +558,10 @@ def _step_tail(
     if TRAIN_MODE == "lora":
         # Adapter hot-swap into vLLM (drain barrier + load_inplace) +
         # adapter-only EMA sync to the logprob server (frozen base both sides).
-        sync_weights_to_logprob_server(
-            model, logprob_comm, rank=rank, trainable_only=True
-        )
+        if not TEACHER_MODEL_PATH:
+            sync_weights_to_logprob_server(
+                model, logprob_comm, rank=rank, trainable_only=True
+            )
         adapter_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
         push_lora_adapter(model, adapter_dir, rank=rank)
     else:
