@@ -37,7 +37,10 @@ def main() -> None:
     parser.add_argument("--adapter-dir", required=True, help="HF PEFT adapter dir (adapter_config.json + adapter_model.safetensors)")
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--max-tokens", type=int, default=96)
-    parser.add_argument("--min-agreement", type=float, default=1.0)
+    # Export materializes adapters in float32 (bf16 merge gives ~1e-3 weight
+    # error) — top-k agreement at near-ties flips with fp32-vs-bf16 precision.
+    # 0.95 leaves headroom while a wrong q/k/v split drops agreement to ~30%.
+    parser.add_argument("--min-agreement", type=float, default=0.95)
     args = parser.parse_args()
 
     from megatron_trainer.config import HF_MODEL_PATH
