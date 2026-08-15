@@ -85,7 +85,9 @@ def vllm_generate(
             "skip_special_tokens": False,
             **({"seed": VLLM_SEED} if VLLM_SEED is not None else {}),
         },
-        timeout=180,
+        # 2048-token completions at ~20 tok/s (slow processed_logprobs path)
+        # run ~100s; 180s read timeout killed runs on tail-heavy prompts.
+        timeout=600,
     )
     if not resp.ok:
         logger.error(f"vLLM completions error ({resp.status_code}): {resp.text}")
