@@ -270,6 +270,7 @@ def sync_adapter_grads(model: torch.nn.Module) -> None:
         return
     flat = torch.cat([g.flatten() for g in grads])
     dist.all_reduce(flat)
+    flat.div_(dist.get_world_size())
     offset = 0
     for g in grads:
         n = g.numel()
