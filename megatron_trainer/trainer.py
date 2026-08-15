@@ -613,7 +613,7 @@ def _crash_hard_on_thread_error(args: threading.ExceptHookArgs) -> None:
 
 
 def train() -> None:
-    log_dir = os.environ.get("LOG_DIR", ".")
+    log_dir = os.environ.get("LOG_DIR", "logs")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
