@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 data/analyze_research/
 .venv
+external_libs
