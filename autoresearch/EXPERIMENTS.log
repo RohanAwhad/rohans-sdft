@@ -343,3 +343,31 @@
 6. **Analysis:** Self-normalization WORKS for stability -- only 1.8pp drop from peak to ep10 (vs E040's 2.9pp, E041's 3.2pp). But peak is lower (0.7056 vs E040's 0.7217, E036's 0.7235). The normalization smooths gradients but also reduces the effective signal strength. E042 is the most stable per-token IS variant but doesn't break the plateau.
 7. **Conclusion:** WEAKLY SUPPORTED (stability confirmed) but REFUTED (peak <= 0.73). Self-normalized IS prevents collapse but at the cost of peak accuracy. The per-token IS approach (raw, lower cap, self-normalized) has been thoroughly tested -- none break the 0.73 plateau. REVERT to per-sequence IS.
 8. **New questions:** All IS loss-function variants (per-sequence, per-token raw, per-token lower cap, per-token self-normalized) plateau at 0.70-0.73. Is the problem NOT in the IS aggregation but in the IS mechanism itself? Should we test IS on/off at the locked config? (Requires GOAL.md amendment since IS_WEIGHTING=1 is locked.) Or explore other loss functions (JSD, length normalization)?
+
+
+---
+
+## #E043 [PLANNED]
+
+1. **Motivation:** All IS variants exhausted (E040-E042). SFT anchor refuted (E038-E039). The plateau is invariant to gradient weighting. JSD changes WHAT the loss optimizes (divergence geometry) rather than HOW gradients are weighted. Reverse-KL is mode-seeking (devlogs Run 9); JSD is mass-covering and bounded.
+2. **Hypothesis (M7):** The reverse-KL mode-seeking property causes the 0.73 plateau. JSD (symmetric, mass-covering, bounded) reduces mode-seeking and breaks through.
+3. **Prediction:** Peak > 0.74 by epoch 10. signal_mean trends toward 0 (from -0.8/-1.0 toward -0.3). Less late-epoch oscillation. Falsified if: peak <= 0.73 (divergence geometry is not the bottleneck) OR signal_mean stays below -0.6 (mode-seeking persists).
+4. **Design:** DIVERGENCE=jsd, per-sequence IS (revert IS_PER_TOKEN=0, IS_SELF_NORMALIZED=0), IS_CAP=5.0, LR=2e-5, cosine, online_feedback, 120b teacher, temp=1.2, 10ep k400. Parity test required before run.
+5. **Results:** (pending)
+6. **Analysis:** (pending)
+7. **Conclusion:** (pending)
+8. **New questions:** (pending)
+
+
+---
+
+## #E043 [KILLED]
+
+1. **Motivation:** All IS variants exhausted. JSD changes the divergence geometry (mass-covering vs mode-seeking) rather than gradient weighting. Reverse-KL is mode-seeking (devlogs Run 9); JSD is symmetric, bounded, mass-covering.
+2. **Hypothesis (M7):** The reverse-KL mode-seeking property causes the 0.73 plateau. JSD reduces mode-seeking and breaks through.
+3. **Prediction:** Peak > 0.74 by epoch 10. signal_mean trends toward 0 (from -0.8/-1.0 toward -0.3). Falsified if: peak <= 0.73 OR signal_mean stays below -0.6.
+4. **Design:** DIVERGENCE=jsd, per-sequence IS, IS_CAP=5.0, LR=2e-5, cosine, online_feedback, 120b teacher, temp=1.2, 10ep k400. Parity-tested backward (2.7e-7 relative error).
+5. **Results (partial, killed at ep6):** ep1=0.5458, ep2=0.6535, ep3=0.6786, ep4=0.7110, ep5=0.7092. signal_mean: ~-0.9 at steps 1-9, trending to ~-0.8 by steps 35-59 (slight improvement but not reaching -0.3 target). Loss stable at ~0.15 (bounded JSD).
+6. **Analysis:** JSD trajectory comparable to reverse-KL (E036: 0.6338->0.6768->0.7092->0.7235->0.6768). At ep5, JSD (0.7092) is between E036 ep4 (0.7235) and ep5 (0.6768). signal_mean slightly better than reverse-KL (~-0.8 vs ~-0.9) but not dramatically different. Killed before epoch 10 to shift focus to async rollout long runs.
+7. **Conclusion:** INCONCLUSIVE (killed early). JSD shows comparable trajectory to reverse-KL at 5 epochs. signal_mean slightly improved but not enough to confirm the mass-covering hypothesis. Would need 10+ epochs to fully evaluate.
+8. **New questions:** Would JSD break through with more epochs? Shift focus to async rollout long runs on promising configs (E036) to test if longer training breaks the plateau.

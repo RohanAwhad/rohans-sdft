@@ -151,7 +151,8 @@ When changing the reflector prompt in `megatron_trainer/reflector.py`, commit th
 | 33 | 2e-5 | const | 2.0 | 120b | 0.7 | **online_fb** | 0.6984 | 0.7092 | 0.6804 | 10ep: peak 0.7253@ep9, zigzag 0.67-0.73, no baseline beat |
 | 34 | 2e-5 | cosine | 2.0 | 120b | 0.7 | enriched | 0.6804 | 0.6589 | 0.6804 | 10ep: peak 0.7289@ep7, zigzag 0.66-0.73, no baseline beat |
 | 35 | 2e-5 | const | **5.0** | 120b | **1.2** | enriched | 0.6194 | 0.6230 | 0.6589 | 10ep: peak 0.7235@ep6-7, collapsed to 0.69 by ep10. Smooth climb but late-epoch overfit |
-| 36 | 2e-5 | **cosine** | **5.0** | 120b | **1.2** | **online_fb** | ? | ? | ? | 10ep. Locked config. Cosine to prevent late collapse |
+| 36 | 2e-5 | **cosine** | **5.0** | 120b | **1.2** | **online_fb** | 0.6338 | 0.6768 | 0.7092 | 10ep: peak 0.7235@ep4, stable at 0.71, no collapse but no breakthrough |
+| **37** | **2e-5** | **cosine** | **2.0** | **120b** | **0.7** | **enriched** | ? | ? | ? | **LARGE DATASET** (5002 ex), SAVE_EVERY=50, 3ep. Run_34 config. |
 
 ## Key Insight: IS Clipping May Be The Plateau Cause
 - Runs WITHOUT IS (run_3, run_4, run_13) beat baseline 0.7415. ALL IS runs plateau at 0.69-0.73.
@@ -180,8 +181,10 @@ When changing the reflector prompt in `megatron_trainer/reflector.py`, commit th
 - **Fallback:** if large dataset runs with enriched don't beat baseline 0.7415, switch to online_feedback
 
 ## Current Status
-- **run_35** done: IS_CAP=5.0+temp=1.2, constant, enriched. Peak 0.7235@ep6-7, collapsed to 0.69. Below 0.74 gate.
-- **run_36** in progress: locked config (cosine+online_fb+IS_CAP=5.0+temp=1.2), 10ep k400. Cosine may prevent late collapse.
+- **run_35** done: IS_CAP=5.0+temp=1.2, constant, enriched. Peak 0.7235@ep6-7, collapsed to 0.69.
+- **run_36** done: locked config (cosine+online_fb+IS_CAP=5.0+temp=1.2). Peak 0.7235@ep4, stable at 0.71. No 0.74 gate met.
+- **No k400 run crossed 0.74.** Going to large dataset with run_34 config (highest peak 0.7289).
+- **run_37** in progress: **LARGE DATASET** (5002 ex, SAVE_EVERY=50, 3 epochs). Config: cosine, enriched, IS=2.0, temp=0.7. ~156 steps/epoch = ~468 total steps. Evals at step_50, step_100, step_150, epoch_1, step_200, ..., epoch_3.
 - Large dataset: combined_dataset_train_sdft.jsonl (5002 examples), SAVE_EVERY=50, TRAIN_DATA_PATH=/workspace/data/analyze_research/combined_dataset_train_sdft.jsonl
 - Next run number: 36
 
