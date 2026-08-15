@@ -13,6 +13,12 @@ import time
 import requests
 import torch
 from loguru import logger
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from megatron_trainer.config import (
     GEN_MAX_NEW_TOKENS,
@@ -23,6 +29,7 @@ from megatron_trainer.config import (
     TRAIN_MODE,
     VLLM_BASE_URL,
     VLLM_BASE_URLS,
+    VLLM_COMPLETION_TIMEOUT,
     VLLM_SEED,
 )
 from megatron_trainer.model_utils import export_hf_weights_iter, get_hf_weight_metadata
@@ -53,6 +60,27 @@ def wait_for_vllm(timeout: int = 300) -> None:
 # Generation
 # ---------------------------------------------------------------------------
 
+def _fallback_empty_completion(retry_state) -> tuple[str, str, list[float] | None]:
+    """Exhausted retries on vLLM timeout: log and return an empty completion.
+
+    The empty text flows through the existing skip path (_train_sample returns
+    None on empty completion → sample skipped, step continues). Never crashes
+    the run on a singular timeout.
+    """
+    exc = retry_state.outcome.exception()
+    logger.error(
+        f"vLLM generation timed out after {retry_state.attempt_number} attempts "
+        f"({exc.__class__.__name__}); skipping sample"
+    )
+    return "", "", None
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(requests.exceptions.Timeout),
+    retry_error_callback=_fallback_empty_completion,
+)
 def vllm_generate(
     prompt_text: str,
     base_url: str = VLLM_BASE_URL,
@@ -72,6 +100,10 @@ def vllm_generate(
     In TRAIN_MODE=lora requests select the hot-swapped policy adapter via
     "model": LORA_ADAPTER_NAME (unknown adapter name → 404, never a silent
     base fallback).
+
+    Timeouts (requests.exceptions.Timeout) are retried up to 3x with
+    exponential backoff; on exhaustion the sample is skipped via an empty
+    completion (""). HTTP error statuses still fail fast (raise_for_status).
     """
     resp = requests.post(
         f"{base_url}/v1/completions",
@@ -87,7 +119,7 @@ def vllm_generate(
         },
         # 2048-token completions at ~20 tok/s (slow processed_logprobs path)
         # run ~100s; 180s read timeout killed runs on tail-heavy prompts.
-        timeout=600,
+        timeout=VLLM_COMPLETION_TIMEOUT,
     )
     if not resp.ok:
         logger.error(f"vLLM completions error ({resp.status_code}): {resp.text}")

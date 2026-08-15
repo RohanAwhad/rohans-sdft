@@ -27,6 +27,7 @@
   4. Both containers share workspace `logs/` → cross-talk in trainer.log/logprob_server.log. Added `LOG_DIR` env (d9bb3ee); use `LOG_DIR=logs/<run>` per run.
 - Smoke run 1 died at step 52/100 (the 180s timeout); pipeline itself fully validated (52 steps of clean hot-swaps, loss 0.85→0.29). Run 2 (lora arm) relaunched with fixes; full parity (2 trainers, 100 steps) queued after.
 - **Grad-sync fix (adversarial review finding 1)**: `sync_adapter_grads` did `all_reduce(SUM)` without `/world_size` — lora grads were 2× the FSDP mean convention at ws=2 (effective LR 2×, inflated grad-norm/clip). Fixed with `flat.div_(world_size)` (model_utils.py:273); docstring now accurate. **Existing parity numbers (lora epoch 0.4374, 88% pass-rate) were measured at the old 2× LR — evidence stands but future lora runs use the true LR.**
+- **vLLM generation timeouts no longer crash the run**: `vllm_generate` retries `requests.exceptions.Timeout` 3× (tenacity, exponential backoff), then returns an empty completion → sample skipped via the existing `_train_sample` None path (trainer.py:317-319). Timeout env-configurable: `VLLM_COMPLETION_TIMEOUT` (default 600; worst case 3×600s before a sample is dropped). HTTP error statuses still fail fast.
 
 ## 2026-08-14 - Phase 3 in progress: Layer 2 runs + eval infra (rh-h100-12)
 

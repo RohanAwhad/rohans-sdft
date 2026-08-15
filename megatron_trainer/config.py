@@ -107,6 +107,10 @@ GEN_MAX_NEW_TOKENS = int(
 )
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "1.0"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "1.0"))
+# Read timeout per vLLM completion request. 2048-token completions at ~20 tok/s
+# (slow processed_logprobs path) run ~100s; 180s killed runs on tail-heavy
+# prompts. Timeouts are retried 3x in vllm_generate, then the sample is skipped.
+VLLM_COMPLETION_TIMEOUT = int(os.environ.get("VLLM_COMPLETION_TIMEOUT", "600"))
 
 # Importance sampling (vLLM is the rollout engine; its proposal distribution
 # can drift from the training policy via weight staleness or sampling params).
