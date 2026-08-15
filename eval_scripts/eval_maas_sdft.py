@@ -108,6 +108,7 @@ def generate_all(model_path, all_prompts, args):
         tensor_parallel_size=tp_size,
         trust_remote_code=True,
         max_model_len=8192,
+        enforce_eager=True,
     )
     tokenizer = llm.get_tokenizer()
     sampling_params = SamplingParams(
@@ -247,6 +248,7 @@ def main():
         tensor_parallel_size=tp_size,
         trust_remote_code=True,
         max_model_len=8192,
+        enforce_eager=True,
     )
     tokenizer = llm.get_tokenizer()
     sampling_params = SamplingParams(

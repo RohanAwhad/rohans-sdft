@@ -208,6 +208,7 @@ def main():
         tensor_parallel_size=args.vllm_tp,
         trust_remote_code=True,
         max_model_len=8192,
+        enforce_eager=True,
         enable_lora=True,
         max_loras=1,
         max_lora_rank=32,
