@@ -509,7 +509,33 @@ directly.
    then-delete-the-42GB-merge for any checkpoint with an
    `adapter_config.json`, base model read from the adapter config itself).
    Validated end-to-end on a smoke-test checkpoint before relying on it.
-5. **Results:** _pending — run launched, awaiting first checkpoint eval._
-6. **Analysis:** _pending._
+5. **Results:** _in progress._ Attempt 3 (`0 5 1`, `N_ASYNC=32` carried over
+   unchanged from the `world_size=2` smoke test) also crashed, identical
+   symptom (NCCL broadcast timeout at exactly 600s). Root cause this time:
+   `_produce_streaming_grpo` caps in-flight groups at
+   `n_groups_async = N_ASYNC // GRPO_GROUPS = 32/8 = 4`, but `world_size=5`
+   needs 5 distinct groups concurrently (1/rank/step) — the 5th rank's group
+   couldn't start generating until one of the first 4 finished, a second
+   sequential generation round landing right on the timeout. Distinct bug
+   from attempt 2's (that was 3 separate vLLM server processes with directly
+   observed throughput collapse; this is single-instance producer pacing).
+   **Attempt 4** (`0 5 1`, `N_ASYNC=40` = `world_size * GRPO_GROUPS` exactly)
+   launched to fix this. Added a startup assertion in `trainer.py` so this
+   config error fails fast at boot instead of ~10 min into training next
+   time. Also: the auto-merge-eval poller fix picked up attempt 3's
+   leftover `step_0` bootstrap checkpoint end-to-end (merge → eval →
+   cleanup all succeeded) — accuracy **0.6553**, notably below the stated
+   0.7415 baseline. Since `step_0` is the untrained bootstrap adapter
+   (LoRA B-matrix inits to zero, so merged ≈ base model), this is a
+   harness-comparability flag worth investigating (different eval dataset
+   version, generation settings, or judge variance vs. whatever measured
+   0.7415 originally) — noted, not yet root-caused, doesn't block E047.
+6. **Analysis:** _pending — awaiting attempt 4's stability confirmation and
+   first real (non-step-0) checkpoint eval._
 7. **Conclusion:** _pending._
-8. **New questions:** _pending._
+8. **New questions:** Why does step_0 (merged, untrained) score 0.6553 vs
+   the 0.7415 baseline under the same `poll_eval.sh`/`eval_with_retrieval.py`
+   harness — different eval set version, generation config, or merge
+   artifact? Needs a direct diff of eval configs before trusting absolute
+   accuracy numbers from this harness path (relative deltas across E047's
+   own checkpoints are less affected either way).
