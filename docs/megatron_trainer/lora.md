@@ -94,8 +94,9 @@ point, not law; our custom loop keeps `LEARNING_RATE` as the knob.
   base_model_name_or_path=HF_MODEL_PATH)`) to `OUTPUT_DIR/step_{N}` →
   `step_{N}/adapter_config.json` + `adapter_model.safetensors`. Same dir
   layout as full mode; the vLLM push consumes these dirs directly.
-- wandb: add `train_mode`, `lora_dim`, `lora_alpha` to run config; log
-  `adapter/swap_latency_ms` and `adapter/push_bytes` per sync.
+- wandb: add `train_mode`, `lora_dim`, `lora_alpha` to run config. Per-sync
+  swap latency / payload size are log-only metrics (`adapter/swap_latency_ms`
+  in trainer logs); not routed to wandb (deliberate — see devlogs).
 
 ## Weight sync — vLLM (`vllm_utils.py`)
 
@@ -190,7 +191,8 @@ are preallocated from it; memory scales linearly — don't oversize).
 3. **Parity run (8B)**: `TRAIN_MODE=full` vs `TRAIN_MODE=lora` on identical
    SDFT data + seeds — loss curves, `pass_rate`, completion lengths.
 4. **Metrics**: sync payload size (16 GB → MBs), per-step sync wall time,
-   vLLM rollout downtime per sync (~0 with hot-swap), adapter swap latency.
+   vLLM rollout downtime per sync (~0 with hot-swap). Adapter swap latency is
+   observable via `adapter/swap_latency_ms` in trainer logs.
 
 ## References
 
