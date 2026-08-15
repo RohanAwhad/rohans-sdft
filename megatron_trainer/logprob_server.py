@@ -42,6 +42,10 @@ from megatron_trainer.config import (
     HF_MODEL_PATH,
     LOGPROB_PORT,
     LOGPROB_TCP_PORT,
+    LORA_ADAPTER_NAME,
+    LORA_ALPHA,
+    LORA_DIM,
+    LORA_TARGET_MODULES,
     TEACHER_MODEL_PATH,
     TRAIN_MODE,
 )
@@ -76,6 +80,10 @@ def main() -> None:
     logger.add(os.path.join(log_dir, "logprob_server.log"), level=log_level)
 
     logger.info("=== Logprob Server (HTTP) Starting ===")
+    logger.info(
+        f"Config: TRAIN_MODE={TRAIN_MODE} LORA_DIM={LORA_DIM} LORA_ALPHA={LORA_ALPHA} "
+        f"LORA_TARGET_MODULES={LORA_TARGET_MODULES} LORA_ADAPTER_NAME={LORA_ADAPTER_NAME}"
+    )
 
     # ---- Standalone torch.distributed for Megatron model loading ----
     # (only needed for the bridge path; the frozen-teacher HF path skips it)

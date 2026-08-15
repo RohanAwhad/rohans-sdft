@@ -51,8 +51,10 @@ from megatron_trainer.config import (
     IS_CAP,
     IS_WEIGHTING,
     LEARNING_RATE,
+    LORA_ADAPTER_NAME,
     LORA_ALPHA,
     LORA_DIM,
+    LORA_TARGET_MODULES,
     LR_SCHEDULER,
     MAX_GRAD_NORM,
     MAX_TOTAL_LEN,
@@ -621,6 +623,10 @@ def train() -> None:
     logger.add(os.path.join(log_dir, "trainer.log"), level=log_level)
 
     logger.info("=== SDFT Megatron Trainer Starting ===")
+    logger.info(
+        f"Config: TRAIN_MODE={TRAIN_MODE} LORA_DIM={LORA_DIM} LORA_ALPHA={LORA_ALPHA} "
+        f"LORA_TARGET_MODULES={LORA_TARGET_MODULES} LORA_ADAPTER_NAME={LORA_ADAPTER_NAME}"
+    )
 
     # ---- Initialize torch.distributed via torchrun ----
     local_rank = init_distributed_trainer()
