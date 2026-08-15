@@ -473,7 +473,11 @@ directly.
    because the smoke test's TIMING breakdown showed generation is ~90% of
    step wall-clock (`total=275.3s`, `producer_wait=249.0s`) while training
    compute is cheap under LoRA (`student=10.7s loss_bwd=11.5s optim=0.3s
-   wsync=3.7s` = 26.2s combined, ~9.5%).
+   wsync=3.7s` = 26.2s combined, ~9.5%). Run/output/wandb name
+   `sdft_gptoss_20b_run_47_grpo_lora` (kept the `sdft_gptoss_20b_run_NN`
+   convention so the existing `auto_eval_poller.sh` glob picks it up
+   without modification; `poll_eval.sh run_47_grpo_lora step_25` etc. to
+   check individual checkpoints).
 5. **Results:** _pending — run launched, awaiting first checkpoint eval._
 6. **Analysis:** _pending._
 7. **Conclusion:** _pending._
