@@ -50,7 +50,9 @@ def test_advantage_and_clip_engage_with_vllm_old_logps():
     logp = _toy_logp(seed=1)
     C = logp.size(0)
     # Old (rollout) logps deliberately far from current policy -> big ratio.
-    rollout_lp = logp.detach() - 1.0  # log_ratio = +1.0 everywhere -> ratio = e ~ 2.718
+    # log_ratio = +2.0 everywhere -> ratio = e^2 ~ 7.39 (comfortably above both
+    # the PG clip band [0.8, 1.28] and the IS clamp cap=3.0).
+    rollout_lp = logp.detach() - 2.0
     valid = torch.ones(C, dtype=torch.bool)
     advantage = 1.0
     group_total_tokens = C
@@ -60,10 +62,10 @@ def test_advantage_and_clip_engage_with_vllm_old_logps():
         advantage=advantage, group_total_tokens=group_total_tokens, gpg_rescale=1.0,
         clip_low=0.2, clip_high=0.28, is_c_max=3.0, old_logps_mode="vllm",
     )
-    assert metrics["grpo/clip_frac"] == 1.0, "expected every token to be clip-engaged at ratio=e"
+    assert metrics["grpo/clip_frac"] == 1.0, "expected every token to be clip-engaged at ratio=e^2"
     assert metrics["is/clip_rate"] > 0.0, "expected the sequence-level TIS clamp to engage too"
-    # ratio=e~2.718 clamped to cap=3.0 -> is_weight should be < e (clamped down from raw ratio)
-    assert metrics["is/ratio_mean"] <= 3.0 + 1e-6
+    # ratio=e^2~7.39 clamped to cap=3.0 -> is_weight must equal the cap exactly
+    assert abs(metrics["is/ratio_mean"] - 3.0) < 1e-5, metrics["is/ratio_mean"]
     loss.backward()
     assert logp.grad is not None and torch.isfinite(logp.grad).all()
     print(f"[PASS] clip/IS engagement: clip_frac={metrics['grpo/clip_frac']} is/ratio_mean={metrics['is/ratio_mean']:.4f}")
