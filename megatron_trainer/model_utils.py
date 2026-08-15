@@ -266,11 +266,11 @@ def sync_adapter_grads(model: torch.nn.Module) -> None:
     Adapter grads are tiny (~14 MB at dim=32) — a single NCCL call.
     """
     grads = [p.grad for p in model.parameters() if p.requires_grad and p.grad is not None]
-    if not grads:
-        return
-    flat = torch.cat([g.flatten() for g in grads])
+    flat = torch.cat([g.flatten() for g in grads]) if grads else torch.empty(0, device="cuda")
     dist.all_reduce(flat)
     flat.div_(dist.get_world_size())
+    if not grads:
+        return
     offset = 0
     for g in grads:
         n = g.numel()
