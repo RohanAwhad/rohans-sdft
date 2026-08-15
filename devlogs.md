@@ -1,5 +1,34 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-15 - LoRA training mode implemented + node-12 verification in progress
+
+- **Implementation (issue #11, branch ra/lora-support)**: `TRAIN_MODE=full|lora`
+  switch per `docs/megatron_trainer/lora.md`. Lora mode: bridge native PEFT
+  (`megatron.bridge.peft.lora.LoRA` via `apply_lora_transform`, base frozen,
+  288 tensors / 73.1M params at dim=32 on qkv+proj+fc1+fc2), **no FSDP**
+  (replicated base/rank, flattened adapter-grad `dist.all_reduce`), optimizer
+  on `requires_grad` params only, per-step adapter hot-swap into vLLM
+  (`POST /v1/load_lora_adapter load_inplace` + pause/resume drain barrier),
+  adapter-only EMA sync to logprob server (same requires_grad filter both
+  sides), adapter checkpoints via `AutoBridge.save_hf_adapter` (HF PEFT
+  format), `--enable-lora --max-lora-rank` + `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`
+  in launch scripts. Commits 6f1f069..17f2349.
+- **API facts (bridge 0.5.0 source-verified in nemo:26.06)**: `LoRA(target_modules, dim, alpha, dropout)` is a dataclass; `lora_cfg(model)` = freeze-all + inject adapters; `params_to_save` = `requires_grad` params (canonical adapter filter); `save_hf_adapter(model, path, peft_config=..., base_model_name_or_path=...)` is collective, writes `adapter_config.json` + `adapter_model.safetensors`; vLLM 0.23 endpoint confirmed at `entrypoints/serve/lora/api_router.py`, body `{lora_name, lora_path, load_inplace}` gated by `VLLM_ALLOW_RUNTIME_LORA_UPDATING` (envs.py:109); drain endpoints are `/pause?mode=keep` + `/resume` (NOT `/pause_generation` — that's a newer name).
+- **Two bugs found by the first smoke**: (1) vLLM 404s on unknown adapter name at the very first rollout wave (no adapter pushed yet) — fixed with a bootstrap push of the zero-init adapter (lora_B=0 == base) at startup, `step_0`; (2) smoke bind mounts hardcoded `:z` — EPERM on rootless podman + permissive SELinux nodes (node 12) — now LABEL_SUFFIX from `getenforce` like train_full.sh.
+- **Node 12 setup**: `~/1_Projects/rohans-sdft` on `ra/lora-support`; Qwen3-8B copied from /mnt/nvme0n1/huggingface_cache/hub → `~/.cache/huggingface/hub` (lab-owned dirs break rootless container writes); train data relayed from rh-h100-01 (400 samples). **Port 8001 taken on this node** (lab MCP) — use 8051/8052.
+- **Smoke (lora, GPUs 3,4,5, GA=4, 100 steps)**: hot-swap `Success: LoRA adapter 'sdft-policy' added successfully.` with `swap_latency_ms=86`; `wsync=0.3s optim=0.0s student=0.3s` per step — LoRA overhead ≈ 0; step wall time generation-bound (gen 26–86s sync path, eager vLLM); IS ratio_mean ≈ 1.0 confirms rollouts from the hot-swapped adapter.
+- **verify_adapter gate (spec step 2)**: HF base+peft adapter logits vs Megatron+LoRA logits — top-20 agreement 0.9727 (2101/2160), mean logit diff 0.0973 → PASS (threshold 0.95; 1.0 was too strict, fp32-export vs bf16 precision flips near-ties; a wrong q/k/v split would drop to ~30%). Script removed after the one-time check (commit 0af7aab; restore via `git show 0af7aab^:megatron_trainer/verify_adapter.py`).
+- **Parity runs in flight**: full arm (GPUs 0,1,2, 1 trainer — parallel window, data identical) vs lora smoke arm (2 trainers) — both GA=4, 100 steps, 1 epoch, TRAINER_SEED/VLLM_SEED=1234 (full arm only; smoke predates seeding).
+- verify_adapter needed `TRAIN_DATA_PATH` set (config.py import side effect) when run standalone — moot now that it's removed (0af7aab), noted for any future restore.
+- **Node-12 parallel-run gotchas (all hit + fixed)**:
+  1. vLLM EngineCore binds `port+1` — two vLLM instances on adjacent ports collide (smoke 8051 → engine on 8052 killed parity's vLLM). Space ports ≥10 apart (train_full.sh already spaces 100 for multi-instance).
+  2. **1-trainer full mode OOMs** (75GB at AdamW step — FSDP can't shard with 1 rank). Full parity must use 2 trainers.
+  3. vLLM completions read timeout 180s killed runs on tail-heavy 2048-token generations (~100s at 20 tok/s) — bumped to 600s (9a05dfe).
+  4. Both containers share workspace `logs/` → cross-talk in trainer.log/logprob_server.log. Added `LOG_DIR` env (d9bb3ee); use `LOG_DIR=logs/<run>` per run.
+- Smoke run 1 died at step 52/100 (the 180s timeout); pipeline itself fully validated (52 steps of clean hot-swaps, loss 0.85→0.29). Run 2 (lora arm) relaunched with fixes; full parity (2 trainers, 100 steps) queued after.
+- **Grad-sync fix (adversarial review finding 1)**: `sync_adapter_grads` did `all_reduce(SUM)` without `/world_size` — lora grads were 2× the FSDP mean convention at ws=2 (effective LR 2×, inflated grad-norm/clip). Fixed with `flat.div_(world_size)` (model_utils.py:273); docstring now accurate. **Existing parity numbers (lora epoch 0.4374, 88% pass-rate) were measured at the old 2× LR — evidence stands but future lora runs use the true LR.**
+- **vLLM generation timeouts no longer crash the run**: `vllm_generate` retries `requests.exceptions.Timeout` 3× (tenacity, exponential backoff), then returns an empty completion → sample skipped via the existing `_train_sample` None path (trainer.py:317-319). Timeout env-configurable: `VLLM_COMPLETION_TIMEOUT` (default 600; worst case 3×600s before a sample is dropped). HTTP error statuses still fail fast.
+
 ## 2026-08-14 - Phase 3 in progress: Layer 2 runs + eval infra (rh-h100-12)
 
 - **Campaign setup** (rh-h100-12, 8×H100, no reservation): repo worktrees

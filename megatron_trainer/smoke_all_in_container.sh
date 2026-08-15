@@ -42,11 +42,19 @@ echo "NUM_TRAINERS=$NUM_TRAINERS"
 
 # Optional envs: only pass through when set
 OPTIONAL_ENVS=()
-for var in TRAINER_SEED VLLM_SEED; do
+for var in TRAINER_SEED VLLM_SEED LOG_DIR; do
     if [ -n "${!var:-}" ]; then
         OPTIONAL_ENVS+=("-e" "$var=${!var}")
     fi
 done
+
+# SELinux enforcing nodes need :z (relabel) on bind mounts; permissive/disabled
+# nodes reject the relabel (rootless podman lsetxattr EPERM).
+if [ "$(getenforce 2>/dev/null || echo Enforcing)" = "Enforcing" ]; then
+    LABEL_SUFFIX=":z"
+else
+    LABEL_SUFFIX=""
+fi
 
 cleanup() {
     podman stop sdft-smoke 2>/dev/null || true
@@ -71,7 +79,7 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e HF_MODEL_PATH="$MODEL_NAME" \
     -e LOGPROB_PORT=8010 \
     -e VLLM_PORT="$VLLM_PORT" \
-    -e OUTPUT_DIR="/workspace/output_smoke" \
+    -e OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output_smoke}" \
     -e NUM_EPOCHS=1 \
     -e GRAD_ACCUM_STEPS=$((NUM_TRAINERS * 2)) \
     -e WANDB_MODE=disabled \
@@ -88,10 +96,17 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e GEN_TEMPERATURE="${GEN_TEMPERATURE:-1.0}" \
     -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
     -e N_ASYNC="${N_ASYNC:-$((2 * (NUM_TRAINERS * 2)))}" \
+    -e TRAIN_MODE="${TRAIN_MODE:-full}" \
+    -e LORA_DIM="${LORA_DIM:-32}" \
+    -e LORA_ALPHA="${LORA_ALPHA:-32}" \
+    -e LORA_DROPOUT="${LORA_DROPOUT:-0.0}" \
+    -e LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-linear_qkv,linear_proj,linear_fc1,linear_fc2}" \
+    -e LORA_ADAPTER_NAME="${LORA_ADAPTER_NAME:-sdft-policy}" \
+    -e VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "${OPTIONAL_ENVS[@]}" \
-    -v "$WORKSPACE:/workspace:z" \
-    -v "$HF_CACHE:/root/.cache/huggingface:z" \
+    -v "$WORKSPACE:/workspace${LABEL_SUFFIX}" \
+    -v "$HF_CACHE:/root/.cache/huggingface${LABEL_SUFFIX}" \
     -v /home/lab/rawhad:/home/lab/rawhad:ro \
     -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
     -v "$HOME/.netrc:/root/.netrc:ro" \
@@ -108,6 +123,10 @@ LOGPROB_GPU=\$((NUM_GPUS - 1))
 TRAINER_LAST=\$((NUM_GPUS - 2))
 
 echo \"=== Starting vLLM on internal GPU 0 ===\"
+LORA_ARGS=""
+if [ \"\$TRAIN_MODE\" = \"lora\" ]; then
+    LORA_ARGS=\"--enable-lora --max-lora-rank \$LORA_DIM --max-loras 1 --max-cpu-loras 2\"
+fi
 CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py \\
     --model \"\$MODEL_NAME\" \\
     --port \"\$VLLM_PORT\" \\
@@ -117,6 +136,7 @@ CUDA_VISIBLE_DEVICES=0 python /workspace/megatron_trainer/start_vllm_patched.py 
     --weight-transfer-config '{\"backend\":\"nccl\"}' \\
     --enforce-eager \\
     --no-enable-log-requests \\
+    \$LORA_ARGS \\
     &>/workspace/logs/vllm_smoke.log &
 VLLM_PID=\$!
 

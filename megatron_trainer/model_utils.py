@@ -5,6 +5,7 @@ Handles:
     - Model loading via AutoBridge
     - Megatron→HF weight format conversion for vLLM sync
     - HF checkpoint export
+    - LoRA adapter application + HF PEFT adapter export (TRAIN_MODE=lora)
 """
 
 import os
@@ -18,6 +19,7 @@ from loguru import logger
 
 _bridge_instance = None
 _hf_weight_meta_cache = None
+_lora_config = None
 
 
 def _get_free_port() -> int:
@@ -164,6 +166,53 @@ def get_bridge():
     return _bridge_instance
 
 
+def apply_lora_transform(model: torch.nn.Module) -> torch.nn.Module:
+    """Apply the Megatron-Bridge LoRA transform to an already-loaded MCore model.
+
+    Freezes the base (requires_grad=False everywhere) and injects trainable
+    adapters on the target modules. The adapter params (requires_grad=True)
+    are the ONLY trainable params — this is the canonical filter used for the
+    optimizer, grad sync, logprob sync, and adapter checkpoints.
+
+    NOTE: called AFTER load_model() and BEFORE any FSDP wrapping. The bridge
+    PEFT stack wraps plain MCore modules; our lora mode deliberately skips
+    FSDP (replicated base per rank, adapter-grad all_reduce) since bridge
+    LoRA + MCore FSDP is unverified upstream.
+    """
+    global _lora_config
+
+    from megatron_trainer.config import (
+        LORA_ALPHA,
+        LORA_DIM,
+        LORA_DROPOUT,
+        LORA_TARGET_MODULES,
+    )
+    from megatron.bridge.peft.lora import LoRA
+
+    _lora_config = LoRA(
+        target_modules=LORA_TARGET_MODULES,
+        dim=LORA_DIM,
+        alpha=LORA_ALPHA,
+        dropout=LORA_DROPOUT,
+    )
+    model = _lora_config(model, training=True)
+    n_trainable = sum(1 for p in model.parameters() if p.requires_grad)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        f"LoRA applied: target_modules={LORA_TARGET_MODULES} dim={LORA_DIM} "
+        f"alpha={LORA_ALPHA} dropout={LORA_DROPOUT} — "
+        f"{n_trainable} trainable tensors, {n_params:,} params"
+    )
+    return model
+
+
+def get_lora_config():
+    """Return the cached LoRA config (only valid in TRAIN_MODE=lora)."""
+    if _lora_config is None:
+        raise RuntimeError("Call apply_lora_transform() first")
+    return _lora_config
+
+
 def export_hf_weights_iter(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield (hf_name, tensor) pairs by converting Megatron weights to HF format.
 
@@ -195,6 +244,38 @@ def gather_raw_params_iter(model: torch.nn.Module) -> Iterator[torch.Tensor]:
             yield param.full_tensor()
         else:
             yield param.data
+
+
+def gather_trainable_params_iter(model: torch.nn.Module) -> Iterator[torch.Tensor]:
+    """Yield unsharded tensors for trainable (adapter) params only.
+
+    LoRA mode logprob sync: both sides hold the same frozen base + identical
+    LoRA transform, so adapter params appear in the same order in
+    model.parameters(). Server side applies the same requires_grad filter.
+    """
+    for param in model.parameters():
+        if param.requires_grad:
+            yield param.data
+
+
+def sync_adapter_grads(model: torch.nn.Module) -> None:
+    """All-reduce flattened adapter grads across trainer ranks (LoRA mode).
+
+    Replaces FSDP finish_grad_sync(): grads accumulate locally across micro
+    steps, then one flat all_reduce averages them before the optimizer step.
+    Adapter grads are tiny (~14 MB at dim=32) — a single NCCL call.
+    """
+    grads = [p.grad for p in model.parameters() if p.requires_grad and p.grad is not None]
+    flat = torch.cat([g.flatten() for g in grads]) if grads else torch.empty(0, device="cuda")
+    dist.all_reduce(flat)
+    flat.div_(dist.get_world_size())
+    if not grads:
+        return
+    offset = 0
+    for g in grads:
+        n = g.numel()
+        g.copy_(flat[offset : offset + n].view_as(g))
+        offset += n
 
 
 def get_hf_weight_metadata(model: torch.nn.Module) -> tuple[list[str], list[str], list[list[int]]]:
@@ -260,6 +341,30 @@ def save_hf_checkpoint(model: torch.nn.Module, save_dir: str, tokenizer=None, ra
                         json.dump(tc, f, indent=2)
 
         logger.info(f"HF checkpoint saved: {save_dir} ({len(weights)} tensors)")
+
+
+def save_hf_adapter_checkpoint(model: torch.nn.Module, save_dir: str, rank: int = 0) -> None:
+    """Export LoRA adapter weights as an HF PEFT directory (TRAIN_MODE=lora).
+
+    Writes adapter_config.json + adapter_model.safetensors — the exact format
+    vLLM's LoRA loader consumes. Collective: all ranks participate in the
+    export (barrier inside save_hf_adapter), only rank 0 writes files.
+    """
+    from megatron_trainer.config import HF_MODEL_PATH
+
+    bridge = get_bridge()
+    lora_cfg = get_lora_config()
+    if rank == 0:
+        os.makedirs(save_dir, exist_ok=True)
+    bridge.save_hf_adapter(
+        model,
+        save_dir,
+        peft_config=lora_cfg,
+        base_model_name_or_path=HF_MODEL_PATH,
+        show_progress=False,
+    )
+    if rank == 0:
+        logger.info(f"LoRA adapter saved: {save_dir}")
 
 
 def cleanup() -> None:

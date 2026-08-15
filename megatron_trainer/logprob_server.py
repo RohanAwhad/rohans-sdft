@@ -42,9 +42,18 @@ from megatron_trainer.config import (
     HF_MODEL_PATH,
     LOGPROB_PORT,
     LOGPROB_TCP_PORT,
+    LORA_ADAPTER_NAME,
+    LORA_ALPHA,
+    LORA_DIM,
+    LORA_TARGET_MODULES,
     TEACHER_MODEL_PATH,
+    TRAIN_MODE,
 )
-from megatron_trainer.model_utils import init_distributed_standalone, load_model
+from megatron_trainer.model_utils import (
+    apply_lora_transform,
+    init_distributed_standalone,
+    load_model,
+)
 
 DEVICE = torch.device("cuda:0")
 
@@ -65,11 +74,16 @@ class NCCLInitRequest(BaseModel):
 
 
 def main() -> None:
-    os.makedirs("logs", exist_ok=True)
+    log_dir = os.environ.get("LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
     log_level = os.environ.get("LOGGING_LEVEL", "DEBUG")
-    logger.add("logs/logprob_server.log", level=log_level)
+    logger.add(os.path.join(log_dir, "logprob_server.log"), level=log_level)
 
     logger.info("=== Logprob Server (HTTP) Starting ===")
+    logger.info(
+        f"Config: TRAIN_MODE={TRAIN_MODE} LORA_DIM={LORA_DIM} LORA_ALPHA={LORA_ALPHA} "
+        f"LORA_TARGET_MODULES={LORA_TARGET_MODULES} LORA_ADAPTER_NAME={LORA_ADAPTER_NAME}"
+    )
 
     # ---- Standalone torch.distributed for Megatron model loading ----
     # (only needed for the bridge path; the frozen-teacher HF path skips it)
@@ -138,6 +152,11 @@ def main() -> None:
     else:
         model = load_model(HF_MODEL_PATH)
         logger.info("Teacher = student model loaded via Megatron bridge.")
+        if TRAIN_MODE == "lora":
+            # Same frozen base + identical LoRA transform as the trainer —
+            # adapter params appear in the same order in model.parameters()
+            # (required for the trainable-only NCCL sync).
+            model = apply_lora_transform(model)
     model.eval()
     logger.info("Model loaded and set to eval mode.")
 
@@ -295,6 +314,10 @@ def main() -> None:
 
         with model_lock:
             for param in model.parameters():
+                if not param.requires_grad:
+                    # Frozen base (LoRA mode): only adapter params are synced
+                    # (trainer side applies the same requires_grad filter).
+                    continue
                 incoming = torch.empty_like(param.data)
                 logprob_nccl_comm.broadcast(incoming, src=0)
                 param.data.lerp_(incoming, EMA_ALPHA)

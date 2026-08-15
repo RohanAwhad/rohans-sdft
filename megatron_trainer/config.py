@@ -39,6 +39,33 @@ GPU_VLLM = int(os.environ.get("GPU_VLLM", "0"))
 GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))
 GPU_LOGPROB_SERVER = int(os.environ.get("GPU_LOGPROB_SERVER", "2"))
 
+# LoRA mode (see docs/megatron_trainer/lora.md). TRAIN_MODE=full keeps the
+# existing full fine-tuning path; TRAIN_MODE=lora trains bridge LoRA adapters
+# on a frozen base and serves them via vLLM hot-swap.
+TRAIN_MODE = os.environ.get("TRAIN_MODE", "full")
+if TRAIN_MODE not in ("full", "lora"):
+    raise ValueError(f"TRAIN_MODE must be 'full' or 'lora', got {TRAIN_MODE!r}")
+LORA_DIM = int(os.environ.get("LORA_DIM", "32"))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.0"))
+LORA_TARGET_MODULES = [
+    m.strip()
+    for m in os.environ.get(
+        "LORA_TARGET_MODULES", "linear_qkv,linear_proj,linear_fc1,linear_fc2"
+    ).split(",")
+    if m.strip()
+]
+LORA_ADAPTER_NAME = os.environ.get("LORA_ADAPTER_NAME", "sdft-policy")
+
+# vLLM LoRA slot ranks (vllm.lora.utils.MaxLoRARanks enum); --max-lora-rank
+# must equal LORA_DIM exactly.
+_VLLM_LORA_RANKS = {1, 8, 16, 32, 64, 128, 256, 320, 512}
+if TRAIN_MODE == "lora" and LORA_DIM not in _VLLM_LORA_RANKS:
+    raise ValueError(
+        f"LORA_DIM must be one of {sorted(_VLLM_LORA_RANKS)} (vLLM max-lora-rank "
+        f"enum), got {LORA_DIM}"
+    )
+
 # Training hyperparams
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-5"))
 # LR schedule: "constant" (fixed LEARNING_RATE) or "cosine" (linear warmup of
@@ -80,6 +107,10 @@ GEN_MAX_NEW_TOKENS = int(
 )
 GEN_TEMPERATURE = float(os.environ.get("GEN_TEMPERATURE", "1.0"))
 GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "1.0"))
+# Read timeout per vLLM completion request. 2048-token completions at ~20 tok/s
+# (slow processed_logprobs path) run ~100s; 180s killed runs on tail-heavy
+# prompts. Timeouts are retried 3x in vllm_generate, then the sample is skipped.
+VLLM_COMPLETION_TIMEOUT = int(os.environ.get("VLLM_COMPLETION_TIMEOUT", "600"))
 
 # Importance sampling (vLLM is the rollout engine; its proposal distribution
 # can drift from the training policy via weight staleness or sampling params).

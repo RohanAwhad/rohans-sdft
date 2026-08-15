@@ -63,7 +63,7 @@ mkdir -p "$WORKSPACE/logs"
 OPTIONAL_ENVS=()
 for var in WANDB_MODE WANDB_BASE_URL WANDB_ENTITY WANDB_API_KEY \
            VERTEXAI_PROJECT REFLECTOR_PROJECT_ID TEACHER_MODEL_PATH \
-           PYTORCH_CUDA_ALLOC_CONF TRAINER_SEED VLLM_SEED; do
+           PYTORCH_CUDA_ALLOC_CONF TRAINER_SEED VLLM_SEED LOG_DIR; do
     if [ -n "${!var:-}" ]; then
         OPTIONAL_ENVS+=("-e" "$var=${!var}")
     fi
@@ -119,6 +119,13 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e IS_CAP="${IS_CAP:-5.0}" \
     -e ASYNC_ROLLOUT="${ASYNC_ROLLOUT:-0}" \
     -e N_ASYNC="${N_ASYNC:-$((2 * ${GRAD_ACCUM_STEPS:-32}))}" \
+    -e TRAIN_MODE="${TRAIN_MODE:-full}" \
+    -e LORA_DIM="${LORA_DIM:-32}" \
+    -e LORA_ALPHA="${LORA_ALPHA:-32}" \
+    -e LORA_DROPOUT="${LORA_DROPOUT:-0.0}" \
+    -e LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-linear_qkv,linear_proj,linear_fc1,linear_fc2}" \
+    -e LORA_ADAPTER_NAME="${LORA_ADAPTER_NAME:-sdft-policy}" \
+    -e VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
     -e STUDENT_THINKING="${STUDENT_THINKING:-0}" \
     -e THINKING_BUDGET="${THINKING_BUDGET:-512}" \
     -e EMA_ALPHA="${EMA_ALPHA:-0.05}" \
@@ -160,6 +167,13 @@ for i in \$(seq 0 \$((NUM_VLLM - 1))); do
     PORT=\${PORTS[\$i]}
     DIST_PORT=\$((\${VLLM_DIST_PORT_BASE:-29500} + i * 100))
     echo \"=== Starting vLLM instance \$i on internal GPU \$i, port \$PORT, dist_port \$DIST_PORT ===\"
+    LORA_ARGS=""
+    if [ \"\$TRAIN_MODE\" = \"lora\" ]; then
+        # Hot-swappable LoRA adapters: slot rank == training rank (memory
+        # preallocated from --max-lora-rank), VLLM_ALLOW_RUNTIME_LORA_UPDATING
+        # enables POST /v1/load_lora_adapter (set via podman -e above).
+        LORA_ARGS=\"--enable-lora --max-lora-rank \$LORA_DIM --max-loras 1 --max-cpu-loras 2\"
+    fi
     CUDA_VISIBLE_DEVICES=\$i python /workspace/megatron_trainer/start_vllm_patched.py \\
         --model \"\$MODEL_NAME\" \\
         --port \"\$PORT\" \\
@@ -170,6 +184,7 @@ for i in \$(seq 0 \$((NUM_VLLM - 1))); do
         --weight-transfer-config '{\"backend\":\"nccl\"}' \\
         --enforce-eager \\
         --no-enable-log-requests \\
+        \$LORA_ARGS \\
         &>/workspace/logs/vllm_\$i.log &
     VLLM_PIDS=\"\$VLLM_PIDS \$!\"
     # Wait for this instance to bind its ports before starting the next

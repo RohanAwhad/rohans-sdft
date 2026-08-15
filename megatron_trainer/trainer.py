@@ -51,6 +51,10 @@ from megatron_trainer.config import (
     IS_CAP,
     IS_WEIGHTING,
     LEARNING_RATE,
+    LORA_ADAPTER_NAME,
+    LORA_ALPHA,
+    LORA_DIM,
+    LORA_TARGET_MODULES,
     LR_SCHEDULER,
     MAX_GRAD_NORM,
     MAX_TOTAL_LEN,
@@ -65,6 +69,7 @@ from megatron_trainer.config import (
     TEACHER_MODEL_PATH,
     THINKING_BUDGET,
     TRAIN_DATA_PATH,
+    TRAIN_MODE,
     TRAINER_SEED,
     VLLM_BASE_URL,
     VLLM_BASE_URLS,
@@ -74,11 +79,14 @@ from megatron_trainer.config import (
 )
 from megatron_trainer.env import ApiAdapterEnv, RagEnv
 from megatron_trainer.model_utils import (
+    apply_lora_transform,
     cleanup,
     init_distributed_trainer,
     load_model,
     register_fsdp_module_mappings,
+    save_hf_adapter_checkpoint,
     save_hf_checkpoint,
+    sync_adapter_grads,
 )
 from megatron_trainer.logprob_client import (
     init_logprob_weight_engine,
@@ -88,6 +96,7 @@ from megatron_trainer.logprob_client import (
 )
 from megatron_trainer.vllm_utils import (
     init_vllm_weight_engine,
+    push_lora_adapter,
     sync_weights_to_vllm,
     wait_for_vllm,
 )
@@ -387,9 +396,11 @@ def _train_sample(
 
     # Reverse-KL loss backward
     t0 = time.monotonic()
-    # no_sync on non-final micro-steps (skip allreduce)
+    # no_sync on non-final micro-steps (skip allreduce). LoRA mode has no FSDP
+    # wrapper (replicated base per rank) — plain accumulation, single
+    # all_reduce at step end.
     is_final = (micro_step == local_accum_steps - 1)
-    ctx = nullcontext() if is_final else fsdp_model.no_sync()
+    ctx = nullcontext() if (is_final or fsdp_model is None) else fsdp_model.no_sync()
     with ctx:
         scaled_loss = loss / local_accum_steps
         scaled_loss.backward()
@@ -474,8 +485,15 @@ def _step_tail(
     global _OPTIMIZER_STEP
 
     t0 = time.monotonic()
-    fsdp_model.finish_grad_sync()
-    grad_norm = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+    if fsdp_model is not None:
+        fsdp_model.finish_grad_sync()
+    else:
+        # LoRA mode: flattened all_reduce over adapter grads replaces FSDP
+        # grad sync (no wrapper exists).
+        sync_adapter_grads(model)
+    grad_norm = clip_grad_norm_(
+        [p for p in model.parameters() if p.requires_grad], MAX_GRAD_NORM
+    )
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
@@ -539,14 +557,27 @@ def _step_tail(
     # ---- Sync weights + checkpoint (all ranks — FSDP export/gather
     #      passes are collectives) ----
     t0 = time.monotonic()
-    if not TEACHER_MODEL_PATH:
-        sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
-    sync_weights_to_vllm(model, device, vllm_group, rank=rank)
+    if TRAIN_MODE == "lora":
+        # Adapter hot-swap into vLLM (drain barrier + load_inplace) +
+        # adapter-only EMA sync to the logprob server (frozen base both sides).
+        if not TEACHER_MODEL_PATH:
+            sync_weights_to_logprob_server(
+                model, logprob_comm, rank=rank, trainable_only=True
+            )
+        adapter_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
+        push_lora_adapter(model, adapter_dir, rank=rank)
+    else:
+        if not TEACHER_MODEL_PATH:
+            sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
+        sync_weights_to_vllm(model, device, vllm_group, rank=rank)
     t_weight_sync = time.monotonic() - t0
 
     if optimizer_step % SAVE_EVERY == 0:
         ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-        save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+        if TRAIN_MODE == "lora":
+            save_hf_adapter_checkpoint(model, ckpt_dir, rank=rank)
+        else:
+            save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
 
     # All ranks wait for rank 0 weight sync before next step
     t0 = time.monotonic()
@@ -584,12 +615,18 @@ def _crash_hard_on_thread_error(args: threading.ExceptHookArgs) -> None:
 
 
 def train() -> None:
+    log_dir = os.environ.get("LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     log_level = os.environ.get("LOGGING_LEVEL", "DEBUG")
-    logger.add("logs/trainer.log", level=log_level)
+    logger.add(os.path.join(log_dir, "trainer.log"), level=log_level)
 
     logger.info("=== SDFT Megatron Trainer Starting ===")
+    logger.info(
+        f"Config: TRAIN_MODE={TRAIN_MODE} LORA_DIM={LORA_DIM} LORA_ALPHA={LORA_ALPHA} "
+        f"LORA_TARGET_MODULES={LORA_TARGET_MODULES} LORA_ADAPTER_NAME={LORA_ADAPTER_NAME}"
+    )
 
     # ---- Initialize torch.distributed via torchrun ----
     local_rank = init_distributed_trainer()
@@ -615,6 +652,10 @@ def train() -> None:
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_PATH)
     producer_tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_PATH)
     model = load_model(HF_MODEL_PATH)
+    if TRAIN_MODE == "lora":
+        # Freeze base + inject adapters (bridge PEFT). MUST happen before any
+        # distributed wrapping — lora mode skips FSDP entirely.
+        model = apply_lora_transform(model)
     model.train()
 
     # Use padded vocab size from model (Megatron pads for TP alignment)
@@ -625,27 +666,41 @@ def train() -> None:
         f"GPU mem after load: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB"
     )
 
-    # ---- MCore FSDP wrapping ----
-    from megatron.core.distributed import (
-        DistributedDataParallelConfig,
-        TorchFullyShardedDataParallel,
-    )
+    # ---- MCore FSDP wrapping (full mode only) ----
+    # LoRA mode: replicated frozen base per rank, no FSDP wrapper (bridge LoRA
+    # + MCore FSDP unverified upstream; adapter grads are tiny so a flat
+    # all_reduce at step end replaces finish_grad_sync). fsdp_model=None
+    # signals lora mode to _train_sample / _step_tail.
+    fsdp_model = None
+    if TRAIN_MODE == "full":
+        from megatron.core.distributed import (
+            DistributedDataParallelConfig,
+            TorchFullyShardedDataParallel,
+        )
 
-    register_fsdp_module_mappings()
-    fsdp_model = TorchFullyShardedDataParallel(
-        unwrapped.config,
-        DistributedDataParallelConfig(use_distributed_optimizer=False),
-        model,
-    )
-    logger.info("MCore FSDP wrapping complete.")
+        register_fsdp_module_mappings()
+        fsdp_model = TorchFullyShardedDataParallel(
+            unwrapped.config,
+            DistributedDataParallelConfig(use_distributed_optimizer=False),
+            model,
+        )
+        logger.info("MCore FSDP wrapping complete.")
+    else:
+        logger.info("LoRA mode: no FSDP wrapping (replicated base + adapter-grad all_reduce).")
     # The Megatron bridge closes stray file descriptors during model load,
     # silently killing the loguru file sink opened at boot (writes fail after
-    # "Loading model"). Re-open it so logs/trainer.log covers the training loop.
-    logger.add("logs/trainer.log", level=log_level)
+    # "Loading model"). Re-open it so the trainer log covers the training loop.
+    logger.add(os.path.join(log_dir, "trainer.log"), level=log_level)
 
-    # ---- Optimizer (FSDP: torch AdamW) ----
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
-    logger.info(f"torch AdamW optimizer ready. LR={LEARNING_RATE}")
+    # ---- Optimizer (FSDP: torch AdamW; LoRA: adapter params only) ----
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(
+        trainable_params, lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01
+    )
+    logger.info(
+        f"torch AdamW optimizer ready. LR={LEARNING_RATE} "
+        f"trainable_params={sum(p.numel() for p in trainable_params):,}"
+    )
 
     # ---- Dataset (all ranks load, only rank 0 iterates) ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
@@ -694,7 +749,10 @@ def train() -> None:
                 "model": MODEL_NAME,
                 "teacher_model": TEACHER_MODEL_PATH,
                 "env_type": ENV_TYPE,
-                "backend": "fsdp",
+                "backend": "fsdp" if TRAIN_MODE == "full" else "lora",
+                "train_mode": TRAIN_MODE,
+                "lora_dim": LORA_DIM,
+                "lora_alpha": LORA_ALPHA,
                 "learning_rate": LEARNING_RATE,
                 "lr_scheduler": LR_SCHEDULER,
                 "warmup_steps": warmup_steps,
@@ -724,9 +782,14 @@ def train() -> None:
 
         logger.info("Waiting for vLLM server...")
         wait_for_vllm()
-        logger.info("Initializing vLLM weight transfer engine...")
-        vllm_group = init_vllm_weight_engine(device)
-        logger.info("vLLM weight engine ready.")
+        if TRAIN_MODE == "lora":
+            # No NCCL weight transfer engine — adapters are hot-swapped via
+            # HTTP (POST /v1/load_lora_adapter).
+            logger.info("LoRA mode: skipping vLLM weight transfer engine init.")
+        else:
+            logger.info("Initializing vLLM weight transfer engine...")
+            vllm_group = init_vllm_weight_engine(device)
+            logger.info("vLLM weight engine ready.")
 
         logger.info("Waiting for logprob server...")
         wait_for_logprob_server()
@@ -739,6 +802,14 @@ def train() -> None:
 
     # Barrier: all ranks wait for rank 0 to finish setup
     dist.barrier()
+
+    if TRAIN_MODE == "lora":
+        # Bootstrap push (collective): the first rollout wave starts before any
+        # step-end adapter push, and vLLM 404s on unknown adapter names (no
+        # silent base fallback). Push the zero-init adapter — lora_B=0 makes it
+        # mathematically equivalent to the base model.
+        adapter_dir = os.path.join(OUTPUT_DIR, "step_0")
+        push_lora_adapter(model, adapter_dir, rank=rank)
 
     # ---- Training loop ----
     global _OPTIMIZER_STEP
@@ -928,11 +999,17 @@ def train() -> None:
             )
         # FSDP export is collective — all ranks save
         ckpt_dir = os.path.join(OUTPUT_DIR, f"epoch_{epoch + 1}")
-        save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+        if TRAIN_MODE == "lora":
+            save_hf_adapter_checkpoint(model, ckpt_dir, rank=rank)
+        else:
+            save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
 
     # ---- Final checkpoint + shutdown ----
     ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-    save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+    if TRAIN_MODE == "lora":
+        save_hf_adapter_checkpoint(model, ckpt_dir, rank=rank)
+    else:
+        save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
     if rank == 0:
         wandb.finish()
 

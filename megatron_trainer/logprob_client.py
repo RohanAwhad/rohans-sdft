@@ -19,7 +19,7 @@ import torch
 from loguru import logger
 
 from megatron_trainer.config import GEN_MAX_NEW_TOKENS, LOGPROB_BASE_URL, LOGPROB_TCP_PORT
-from megatron_trainer.model_utils import gather_raw_params_iter
+from megatron_trainer.model_utils import gather_raw_params_iter, gather_trainable_params_iter
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +200,7 @@ def sync_weights_to_logprob_server(
     model: torch.nn.Module,
     logprob_comm,
     rank: int = 0,
+    trainable_only: bool = False,
 ) -> None:
     """Push trainer weights to logprob server via standalone NCCL.
 
@@ -213,7 +214,12 @@ def sync_weights_to_logprob_server(
     NCCL group. Under DDP this is equivalent to the old rank-0-only behavior.
 
     EMA blending happens on the server side (in the /sync_weights handler).
+
+    TRAIN_MODE=lora (trainable_only=True): broadcasts adapter params only —
+    both sides hold the same frozen base + identical LoRA transform, so
+    requires_grad params match in order; the server applies the same filter.
     """
+    iterator = gather_trainable_params_iter if trainable_only else gather_raw_params_iter
 
     def _trigger_recv():
         requests.post(f"{LOGPROB_BASE_URL}/sync_weights", timeout=300).raise_for_status()
@@ -222,7 +228,7 @@ def sync_weights_to_logprob_server(
         t = threading.Thread(target=_trigger_recv)
         t.start()
 
-    for full in gather_raw_params_iter(model):
+    for full in iterator(model):
         if rank == 0:
             logprob_comm.broadcast(full, src=0)
 
