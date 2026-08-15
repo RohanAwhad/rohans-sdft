@@ -28,9 +28,10 @@
   0.00e+00; down_proj same (0.00e+00 both) — the swap+transpose is semantically
   exact, not just shape-valid. Bootstrap semantics preserved (file lora_B zeros).
 - **20-step validation run (node 12, GPUs 3/4/5, GA=16, 400 samples → 25 steps)**:
-  every step pushes `Success: LoRA adapter 'sdft-policy' added successfully`
-  (swap_latency_ms≈190); no 404s; TIMING shows wsync≈5s, total ≈216s/step
-  (gen-bound). Pending: full 25-step completion + rollout-producer liveness.
+  **COMPLETE 25/25 steps, `Training complete.`** (19:00 UTC): 26/26 adapter pushes
+  `Success` (bootstrap + per-step), 0 push failures, 0 vLLM 4xx/5xx, 400 completions
+  served, loss 0.464→0.210, swap_latency_ms≈190-540, wsync≈5s, total ≈200-216s/step
+  (gen-bound). PR #23 (fix/issue-22-gptoss-moe-lora-export → ra/autoresearch-loop).
 - **Env notes**: node 12 lab user occupies ports 8001-8005 (MCP/trl) — use ≥8021.
   HF cache is lab-owned → download to `/mnt/nvme5n1/rawhad/hf-cache` (rawhad-writable).
   gpt-oss-20b downloads in ~40s (39G).
