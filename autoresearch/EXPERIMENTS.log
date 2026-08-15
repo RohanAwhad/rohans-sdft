@@ -421,3 +421,60 @@ Runs on top of the context-injected dataset (E045's lever) since the context
 is baked into the student's own rollout prompt (`prompt` field), not just
 the teacher hint — confirmed by diffing the plain vs with-context files
 directly.
+
+---
+
+## #E047 [RUNNING]
+
+1. **Motivation:** First real GRPO training run (all prior GRPO work this
+   session was implementation + infra smoke tests, not a science run).
+   Implementation validated: 4 unit tests pass (gradient-identity vs plain
+   PG, clip/IS engagement, degenerate-group math, truncation masking); a
+   real perf bug (LM-head GEMM called per row-chunk instead of once) and a
+   real crash bug (LoRA-mode logprob-server sync not gated on
+   `USE_LOGPROB_SERVER`) were found and fixed via cluster smoke tests before
+   this launch. `TRAIN_MODE` pivoted from `full` to `lora` mid-session: full
+   FT OOM'd at the very first `optimizer.step()` (2-way FSDP shard of a 20B
+   model leaves no room for AdamW state on an 80GB H100 — unrelated to
+   GRPO, would hit SDFT too at this trainer count); LoRA sidesteps this
+   entirely and issue #22 (the MoE adapter export bug that blocked LoRA on
+   gpt-oss in E046) is now fixed (PR #23).
+2. **Hypothesis:** Reward-driven on-policy RL (reflector PASS/FAIL verdict
+   as reward) can push past the ~0.73 ceiling that 25+ reverse-KL
+   loss-geometry variants couldn't reach, because it optimizes the eval
+   criterion (correctness) directly instead of a distribution-matching
+   proxy to a teacher.
+3. **Prediction:** Peak accuracy > 0.7433 (beats best SDFT result, E045) by
+   some checkpoint. Stretch: >= 0.7715 (statistically significant, +3pp
+   McNemar threshold over baseline 0.7415). Health metrics
+   (`grpo/entropy`, `grpo/clip_frac`) stay non-degenerate throughout —
+   collapsing entropy or `clip_frac->0` with rising reward would indicate
+   reward hacking / silent failure, not a real win. Falsified if: peak
+   accuracy <= 0.7433 after a reasonable number of checkpoints, OR entropy
+   collapses while pass rate does not correspondingly improve.
+4. **Design:** `LOSS_TYPE=grpo`, `TRAIN_MODE=lora` (`LORA_DIM=32`,
+   `LORA_ALPHA=32`), `GRPO_KL_COEF=0` (no reference/teacher forward),
+   `GRPO_GROUPS=8`, `GRPO_ADV=mean`, `GRPO_CLIP_LOW/HIGH=0.2/0.28`,
+   `GRPO_OLD_LOGPS=vllm`, `GRPO_IS_C_MAX=3.0`, `GRPO_LR=1e-5` (guess,
+   unvalidated for GRPO+LoRA — literature SDFT-LoRA used 3e-4 on a
+   different model/loss, not directly transferable; full-FT GRPO's
+   literature default 1e-6 is calibrated for full-parameter updates, too
+   conservative for LoRA's smaller effective space), `GRPO_LR_WARMUP_STEPS=15`,
+   `GRPO_GRAD_CLIP=0.2`, `GRPO_MASK_TRUNCATED=1`, `GEN_TEMPERATURE=1.0`,
+   `ASYNC_ROLLOUT=1` (group-atomic streaming producer), context-injected
+   k400 dataset (`subset_k400_subset_with_context.jsonl`, 400 unique
+   prompts). `GRAD_ACCUM_STEPS=32` (4 groups/step = 4 unique prompts/step
+   across 4 trainer ranks, 1 group/rank). `NUM_EPOCHS=15` (one GRPO
+   "epoch" = one pass over unique prompts = 100 steps here, so 15 epochs =
+   1500 optimizer-step budget; will checkpoint-eval and likely stop well
+   before exhausting this). `SAVE_EVERY=25` steps. GPU layout `0 4 3` (3
+   vLLM + 4 trainers + 1 wasted logprob-server GPU = 8 total) — shifted
+   toward vLLM capacity vs the smoke test's 1-vLLM/2-trainer layout,
+   because the smoke test's TIMING breakdown showed generation is ~90% of
+   step wall-clock (`total=275.3s`, `producer_wait=249.0s`) while training
+   compute is cheap under LoRA (`student=10.7s loss_bwd=11.5s optim=0.3s
+   wsync=3.7s` = 26.2s combined, ~9.5%).
+5. **Results:** _pending — run launched, awaiting first checkpoint eval._
+6. **Analysis:** _pending._
+7. **Conclusion:** _pending._
+8. **New questions:** _pending._
