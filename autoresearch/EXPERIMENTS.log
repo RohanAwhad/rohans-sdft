@@ -463,17 +463,22 @@ directly.
    `GRPO_GRAD_CLIP=0.2`, `GRPO_MASK_TRUNCATED=1`, `GEN_TEMPERATURE=1.0`,
    `ASYNC_ROLLOUT=1` (group-atomic streaming producer), context-injected
    k400 dataset (`subset_k400_subset_with_context.jsonl`, 400 unique
-   prompts). `GRAD_ACCUM_STEPS=32` (4 groups/step = 4 unique prompts/step
-   across 4 trainer ranks, 1 group/rank). `NUM_EPOCHS=15` (one GRPO
-   "epoch" = one pass over unique prompts = 100 steps here, so 15 epochs =
-   1500 optimizer-step budget; will checkpoint-eval and likely stop well
-   before exhausting this). `SAVE_EVERY=25` steps. GPU layout `0 4 3` (3
-   vLLM + 4 trainers + 1 wasted logprob-server GPU = 8 total) — shifted
-   toward vLLM capacity vs the smoke test's 1-vLLM/2-trainer layout,
-   because the smoke test's TIMING breakdown showed generation is ~90% of
-   step wall-clock (`total=275.3s`, `producer_wait=249.0s`) while training
-   compute is cheap under LoRA (`student=10.7s loss_bwd=11.5s optim=0.3s
-   wsync=3.7s` = 26.2s combined, ~9.5%). Run/output/wandb name
+   prompts). `GRAD_ACCUM_STEPS=24` (3 groups/step = 3 unique prompts/step
+   across 3 trainer ranks, 1 group/rank). `NUM_EPOCHS=15` (one GRPO
+   "epoch" = one pass over unique prompts = 133 steps here, so 15 epochs =
+   ~2000 optimizer-step budget; will checkpoint-eval and likely stop well
+   before exhausting this). `SAVE_EVERY=25` steps. GPU layout `0 3 3` (3
+   vLLM + 3 trainers + 1 wasted logprob-server GPU = 7 of 8 total,
+   **GPU 7 deliberately left free**) — shifted toward vLLM capacity vs the
+   smoke test's 1-vLLM/2-trainer layout, because the smoke test's TIMING
+   breakdown showed generation is ~90% of step wall-clock (`total=275.3s`,
+   `producer_wait=249.0s`) while training compute is cheap under LoRA
+   (`student=10.7s loss_bwd=11.5s optim=0.3s wsync=3.7s` = 26.2s combined,
+   ~9.5%). First launch attempt used all 8 GPUs (0 4 3) but broke the
+   `auto_eval_poller.sh` convention (hardcoded `CUDA_VISIBLE_DEVICES=7`,
+   matches E046's "GPU layout 0 2 1" pattern of always leaving GPU 7 free)
+   — relaunched at `0 3 3` before any training progress was lost (caught
+   during early boot). Run/output/wandb name
    `sdft_gptoss_20b_run_47_grpo_lora` (kept the `sdft_gptoss_20b_run_NN`
    convention so the existing `auto_eval_poller.sh` glob picks it up
    without modification; `poll_eval.sh run_47_grpo_lora step_25` etc. to
