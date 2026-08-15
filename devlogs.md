@@ -1,5 +1,12 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-15 - GRPO deep research + design spec (branch ra/grpo)
+
+- Deep-researched GRPO and its variants (deepresearch pipeline: 3 breadth agents over papers/frameworks/community + 3 deep dives on advantage/loss mechanics, KL/reference handling, small-G stability). Report: `docs/research/RESEARCH_grpo_variants.md` (18 papers full-text + TRL/verl/OpenRLHF/prime-rl source + community).
+- **Verdict**: no single best variant — evidence converges on a composite: Dr.GRPO mean-only advantage (`r − μ`, no std) + DAPO token-level loss + clip-higher 0.2/0.28 + GPG degenerate-group rescale (+DAPO dynamic sampling as flag) + β=0 KL (knob: 0.001 vs the EMA teacher as anchor, K3⁺⁺ estimator, special-token masking) + sequence-level TIS C_max=3.0 IS correction + G=8, LR 1e-6 constant+warmup, grad clip 0.2, μ=1, mask truncated. z-score advantage is worst-documented for binary rewards; clipping provably inert at μ=1 (TRL #6681).
+- **"log-signal GRPO" does not exist** — verified 0 hits on arXiv/GitHub/TRL/verl/OpenRLHF source; documented as eliminated (closest: GSPO sequence log-ratio averaging).
+- Spec written: `docs/megatron_trainer/grpo.md` — `LOSS_TYPE=grpo` mode (config contract, G-per-prompt rank-local groups, `make_grpo_processor` loss math, K3⁺⁺ KL via existing EMA-teacher server, trainer flow deltas with file:line hooks, invariants, verification plan). Design only, not implemented.
+
 ## 2026-08-14 - Phase 3 in progress: Layer 2 runs + eval infra (rh-h100-12)
 
 - **Campaign setup** (rh-h100-12, 8×H100, no reservation): repo worktrees
