@@ -70,9 +70,10 @@ class NCCLInitRequest(BaseModel):
 
 
 def main() -> None:
-    os.makedirs("logs", exist_ok=True)
+    log_dir = os.environ.get("LOG_DIR", ".")
+    os.makedirs(log_dir, exist_ok=True)
     log_level = os.environ.get("LOGGING_LEVEL", "DEBUG")
-    logger.add("logs/logprob_server.log", level=log_level)
+    logger.add(os.path.join(log_dir, "logprob_server.log"), level=log_level)
 
     logger.info("=== Logprob Server (HTTP) Starting ===")
 

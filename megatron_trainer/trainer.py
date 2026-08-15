@@ -613,10 +613,12 @@ def _crash_hard_on_thread_error(args: threading.ExceptHookArgs) -> None:
 
 
 def train() -> None:
+    log_dir = os.environ.get("LOG_DIR", ".")
+    os.makedirs(log_dir, exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     log_level = os.environ.get("LOGGING_LEVEL", "DEBUG")
-    logger.add("logs/trainer.log", level=log_level)
+    logger.add(os.path.join(log_dir, "trainer.log"), level=log_level)
 
     logger.info("=== SDFT Megatron Trainer Starting ===")
 
@@ -681,8 +683,8 @@ def train() -> None:
         logger.info("LoRA mode: no FSDP wrapping (replicated base + adapter-grad all_reduce).")
     # The Megatron bridge closes stray file descriptors during model load,
     # silently killing the loguru file sink opened at boot (writes fail after
-    # "Loading model"). Re-open it so logs/trainer.log covers the training loop.
-    logger.add("logs/trainer.log", level=log_level)
+    # "Loading model"). Re-open it so the trainer log covers the training loop.
+    logger.add(os.path.join(log_dir, "trainer.log"), level=log_level)
 
     # ---- Optimizer (FSDP: torch AdamW; LoRA: adapter params only) ----
     trainable_params = [p for p in model.parameters() if p.requires_grad]
