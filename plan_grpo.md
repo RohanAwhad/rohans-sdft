@@ -74,13 +74,14 @@ logged, never used in the loss) — no new grading infra needed.
 | Knob | v1 default | Why |
 |---|---|---|
 | `LOSS_TYPE` | `grpo` | retires `sdft` path for this phase |
+| `TRAIN_MODE` | `lora` | full FT's FSDP AdamW state doesn't fit a 20B model on <4 trainer GPUs (see OOM below); LoRA sidesteps it. `LORA_DIM=32`/`LORA_ALPHA=32` (unvalidated for GRPO specifically, carried from SDFT-LoRA defaults) |
 | `GRPO_GROUPS` (G) | `8` | rollouts/prompt; `GRAD_ACCUM_STEPS % (world_size×G) == 0` |
 | `GRPO_ADV` | `mean` | `r_i − mean(group)`, no /σ (binary reward, low-variance amplification risk with zscore) |
 | `GRPO_CLIP_LOW/HIGH` | `0.2` / `0.28` | DAPO clip-higher, active since old logps come from vLLM |
 | `GRPO_OLD_LOGPS` | `vllm` | ratio vs rollout logprobs (clip + IS active) |
 | `GRPO_IS_C_MAX` | `3.0` | sequence-level TIS clamp, reuses `IS_CAP` semantics |
 | `GRPO_KL_COEF` (β) | `0.0` | **no reference forward at all** — drops the 120b teacher from the critical path entirely |
-| `GRPO_LR` / warmup | `1e-6` / 15 steps | constant after warmup; SFT-scale LR is unsafe here |
+| `GRPO_LR` / warmup | `1e-6` (full) / `1e-5` (lora, guess) / 15 steps | constant after warmup; LoRA's smaller effective param space likely tolerates higher LR than full FT, but this is unvalidated for GRPO — E046 used 3e-4 for SDFT-LoRA on a different model, not directly transferable |
 | `GRPO_GRAD_CLIP` | `0.2` | small-batch insurance |
 | `GRPO_MASK_TRUNCATED` | `1` | never punish length-truncated completions |
 | temperature | `1.0` | literature default for GRPO exploration |
@@ -90,12 +91,12 @@ already-designed math): `_sample_meta`'s `pass_value` is computed once per
 rollout today and only logged. Under `LOSS_TYPE=grpo` it becomes the reward
 `r_i` feeding the group advantage — same reflector call, new consumer.
 
-## Implementation plan — STATUS: implemented, smoke test running
+## Implementation plan — STATUS: implemented, LoRA smoke test running
 
-Deviated from the original plan in two ways per direct instruction: **no
-LoRA** support for grpo (`TRAIN_MODE=lora` raises at config time), and
-**async rollout is required, not optional** (`ASYNC_ROLLOUT=1` enforced at
-config time) — group-atomic streaming (below), not the sync `produce()` path.
+Deviated from the original plan in two ways: **async rollout is required,
+not optional** (`ASYNC_ROLLOUT=1` enforced at config time) — group-atomic
+streaming (below), not the sync `produce()` path; and **LoRA is now
+required, not banned** (reversed mid-session, see "TRAIN_MODE pivot" below).
 
 1. ~~Commit/stash node05's outstanding loss-function docs~~ DONE — committed
    as `c65648a` (E045 full 10-epoch trajectory recovered from eval_results
@@ -128,10 +129,37 @@ config time) — group-atomic streaming (below), not the sync `produce()` path.
    (detached mode exactly matches plain PG, max_diff=0.00e+00), clip/IS
    engagement at large ratio, degenerate-group advantage math, truncation
    masking. **All pass.**
-10. Cluster smoke test: **running now** (`grpo_smoke_test_1`, 2 trainers,
-    G=8, GA=16, `subset_k400_subset_with_context.jsonl`, wandb project
-    `sdft-grpo-smoke`). Watching for: no crash, `grpo/*` metrics present and
-    finite, `grpo/frac_reward_zero_std` sane, pass rate moves.
+10. Cluster smoke test — three attempts:
+    - `grpo_smoke_test_1` (`TRAIN_MODE=full`): py-spy showed the trainer
+      genuinely computing but stuck for minutes inside `output_layer()` —
+      found a real perf bug in `make_grpo_processor`: the LM head GEMM was
+      called once **per row-chunk** (32 small (128,H)@(H,V) matmuls) instead
+      of once for the whole completion like `make_kl_processor` does. Fixed
+      (single GEMM, chunk only the fp32 upcast + logsumexp).
+    - `grpo_smoke_test_2` (`TRAIN_MODE=full`, fix applied): forward+backward
+      for all 16 rollouts completed, but crashed in `torch/optim/adam.py`'s
+      `state["exp_avg"] = torch.zeros_like(...)` — i.e. **CUDA OOM on the
+      very first optimizer-state allocation**, not a GRPO-code bug at all.
+      Root cause: 2 trainer GPUs → 2-way FSDP shard of a ~20B model → ~10B
+      params/rank; bf16 params + bf16 grads + bf16 `exp_avg` + bf16
+      `exp_avg_sq` ≈ 80GB, right at the H100's 79.17GB ceiling. Would affect
+      SDFT identically at this trainer count — unrelated to LOSS_TYPE.
+    - **TRAIN_MODE pivot**: rather than just adding more trainer GPUs,
+      switched to `TRAIN_MODE=lora` (per direct instruction, after being
+      pointed at PR #23 which fixes issue #22 — the gpt-oss MoE expert LoRA
+      adapter export layout bug that was E046's original cancellation
+      reason). LoRA only optimizes adapter params, sidestepping the
+      optimizer-state ceiling entirely regardless of trainer count. Pulled
+      PR #23 (`fix/issue-22-gptoss-moe-lora-export`, merged clean, no
+      conflicts — it only touches `model_utils.py`) and removed the
+      `TRAIN_MODE != "full"` config-time assert for grpo. All existing
+      LoRA infra (`_step_tail`'s `sync_adapter_grads`/`push_lora_adapter`
+      branches, `fsdp_model=None` skip-FSDP path, hot-swap vLLM sync) was
+      already LOSS_TYPE-agnostic — zero trainer.py changes needed.
+    - `grpo_smoke_test_3_lora` (`TRAIN_MODE=lora`, `LORA_DIM=32`,
+      `GRPO_LR=1e-5`): **running now**. Watching for: no OOM, no crash,
+      `grpo/*` metrics present and finite, adapter push succeeds
+      (`Success: LoRA adapter ... added successfully`), pass rate moves.
 
 New pieces not in the original numbered plan, needed once async became
 mandatory:
@@ -177,6 +205,16 @@ re-verified as of writing this plan).
   reservation-tracker alias, unavailable over non-interactive ssh) —
   0% util, ~4MiB used, zero compute processes on all 8 GPUs. Node is
   actually free; proceeding on your explicit instruction to run this now.
+- **Full-FT memory ceiling (why we're on LoRA now)**: 2-way FSDP shard of
+  gpt-oss-20b → ~10B params/rank; bf16 params + bf16 grads + bf16 `exp_avg`
+  + bf16 `exp_avg_sq` ≈ 80GB ≈ the H100's 79.17GB budget, before any
+  activation memory. `grpo_smoke_test_2` OOM'd exactly here (first-ever
+  `optimizer.step()` call, allocating `exp_avg`). More trainer GPUs (4+)
+  would also fix this (smaller shard/rank) but LoRA was chosen instead per
+  direct instruction, since it sidesteps the ceiling at any trainer count
+  and issue #22 (the prior LoRA blocker) is now fixed. Full FT + more GPUs
+  remains a fallback if LoRA's rank-32 bottleneck turns out to matter for
+  GRPO quality.
 - **Wasted GPU in v1**: `train_full.sh` always starts a `logprob_server`
   process and allocates it a GPU, even though GRPO with `GRPO_KL_COEF=0`
   never calls it (`USE_LOGPROB_SERVER=False` skips it Python-side). Left

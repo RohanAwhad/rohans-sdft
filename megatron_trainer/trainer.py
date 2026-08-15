@@ -768,7 +768,10 @@ def _step_tail(
     if TRAIN_MODE == "lora":
         # Adapter hot-swap into vLLM (drain barrier + load_inplace) +
         # adapter-only EMA sync to the logprob server (frozen base both sides).
-        if not TEACHER_MODEL_PATH:
+        # USE_LOGPROB_SERVER=False (grpo, GRPO_KL_COEF=0) skips this entirely —
+        # there's no reference/teacher forward pass, so no logprob server was
+        # ever initialized to sync to (matches the TRAIN_MODE=full branch below).
+        if not TEACHER_MODEL_PATH and USE_LOGPROB_SERVER:
             sync_weights_to_logprob_server(
                 model, logprob_comm, rank=rank, trainable_only=True
             )
