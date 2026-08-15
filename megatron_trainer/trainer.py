@@ -795,6 +795,14 @@ def train() -> None:
     # Barrier: all ranks wait for rank 0 to finish setup
     dist.barrier()
 
+    if TRAIN_MODE == "lora":
+        # Bootstrap push (collective): the first rollout wave starts before any
+        # step-end adapter push, and vLLM 404s on unknown adapter names (no
+        # silent base fallback). Push the zero-init adapter — lora_B=0 makes it
+        # mathematically equivalent to the base model.
+        adapter_dir = os.path.join(OUTPUT_DIR, "step_0")
+        push_lora_adapter(model, adapter_dir, rank=rank)
+
     # ---- Training loop ----
     global _OPTIMIZER_STEP
     _OPTIMIZER_STEP = 0
