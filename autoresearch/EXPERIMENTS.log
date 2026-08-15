@@ -539,9 +539,28 @@ directly.
    `grad_norm=0.0`) — expected occasionally at G=8/pass-rate~0.65-0.74,
    not itself concerning; watching subsequent steps. Other metrics sane:
    `grpo/entropy=0.7831`, `grpo/clip_frac=0.0082`, `is/ratio_mean=0.9995`.
-6. **Analysis:** _in progress — monitoring steps 2+ for sustained
-   stability before calling attempt 4 the confirmed working config._
-7. **Conclusion:** _pending._
+6. **Analysis:** 5 consecutive clean steps confirmed (1-5, ~386-595s each,
+   all under the 600s NCCL timeout with comfortable margin on steps 3-5).
+   **Attempt 4's `N_ASYNC=40` fix is confirmed working** — no recurrence
+   of the timeout crash. Two notable early signals:
+   (a) `grpo/frac_reward_zero_std`: 2 of 4 sampled steps fully degenerate
+   (1.0) — a ~50% degenerate rate at n=4, much higher than a uniform-p
+   estimate would predict (e.g. ~5.8% at p=0.7), consistent with the
+   bimodal-difficulty hypothesis from open question #2. Small sample so
+   far; watching wandb trend before deciding whether `GRPO_FILTER_GROUPS`
+   is needed.
+   (b) `opt_step=4` logged `grad_norm=335.41` vs `~0.017-0.018` on the
+   other non-degenerate steps (2, 5) — a large raw-gradient spike, but
+   `GRPO_GRAD_CLIP=0.2` via `clip_grad_norm_` means the *logged* grad_norm
+   is the pre-clip diagnostic value; the actual applied update was clipped
+   to norm 0.2 same as every other step. Not a real instability, just a
+   sign the raw reward-gradient signal can be spiky — clipping is doing
+   its job. No action needed unless clipped updates themselves start
+   looking unstable (e.g. loss/entropy diverging).
+7. **Conclusion:** E047 attempt 4 (`0 5 1`, `N_ASYNC=40`) is the confirmed
+   stable config for real training. Awaiting first real checkpoint
+   (step 40, `SAVE_EVERY=40`, ETA ~40 steps × ~480s avg ≈ 5.3 hours from
+   launch) for the first actual eval-accuracy data point.
 8. **New questions:** Why does step_0 (merged, untrained) score 0.6553 vs
    the 0.7415 baseline under the same `poll_eval.sh`/`eval_with_retrieval.py`
    harness — different eval set version, generation config, or merge
