@@ -855,6 +855,16 @@ def train() -> None:
             f"local_accum_steps ({local_accum_steps} = GRAD_ACCUM_STEPS/world_size) must "
             f"be divisible by GRPO_GROUPS ({GRPO_GROUPS}) — groups are rank-local"
         )
+        if ASYNC_ROLLOUT:
+            n_groups_async = max(1, N_ASYNC // GRPO_GROUPS)
+            assert n_groups_async >= world_size, (
+                f"N_ASYNC ({N_ASYNC}) // GRPO_GROUPS ({GRPO_GROUPS}) = {n_groups_async} "
+                f"in-flight producer groups, but world_size ({world_size}) groups are "
+                f"needed concurrently (1/rank/step) — a rank's group would queue behind "
+                f"another, adding a full extra generation round that risks the NCCL "
+                f"collective timeout. Set N_ASYNC >= world_size * GRPO_GROUPS "
+                f"({world_size * GRPO_GROUPS})."
+            )
 
     logger.info(f"FSDP: rank={rank}/{world_size}, local_rank={local_rank}, "
                 f"local_accum_steps={local_accum_steps}")

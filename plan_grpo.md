@@ -229,6 +229,23 @@ re-verified as of writing this plan).
   Existing retry/backoff (tenacity) stays as-is.
 - **Dirty working tree on node05** — must commit/stash before branching
   (item 1 above).
+- **Producer concurrency window must cover `world_size` groups, not just
+  `N_ASYNC`'s raw value** (found the hard way, 2 crashes): `_produce_streaming_grpo`
+  caps in-flight GROUPS at `n_groups_async = N_ASYNC // GRPO_GROUPS`, and each
+  GRPO step needs exactly `world_size` distinct groups (1/rank). If
+  `n_groups_async < world_size`, at least one rank's group can't even start
+  generating until an earlier group frees a producer slot — a second
+  sequential ~250-400s generation round that lands right on the 600s NCCL
+  collective timeout (`_pull_microbatch`'s broadcast) and hard-crashes the
+  run. `grpo_smoke_test_4_lora` used `N_ASYNC=32` at `world_size=2`
+  (`n_groups_async=4 ≥ 2`, safe) — carrying that same absolute `N_ASYNC=32`
+  forward to `world_size=5` (`n_groups_async=4 < 5`) is what broke E047's
+  attempt 3. **Rule: `N_ASYNC ≥ world_size × GRPO_GROUPS` whenever scaling
+  trainer count**, not just "whatever worked in the smoke test." (Separately:
+  E047 attempt 2's crash, with the *same* symptom, was traced to 3 concurrent
+  vLLM server *processes* — directly observed throughput collapse to
+  ~1.2 tok/s — a different, vLLM-server-level issue avoided by keeping a
+  single vLLM instance. Two distinct bugs, same downstream symptom.)
 
 ## Open questions carried into this phase
 
