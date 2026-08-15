@@ -200,7 +200,8 @@ def main():
     n = len(records)
     print(f"Loaded {n} test records")
 
-    from vllm import LLM, LoRARequest, SamplingParams
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
 
     print(f"[vLLM] Loading {args.base_model} + LoRA {args.adapter_dir}...")
     llm = LLM(
