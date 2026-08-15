@@ -463,26 +463,52 @@ directly.
    `GRPO_GRAD_CLIP=0.2`, `GRPO_MASK_TRUNCATED=1`, `GEN_TEMPERATURE=1.0`,
    `ASYNC_ROLLOUT=1` (group-atomic streaming producer), context-injected
    k400 dataset (`subset_k400_subset_with_context.jsonl`, 400 unique
-   prompts). `GRAD_ACCUM_STEPS=24` (3 groups/step = 3 unique prompts/step
-   across 3 trainer ranks, 1 group/rank). `NUM_EPOCHS=15` (one GRPO
-   "epoch" = one pass over unique prompts = 133 steps here, so 15 epochs =
-   ~2000 optimizer-step budget; will checkpoint-eval and likely stop well
-   before exhausting this). `SAVE_EVERY=25` steps. GPU layout `0 3 3` (3
-   vLLM + 3 trainers + 1 wasted logprob-server GPU = 7 of 8 total,
-   **GPU 7 deliberately left free**) — shifted toward vLLM capacity vs the
-   smoke test's 1-vLLM/2-trainer layout, because the smoke test's TIMING
-   breakdown showed generation is ~90% of step wall-clock (`total=275.3s`,
-   `producer_wait=249.0s`) while training compute is cheap under LoRA
-   (`student=10.7s loss_bwd=11.5s optim=0.3s wsync=3.7s` = 26.2s combined,
-   ~9.5%). First launch attempt used all 8 GPUs (0 4 3) but broke the
-   `auto_eval_poller.sh` convention (hardcoded `CUDA_VISIBLE_DEVICES=7`,
-   matches E046's "GPU layout 0 2 1" pattern of always leaving GPU 7 free)
-   — relaunched at `0 3 3` before any training progress was lost (caught
-   during early boot). Run/output/wandb name
+   prompts). `GRAD_ACCUM_STEPS=40` (5 groups/step = 5 unique prompts/step
+   across 5 trainer ranks, 1 group/rank). `NUM_EPOCHS=15` (one GRPO
+   "epoch" = one pass over unique prompts = 80 steps here, so 15 epochs =
+   1200 optimizer-step budget; will checkpoint-eval and likely stop well
+   before exhausting this). `SAVE_EVERY=40` steps. GPU layout `0 5 1` (1
+   vLLM + 5 trainers + 1 wasted logprob-server GPU = 7 of 8 total,
+   **GPU 7 deliberately left free** for `auto_eval_poller.sh`, hardcoded
+   `CUDA_VISIBLE_DEVICES=7` — matches E046's "GPU layout 0 2 1" convention
+   of always leaving GPU 7 free). Run/output/wandb name
    `sdft_gptoss_20b_run_47_grpo_lora` (kept the `sdft_gptoss_20b_run_NN`
    convention so the existing `auto_eval_poller.sh` glob picks it up
-   without modification; `poll_eval.sh run_47_grpo_lora step_25` etc. to
+   without modification; `poll_eval.sh run_47_grpo_lora step_40` etc. to
    check individual checkpoints).
+   **Three launch attempts before this config stabilized:**
+   (1) `0 4 3` (8 GPUs) broke the GPU-7-free convention, caught during
+   boot, no progress lost. (2) `0 3 3` (3 vLLM instances, 7 GPUs) — tried
+   because the smoke test's TIMING breakdown showed generation is ~90% of
+   step wall-clock (`total=275.3s`, `producer_wait=249.0s`) vs training's
+   26.2s (student+bwd+optim+wsync) — boot succeeded (all 3 vLLM ready,
+   bootstrap adapter pushed to all 3), but ~11 min into Epoch 1, vLLM
+   instance 0's generation throughput was stuck at ~1.2 tok/s (aggregate,
+   12 "running" reqs) for 5+ minutes straight with zero recovery, causing
+   ranks 1/2 to time out waiting on `_pull_microbatch`'s collective
+   broadcast -> NCCL `DistBackendError` -> hard crash. Root cause not
+   confirmed (160 CPU cores, load 82-170 at the time — not an obvious
+   CPU-starvation smoking gun) but correlates with the untested 3-vLLM-
+   instance config (only 1-instance had been smoke-tested). Multi-instance
+   vLLM scaling deferred to a follow-up, not blocking this run.
+   (3, **this launch**) `0 5 1` — reverts to the smoke-tested 1-vLLM-
+   instance config (clean across 2 consecutive full steps in the smoke
+   test, including adapter pushes) and scales trainer count instead
+   (world_size 2->5) for more accumulation parallelism, since training
+   compute is cheap under LoRA regardless of trainer count.
+   **Also found+fixed while investigating checkpoint eval readiness**:
+   `eval_with_retrieval.py` cannot load bare LoRA adapter checkpoints
+   (`AutoConfig.from_pretrained` fails, no `model_type` in
+   `adapter_config.json`) — this would have silently blocked every future
+   LoRA run's eval (E046 never got far enough to hit it). Added
+   `megatron_trainer/merge_lora_for_eval.py` (standard `peft.PeftModel.
+   merge_and_unload()` on the HF-PEFT adapter format our trainer produces
+   — NOT `megatron.bridge`'s own `examples/peft/merge_lora.py`, which
+   expects a Megatron-native `dist_checkpointing` checkpoint and doesn't
+   apply here) and wired it into `auto_eval_poller.sh` (merge-then-eval-
+   then-delete-the-42GB-merge for any checkpoint with an
+   `adapter_config.json`, base model read from the adapter config itself).
+   Validated end-to-end on a smoke-test checkpoint before relying on it.
 5. **Results:** _pending — run launched, awaiting first checkpoint eval._
 6. **Analysis:** _pending._
 7. **Conclusion:** _pending._
