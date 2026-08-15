@@ -16,6 +16,10 @@ class BaseEnv(ABC):
     completion_text: str | None
     privileged_information_prompt: str | None
     episode_result: bool | None
+    # vLLM finish_reason for completion_text ("stop" | "length" | None). Used
+    # by GRPO's Overlong Filtering (GRPO_MASK_TRUNCATED) — "length" means the
+    # completion was cut off by GEN_MAX_NEW_TOKENS, never a model failure.
+    finish_reason: str | None
 
     @abstractmethod
     def run(self) -> None:

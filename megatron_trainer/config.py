@@ -125,6 +125,68 @@ if STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS > MAX_TOTAL_LEN:
         f"({STUDENT_MAX_PROMPT_LEN} + {GEN_MAX_NEW_TOKENS} > {MAX_TOTAL_LEN})"
     )
 
+# ---------------------------------------------------------------------------
+# GRPO mode (see docs/megatron_trainer/grpo.md). LOSS_TYPE=sdft (default) is
+# the existing reverse-KL distillation path, byte-identical. LOSS_TYPE=grpo
+# replaces it with on-policy group-relative policy gradient against env
+# verdicts (reflector PASS/FAIL) — no teacher, no distillation loss.
+# ---------------------------------------------------------------------------
+LOSS_TYPE = os.environ.get("LOSS_TYPE", "sdft")
+if LOSS_TYPE not in ("sdft", "grpo"):
+    raise ValueError(f"LOSS_TYPE must be 'sdft' or 'grpo', got {LOSS_TYPE!r}")
+
+GRPO_GROUPS = int(os.environ.get("GRPO_GROUPS", "8"))  # G completions per prompt
+GRPO_ADV = os.environ.get("GRPO_ADV", "mean")  # advantage estimator
+GRPO_CLIP_LOW = float(os.environ.get("GRPO_CLIP_LOW", "0.2"))
+GRPO_CLIP_HIGH = float(os.environ.get("GRPO_CLIP_HIGH", "0.28"))  # DAPO clip-higher
+GRPO_OLD_LOGPS = os.environ.get("GRPO_OLD_LOGPS", "vllm")  # vllm | detached
+GRPO_IS_C_MAX = float(os.environ.get("GRPO_IS_C_MAX", "3.0"))  # sequence-level TIS clamp
+GRPO_KL_COEF = float(os.environ.get("GRPO_KL_COEF", "0.0"))  # beta; 0 = no reference forward
+GRPO_FILTER_GROUPS = os.environ.get("GRPO_FILTER_GROUPS", "0") == "1"  # DAPO dynamic sampling
+GRPO_LR = float(os.environ.get("GRPO_LR", "1e-6"))
+GRPO_LR_WARMUP_STEPS = int(os.environ.get("GRPO_LR_WARMUP_STEPS", "15"))  # linear warmup, then constant
+GRPO_GRAD_CLIP = float(os.environ.get("GRPO_GRAD_CLIP", "0.2"))
+GRPO_MASK_TRUNCATED = os.environ.get("GRPO_MASK_TRUNCATED", "1") == "1"  # never punish length-truncated completions
+
+# Whether the logprob server (teacher forward passes) is needed at all.
+# GRPO with GRPO_KL_COEF=0 (default) needs no reference model — the whole
+# logprob-server subsystem is skipped, freeing its GPU(s) for vLLM rollout
+# capacity instead (G completions/prompt means G x the generation load).
+USE_LOGPROB_SERVER = not (LOSS_TYPE == "grpo" and GRPO_KL_COEF == 0.0)
+
+if LOSS_TYPE == "grpo":
+    # v1 implementation scope — everything below is a hard requirement or an
+    # explicit "not built yet" fence (fail fast at import time, never a silent
+    # partial behavior). See docs/megatron_trainer/grpo.md for the full design.
+    if TRAIN_MODE != "full":
+        raise ValueError("LOSS_TYPE=grpo does not support TRAIN_MODE=lora")
+    if not ASYNC_ROLLOUT:
+        raise ValueError(
+            "LOSS_TYPE=grpo requires ASYNC_ROLLOUT=1 (group-atomic streaming producer)"
+        )
+    if GRPO_GROUPS < 2:
+        raise ValueError(f"GRPO_GROUPS must be >= 2, got {GRPO_GROUPS}")
+    if GRAD_ACCUM_STEPS % GRPO_GROUPS != 0:
+        raise ValueError(
+            f"GRAD_ACCUM_STEPS ({GRAD_ACCUM_STEPS}) must be divisible by "
+            f"GRPO_GROUPS ({GRPO_GROUPS}) — groups are rank-local and must "
+            f"divide evenly (world_size divisibility is checked at trainer "
+            f"startup once world_size is known)."
+        )
+    if GRPO_ADV != "mean":
+        raise NotImplementedError(
+            f"GRPO_ADV={GRPO_ADV!r} not implemented yet (v1 only supports 'mean'; "
+            "'zscore'/'median' are documented experiment knobs, not yet built)"
+        )
+    if GRPO_OLD_LOGPS not in ("vllm", "detached"):
+        raise ValueError(f"GRPO_OLD_LOGPS must be 'vllm' or 'detached', got {GRPO_OLD_LOGPS!r}")
+    if GRPO_KL_COEF > 0:
+        raise NotImplementedError(
+            "GRPO_KL_COEF > 0 (reference KL against an anchor) not implemented yet"
+        )
+    if GRPO_FILTER_GROUPS:
+        raise NotImplementedError("GRPO_FILTER_GROUPS=1 (dynamic sampling) not implemented yet")
+
 # vLLM server
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 VLLM_BASE_URL = f"http://localhost:{VLLM_PORT}"

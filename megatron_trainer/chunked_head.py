@@ -201,3 +201,152 @@ def make_kl_processor(
         return loss, metrics
 
     return processor
+
+
+def make_grpo_processor(
+    prompt_len: int,
+    completion_ids: list[int],
+    advantage: float,
+    group_total_tokens: int,
+    gpg_rescale: float,
+    device: torch.device,
+    rollout_log_probs: torch.Tensor,
+    clip_low: float = 0.2,
+    clip_high: float = 0.28,
+    is_c_max: float = 3.0,
+    old_logps_mode: str = "vllm",
+    mask_all: bool = False,
+    row_chunk: int = ROW_CHUNK,
+):
+    """Build an MCore output_processor hook computing the GRPO clipped
+    surrogate loss for one completion (one member of a G-sized group).
+
+    Same hook mechanism as make_kl_processor: one LM head call on the
+    completion hidden states, chunked over rows of `row_chunk`. Unlike
+    ChunkedRowKL (whose full-vocab KL sum justifies a hand-written analytic
+    backward), this only gathers the sampled-token log-prob per position, so
+    plain autograd is used — no custom Function needed.
+
+    - advantage: precomputed scalar A_i = r_i - mean(R_group), already known
+      at rollout time (rewards are computed before any training forward).
+    - group_total_tokens: sum of completion lengths across all G members of
+      this rollout's group (the DAPO token-level normalization denominator —
+      shared by all G members, computed once at rollout time).
+    - gpg_rescale: num_groups / num_nondegenerate_groups for this step's
+      local batch (always applied — GPG-style compensation for degenerate
+      all-pass/all-fail groups, which otherwise contribute a zero-advantage,
+      zero-signal update).
+    - rollout_log_probs: (C,) vLLM sampling log-probs; NaN marks tokens that
+      were never actually sampled by the model (template-inserted text) —
+      always used for validity masking, and (when old_logps_mode="vllm") as
+      the ratio denominator.
+    - mask_all: True zeroes the entire completion's loss (DAPO Overlong
+      Filtering — a length-truncated completion is masked, never punished).
+    """
+    C = len(completion_ids)
+    token_ids = torch.tensor(completion_ids, device=device, dtype=torch.long)
+    valid = ~torch.isnan(rollout_log_probs)
+    if mask_all:
+        valid = torch.zeros_like(valid)
+
+    def processor(
+        hidden_states,
+        output_layer,
+        output_weight=None,
+        labels=None,
+        loss_mask=None,
+        input_ids=None,
+        position_ids=None,
+        attention_mask=None,
+        decoder_input=None,
+        inference_context=None,
+        packed_seq_params=None,
+        runtime_gather_output=None,
+        context=None,
+        compute_language_model_loss=None,
+        scale_logits=None,
+        config=None,
+    ):
+        hidden_c = hidden_states[prompt_len - 1 : prompt_len + C - 1, 0]  # (C, H)
+
+        logp_chunks = []
+        for r in range(0, C, row_chunk):
+            z, _ = output_layer(hidden_c[r : r + row_chunk], weight=output_weight)  # (r, V) bf16
+            zf = z.float()
+            d = torch.logsumexp(zf, dim=-1)
+            logp = zf - d.unsqueeze(1)
+            sel = torch.clamp(token_ids[r : r + row_chunk], 0, zf.size(-1) - 1)
+            row_idx = torch.arange(zf.size(0), device=zf.device)
+            logp_chunks.append(logp[row_idx, sel])
+        logp_theta = torch.cat(logp_chunks)  # (C,) grad-attached
+
+        return grpo_loss_from_logp(
+            logp_theta=logp_theta,
+            rollout_log_probs=rollout_log_probs,
+            valid=valid,
+            advantage=advantage,
+            group_total_tokens=group_total_tokens,
+            gpg_rescale=gpg_rescale,
+            clip_low=clip_low,
+            clip_high=clip_high,
+            is_c_max=is_c_max,
+            old_logps_mode=old_logps_mode,
+            mask_all=mask_all,
+        )
+
+    return processor
+
+
+def grpo_loss_from_logp(
+    logp_theta: torch.Tensor,
+    rollout_log_probs: torch.Tensor,
+    valid: torch.Tensor,
+    advantage: float,
+    group_total_tokens: int,
+    gpg_rescale: float,
+    clip_low: float = 0.2,
+    clip_high: float = 0.28,
+    is_c_max: float = 3.0,
+    old_logps_mode: str = "vllm",
+    mask_all: bool = False,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """The GRPO clipped-surrogate loss, given the (already gathered,
+    grad-attached) per-token sampled log-probs. Pulled out of
+    make_grpo_processor so it's unit-testable on toy tensors (no MCore/GPU
+    needed) — see docs/megatron_trainer/grpo.md verification plan §1.
+
+    - logp_theta: (C,) log pi_theta(token_t) under the current policy, grad-attached
+    - rollout_log_probs: (C,) vLLM sampling log-probs, NaN = never-sampled token
+    - valid: (C,) bool, active tokens (already combines ~isnan(rollout_log_probs)
+      and mask_all upstream — kept as an explicit arg so this function has no
+      hidden NaN-handling policy of its own)
+    """
+    old_logp_vllm = torch.nan_to_num(rollout_log_probs, nan=0.0)
+    old_logp = old_logp_vllm if old_logps_mode == "vllm" else logp_theta.detach()
+    log_ratio = logp_theta - old_logp
+    ratio = torch.exp(log_ratio)
+    clipped = torch.clamp(ratio, 1.0 - clip_low, 1.0 + clip_high)
+    pg = -torch.minimum(ratio * advantage, clipped * advantage)  # (C,) grad-attached
+    pg = torch.where(valid, pg, torch.zeros_like(pg))
+    loss = pg.sum() / max(group_total_tokens, 1)  # DAPO token-level, group denominator
+
+    # Sequence-level TIS on the PG term (reuses the existing IS machinery).
+    is_weight, is_metrics = compute_is_weight(logp_theta.detach(), rollout_log_probs, is_c_max)
+    loss = loss * is_weight * gpg_rescale
+
+    with torch.no_grad():
+        valid_f = valid.float()
+        n_valid = valid_f.sum().clamp(min=1.0)
+        clip_hit = ((ratio > (1.0 + clip_high)) | (ratio < (1.0 - clip_low))).float()
+        metrics = {
+            "grpo/entropy": -(logp_theta * valid_f).sum().item() / n_valid.item(),
+            "grpo/clip_frac": (clip_hit * valid_f).sum().item() / n_valid.item(),
+            "grpo/advantage": float(advantage),
+            "grpo/completion_length": float(logp_theta.size(0)),
+            "grpo/sampling_logp_diff": (log_ratio.abs() * valid_f).sum().item() / n_valid.item(),
+            "grpo/gpg_rescale": float(gpg_rescale),
+            "grpo/masked": float(mask_all),
+        }
+        metrics.update(is_metrics)
+
+    return loss, metrics

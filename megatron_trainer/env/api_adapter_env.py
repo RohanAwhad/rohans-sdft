@@ -126,6 +126,9 @@ class ApiAdapterEnv(BaseEnv):
         self.episode_result: bool | None = None
         self.verdict: bool = False
         self.feedback: str = ""
+        # finish_reason of the LAST adapter generation (the trained turn) —
+        # "length" means it was cut off by a token budget, not a natural stop.
+        self.finish_reason: str | None = None
 
     # ------------------------------------------------------------------
     # Core lifecycle
@@ -208,6 +211,7 @@ class ApiAdapterEnv(BaseEnv):
 
         if finish_reason != "length":
             self._rollout_segments.append((text, logprobs))
+            self.finish_reason = finish_reason
             return text
 
         # Phase 2: force-close thinking, generate the actual answer
@@ -218,11 +222,12 @@ class ApiAdapterEnv(BaseEnv):
             inserted = ".\n</think>\n\n"
 
         continued_prompt = prompt_text + truncated_thinking
-        answer_text, _, answer_logprobs = vllm_generate(
+        answer_text, answer_finish_reason, answer_logprobs = vllm_generate(
             continued_prompt,
             base_url=self.vllm_base_url,
             max_tokens=GEN_MAX_NEW_TOKENS - THINKING_BUDGET,
         )
+        self.finish_reason = answer_finish_reason
         self._rollout_segments.append((text.rstrip(), logprobs))
         if inserted:
             self._rollout_segments.append((inserted, None))
