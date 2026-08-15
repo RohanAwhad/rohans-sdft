@@ -158,8 +158,12 @@ if LOSS_TYPE == "grpo":
     # v1 implementation scope — everything below is a hard requirement or an
     # explicit "not built yet" fence (fail fast at import time, never a silent
     # partial behavior). See docs/megatron_trainer/grpo.md for the full design.
-    if TRAIN_MODE != "full":
-        raise ValueError("LOSS_TYPE=grpo does not support TRAIN_MODE=lora")
+    # TRAIN_MODE=lora is supported (as of issue #22's fix, PR #23): full FT's
+    # FSDP-sharded AdamW state doesn't fit a 20B model on <4 trainer GPUs
+    # (2-way shard: ~10B params/rank * 2 (bf16 exp_avg+exp_avg_sq) + params +
+    # grads ~= 80GB, right at the H100 80GB ceiling) — LoRA only optimizes
+    # adapter params, sidestepping that entirely, and the gpt-oss MoE adapter
+    # export layout bug that previously blocked it (E046) is now fixed.
     if not ASYNC_ROLLOUT:
         raise ValueError(
             "LOSS_TYPE=grpo requires ASYNC_ROLLOUT=1 (group-atomic streaming producer)"
