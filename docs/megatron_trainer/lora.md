@@ -104,8 +104,8 @@ New `push_lora_adapter(model, adapter_dir, rank)` (LoRA mode only), per
 instance in `VLLM_BASE_URLS`:
 
 1. Export adapter dir (or reuse the checkpoint dir from the current step).
-2. **Drain barrier**: `POST /pause_generation` → wait for in-flight rollouts
-   → push → `POST /resume_generation`. Required because vLLM has **no
+2. **Drain barrier**: `POST /pause?mode=keep` → wait for in-flight rollouts
+   → push → `POST /resume`. Required because vLLM has **no
    per-request adapter versioning** — a request running across the swap
    silently continues with new weights mid-sequence (on-policy inconsistency).
 3. `POST /v1/load_lora_adapter` with body
@@ -143,7 +143,7 @@ In LoRA mode append to the vLLM launch:
 ```
 
 plus env `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`. Keep `VLLM_SERVER_DEV_MODE=1`
-(the `/pause_generation` drain barrier and weight-transfer endpoints are dev
+(the `/pause?mode=keep` drain barrier and weight-transfer endpoints are dev
 gated). `--max-lora-rank` must **equal** `LORA_DIM` exactly (GPU slot buffers
 are preallocated from it; memory scales linearly — don't oversize).
 
@@ -158,8 +158,9 @@ are preallocated from it; memory scales linearly — don't oversize).
   barrier; never mid-wave.
 - Trainer and logprob server must use the **same** `LoRA` config
   (rank/targets) — parameter order of the NCCL adapter sync depends on it.
-- Only rank 0 performs adapter export + HTTP push; export is not an FSDP
-  collective in LoRA mode (no sharding), so non-zero ranks do nothing.
+- Only rank 0 performs adapter export + HTTP push; the export is collective
+  (`AutoBridge.save_hf_adapter` — all ranks participate, rank 0 writes), not
+  an FSDP-collective in LoRA mode (no sharding).
 
 ## Known gotchas
 
