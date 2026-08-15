@@ -20,6 +20,12 @@
 - **verify_adapter gate (spec step 2)**: HF base+peft adapter logits vs Megatron+LoRA logits — top-20 agreement 0.9727 (2101/2160), mean logit diff 0.0973 → PASS (threshold 0.95; 1.0 was too strict, fp32-export vs bf16 precision flips near-ties; a wrong q/k/v split would drop to ~30%).
 - **Parity runs in flight**: full arm (GPUs 0,1,2, 1 trainer — parallel window, data identical) vs lora smoke arm (2 trainers) — both GA=4, 100 steps, 1 epoch, TRAINER_SEED/VLLM_SEED=1234 (full arm only; smoke predates seeding).
 - verify_adapter needs `TRAIN_DATA_PATH` set (config.py import side effect) — pass it when running standalone.
+- **Node-12 parallel-run gotchas (all hit + fixed)**:
+  1. vLLM EngineCore binds `port+1` — two vLLM instances on adjacent ports collide (smoke 8051 → engine on 8052 killed parity's vLLM). Space ports ≥10 apart (train_full.sh already spaces 100 for multi-instance).
+  2. **1-trainer full mode OOMs** (75GB at AdamW step — FSDP can't shard with 1 rank). Full parity must use 2 trainers.
+  3. vLLM completions read timeout 180s killed runs on tail-heavy 2048-token generations (~100s at 20 tok/s) — bumped to 600s (9a05dfe).
+  4. Both containers share workspace `logs/` → cross-talk in trainer.log/logprob_server.log. Added `LOG_DIR` env (d9bb3ee); use `LOG_DIR=logs/<run>` per run.
+- Smoke run 1 died at step 52/100 (the 180s timeout); pipeline itself fully validated (52 steps of clean hot-swaps, loss 0.85→0.29). Run 2 (lora arm) relaunched with fixes; full parity (2 trainers, 100 steps) queued after.
 
 ## 2026-08-14 - Phase 3 in progress: Layer 2 runs + eval infra (rh-h100-12)
 
