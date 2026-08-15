@@ -557,10 +557,27 @@ directly.
    sign the raw reward-gradient signal can be spiky — clipping is doing
    its job. No action needed unless clipped updates themselves start
    looking unstable (e.g. loss/entropy diverging).
-7. **Conclusion:** E047 attempt 4 (`0 5 1`, `N_ASYNC=40`) is the confirmed
-   stable config for real training. Awaiting first real checkpoint
-   (step 40, `SAVE_EVERY=40`, ETA ~40 steps × ~480s avg ≈ 5.3 hours from
-   launch) for the first actual eval-accuracy data point.
+7. **Conclusion (revised):** Attempt 4 crashed again at step 6 after 5
+   clean steps — a *different*, unfixed failure mode. `vllm_0.log` shows
+   generation throughput collapsing from ~190 tok/s to 16-28 tok/s for a
+   sustained window while `Running: 40 reqs` held constant and GPU KV
+   cache usage stayed ~5% (not memory/capacity-bound). Same symptom as
+   attempt 2's collapse, now reproduced on a **single** vLLM instance —
+   disproves the "multi-instance topology" theory from attempt 2's
+   writeup; this is a genuine vLLM-under-load stability issue, apparently
+   probabilistic rather than a hard concurrency threshold. Not root-caused
+   (candidates: vLLM scheduler/batching defaults, `--enforce-eager`,
+   MoE-routing-under-concurrency, CPU-bound request loop — none tested).
+   Since no resume-from-checkpoint capability exists, **attempt 5** trades
+   long-run ambition for guaranteed data: `SAVE_EVERY=5` (real checkpoint
+   even from a short run) + a bounded (20x) auto-restart loop wrapping the
+   launch so the campaign stays productive unattended, accepting that each
+   restart trains a fresh LoRA init (no resumption, no `TRAINER_SEED`).
+   Launched, awaiting first real checkpoint + poller eval.
+9. **Follow-up (deferred, tracked separately):** (a) root-cause the vLLM
+   throughput collapse — needs vLLM-side profiling/config sweep, not done
+   yet; (b) build proper checkpoint-resume (adapter + optimizer + scheduler
+   + step counter) once eval signal from short runs justifies the scope.
 8. **New questions:** Why does step_0 (merged, untrained) score 0.6553 vs
    the 0.7415 baseline under the same `poll_eval.sh`/`eval_with_retrieval.py`
    harness — different eval set version, generation config, or merge

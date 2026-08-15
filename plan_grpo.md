@@ -241,11 +241,37 @@ re-verified as of writing this plan).
   (`n_groups_async=4 ≥ 2`, safe) — carrying that same absolute `N_ASYNC=32`
   forward to `world_size=5` (`n_groups_async=4 < 5`) is what broke E047's
   attempt 3. **Rule: `N_ASYNC ≥ world_size × GRPO_GROUPS` whenever scaling
-  trainer count**, not just "whatever worked in the smoke test." (Separately:
-  E047 attempt 2's crash, with the *same* symptom, was traced to 3 concurrent
-  vLLM server *processes* — directly observed throughput collapse to
-  ~1.2 tok/s — a different, vLLM-server-level issue avoided by keeping a
-  single vLLM instance. Two distinct bugs, same downstream symptom.)
+  trainer count**, not just "whatever worked in the smoke test." Now enforced
+  by an assert at trainer startup (`trainer.py`, commit `9d9dea5`).
+- **Separate, unfixed issue: vLLM generation throughput can collapse under
+  sustained concurrent load, independent of the above.** With the
+  concurrency bug fixed (attempt 4, `N_ASYNC=40`), 5 clean steps ran, then
+  step 6 stalled the full 600s with zero progress. `vllm_0.log` shows the
+  smoking gun directly: generation throughput dropped from ~190 tok/s to
+  16-28 tok/s for a sustained multi-minute window while `Running: 40 reqs`
+  stayed constant and **GPU KV cache usage stayed at ~5%** — ruling out
+  memory/capacity exhaustion. This is the *same* symptom as attempt 2's
+  collapse (which used 3 separate vLLM processes), now reproduced on a
+  **single** vLLM instance — disproving the earlier "multi-instance
+  topology is the problem" theory. Appears probabilistic/time-dependent
+  (16-concurrent never hit it in a short 2-step smoke test; 40-concurrent
+  got 5 good steps first) rather than a hard threshold. Not root-caused —
+  candidates not yet investigated: vLLM scheduler/batching config
+  (`--max-num-seqs`, `--max-num-batched-tokens`, none set explicitly so
+  vLLM defaults apply), `--enforce-eager` (required for weight-transfer
+  dev-mode, disables CUDA graphs), MoE-specific routing/expert-parallel
+  inefficiency under high concurrency, or a CPU-bound scheduling bottleneck
+  (Python-side request loop, not GPU-bound given low KV cache usage).
+  **Mitigation deployed (not a fix)**: no resume-from-checkpoint capability
+  exists in the trainer, so a crash loses all progress since the last save.
+  `/tmp/launch_run_47.sh` now (a) sets `SAVE_EVERY=5` (down from 40) so a
+  short crash-prone run still yields a real checkpoint for eval, and
+  (b) wraps the launch in a bounded (`MAX_RETRIES=20`) auto-restart loop so
+  the campaign keeps generating real training+eval data points unattended
+  between check-ins, at the cost of each restart training a fresh LoRA init
+  from scratch (no `TRAINER_SEED` set, so each attempt sees a different
+  shuffle — not true resumption). Proper checkpoint-resume is the real fix,
+  deferred until eval signal from short runs justifies the added scope.
 
 ## Open questions carried into this phase
 
