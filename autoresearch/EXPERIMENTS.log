@@ -375,27 +375,49 @@
 
 ---
 
-## #E045 [RUNNING]
+## #E045 [DONE]
 
 1. **Motivation:** All loss-function axes exhausted (IS aggregation, SFT anchor, JSD). 25+ experiments plateau at 0.69-0.73. New axis: inject retrieved context into the student's training prompt. A retriever at localhost:9090 provides domain-relevant chunks per question. If the student's bottleneck is missing knowledge (not loss geometry), context injection provides the missing signal that no loss modification can.
 2. **Hypothesis (M8):** The 0.73 plateau is caused by insufficient domain knowledge in the training prompt, not loss geometry. Injecting retrieved context into the last human message (format: `Context:\n{chunks}\n\nQuestion:\n{original_question}`) provides factual grounding that breaks the plateau.
 3. **Prediction:** Peak > 0.74 by epoch 5. Sustained above 0.74 through epoch 10. Falsified if: peak <= 0.73 (context injection doesn't help) OR peak > 0.74 but collapses below 0.73 by epoch 10 (context helps early but doesn't sustain).
 4. **Design:** Locked config (LR=2e-5, cosine, IS_CAP=5.0, 120b teacher, temp=1.2, online_feedback) + ASYNC_ROLLOUT=1 + context-injected k400 dataset (`subset_k400_subset_with_context.jsonl`, 400 examples preprocessed with retriever k=5). 10 epochs, 12 steps/epoch = 120 total steps.
-5. **Results (partial, through ep5):** ep1=0.7235, ep2=0.7056, ep3=0.7289, ep4=0.7235, ep5=**0.7433**. Epochs 6-10 pending (training at step 84/120, epoch 8 in progress).
-6. **Analysis (partial):** FIRST RUN TO CROSS BASELINE 0.7415. Epoch 5 = 0.7433 (+0.18pp above baseline). The trajectory is radically different from all prior runs: ep1 starts at 0.7235 (vs typical 0.60-0.68 for locked config without context). No early-epoch dip. Sustained 0.70-0.74 range across all 5 epochs. The context injection appears to provide a knowledge floor that prevents the typical early-epoch stumbling. However, 0.7433 is within noise floor (±1.5pp SE, need +3pp = 0.7715 for significance). Must see epochs 6-10 to determine if this is a real breakthrough or noise.
-7. **Conclusion (partial):** WEAKLY SUPPORTED. First baseline crossing ever. But within noise floor. Need epochs 6-10 to confirm sustainability.
-8. **New questions:** Does accuracy sustain above 0.74 through epoch 10? Is the context injection effect additive with other configs (E034 config: enriched, IS_CAP=2.0, temp=0.7)? Would combined dataset + context injection push higher?
+5. **Results (full, run_45_10ep, recovered from eval_results after campaign was paused):** ep1=0.7235, ep2=0.7056, ep3=0.7289, ep4=0.7235, ep5=**0.7433**, ep6=0.7235, ep7=0.7253, ep8=0.7217, ep9=0.7289, ep10=0.7289.
+6. **Analysis:** FIRST RUN TO CROSS BASELINE 0.7415. Peak epoch 5 = 0.7433 (+0.18pp). Epochs 6-10 settled into a stable 0.7217-0.7289 band — no late-epoch collapse (unlike E035's IS_CAP=5.0 constant-schedule collapse), but no further improvement past the epoch-5 peak either. Mean of ep6-10 = 0.7257, still within the noise floor of baseline. The trajectory is radically different from all prior runs: ep1 starts at 0.7235 (vs typical 0.60-0.68 for locked config without context), never drops below 0.70 in any epoch (every prior run had at least one epoch below 0.70). Context injection provides a knowledge floor and a stability floor, but this particular config (locked SDFT recipe + context) plateaus at ~0.725-0.73, same ceiling as the best non-context IS runs — context shifted the whole trajectory up and removed the early dip/late collapse, but did not raise the ceiling past ~0.73 within 10 epochs.
+7. **Conclusion:** SUPPORTED (first baseline crossing, sustained stability) but not statistically significant (max 0.7433, need 0.7715). REVERT is not applicable — context injection is a genuine positive lever, kept as the base dataset for future experiments (both E046's LoRA attempt and the GRPO phase below build on it).
+8. **New questions:** Does accuracy sustain above 0.74 through epoch 10? [ANSWERED: sustains 0.72-0.73, does not re-cross 0.74.] Is the context injection effect additive with other configs? Would combined dataset + context injection push higher? [Not run — campaign paused before these could be tried; see E046.]
 
 
 ---
 
-## #E046 [PLANNED]
+## #E046 [CANCELLED]
 
-1. **Motivation:** E045 (gpt-oss-20b full FT + context) crossed baseline at ep5 (0.7433) but zigzagged back to 0.72. LoRA on gpt-oss-20b failed (GQA dim mismatch in vLLM adapter loader). Pivoting to Qwen3-8B (student) + Qwen3-32B (teacher) — LoRA was validated on Qwen3-8B in v0.3.0. Smaller student + LoRA = faster iteration, implicit regularization, and higher LR (3e-4). Different model family tests whether the context injection + distillation approach generalizes beyond gpt-oss.
+1. **Motivation:** E045 (gpt-oss-20b full FT + context) crossed baseline at ep5 (0.7433) but zigzagged back to 0.72-0.73. LoRA on gpt-oss-20b failed (GQA dim mismatch in vLLM adapter loader). Pivoting to Qwen3-8B (student) + Qwen3-32B (teacher) — LoRA was validated on Qwen3-8B in v0.3.0. Smaller student + LoRA = faster iteration, implicit regularization, and higher LR (3e-4). Different model family tests whether the context injection + distillation approach generalizes beyond gpt-oss.
 2. **Hypothesis (M9):** LoRA on Qwen3-8B with Qwen3-32B teacher + context injection achieves competitive accuracy. LoRA's rank-32 bottleneck acts as implicit regularization against k400 overfitting. Higher LR (3e-4) enables faster convergence.
 3. **Prediction:** Need Qwen3-8B baseline first. Expect peak accuracy above baseline within 5 epochs. Less zigzag than E045 (consecutive epoch delta < 1.5pp). Falsified if: peak <= baseline after 10 epochs OR training destabilizes (loss spikes).
 4. **Design:** MODEL_NAME=Qwen/Qwen3-8B, TEACHER_MODEL_PATH=Qwen/Qwen3-32B, TRAIN_MODE=lora, LORA_DIM=32, LORA_ALPHA=32, LR=3e-4, constant, IS_CAP=5.0, temp=1.2, online_feedback, ASYNC_ROLLOUT=1, context-injected k400 dataset. 10 epochs. GPU layout: 0 2 1 (1 vLLM, 2 trainers, 1 logprob).
-5. **Results:** (pending — waiting for Qwen3-32B download)
-6. **Analysis:** (pending)
-7. **Conclusion:** (pending)
-8. **New questions:** (pending)
+5. **Results:** Never launched — a `sdft_qwen3_8b_run_46_lora` checkpoint dir exists (setup/smoke artifacts only, no eval results) — the run did not reach a scored epoch before being superseded.
+6. **Analysis:** N/A — superseded before execution completed.
+7. **Conclusion:** CANCELLED. The human stopped the self-distillation autoresearch campaign at this point and pivoted the whole project to GRPO (reward-driven RL against the existing reflector PASS/FAIL verdict) instead of continuing to search for self-distillation loss/model variants. This is a phase transition, not a refutation of M9 — the LoRA/Qwen3-8B idea is untested, not disproven.
+8. **New questions:** N/A — see the GRPO phase (E047+) below for the new research direction.
+
+
+---
+
+# Phase 2: GRPO (reward-driven RL, self-distillation retired)
+
+Self-distillation (reverse-KL against a frozen teacher) is retired as of E046.
+25+ loss-geometry variants (IS aggregation, SFT anchor, JSD, per-token IS)
+all plateaued at 0.69-0.73; the only lever that ever crossed baseline was
+context injection (E045, input-signal not loss-geometry). Standing hypothesis
+per `STATE.md`: reverse-KL optimizes distribution-matching to the teacher,
+not correctness ("sharper but not smarter"). GRPO replaces the objective
+entirely: on-policy group-relative policy gradient, reward = the reflector's
+existing PASS/FAIL verdict (previously computed every rollout but only
+logged, never trained on). No teacher, no distillation, no KL_COEF>0 in v1
+(β=0 — biggest compute win, drops the 120b teacher from the critical path).
+Implementation: `docs/megatron_trainer/grpo.md` (design spec) +
+`plan_grpo.md` (this campaign's plan, repo root) on branch `ra/grpo-live`.
+Runs on top of the context-injected dataset (E045's lever) since the context
+is baked into the student's own rollout prompt (`prompt` field), not just
+the teacher hint — confirmed by diffing the plain vs with-context files
+directly.

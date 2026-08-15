@@ -57,6 +57,17 @@ logged, never used in the loss) — no new grading infra needed.
   (`subset_k400_subset_with_context.jsonl`, `combined_dataset_train_sdft_with_context.jsonl`)
   — the one proven lever — rather than plain data, so a negative result isn't
   confounded by "model doesn't have the facts."
+- **Verified mechanism** (checked the actual data, not just the code path):
+  context injection prepends a `"Context:\n..."` retrieval block directly
+  into the raw `prompt` field itself (the human/user turn) — this is NOT
+  purely a teacher-side hint. It flows through the collator into
+  `prompt_texts`, i.e. the **student's own rollout/generation prompt**. So
+  GRPO (which never touches `conditional_texts`/`privileged_information_prompt`
+  since there's no teacher call) still gets the context, because it's baked
+  into the same prompt the student generates from. `enriched_user_response`
+  (the teacher-hint field) is identical between the plain/with-context
+  dataset variants — only `prompt` differs. This confirms building on the
+  with-context dataset is meaningful for GRPO, not a no-op.
 
 ## Design surface (full detail in `docs/megatron_trainer/grpo.md`)
 
@@ -79,36 +90,67 @@ already-designed math): `_sample_meta`'s `pass_value` is computed once per
 rollout today and only logged. Under `LOSS_TYPE=grpo` it becomes the reward
 `r_i` feeding the group advantage — same reflector call, new consumer.
 
-## Implementation plan (minimal diff, in order)
+## Implementation plan — STATUS: implemented, smoke test running
 
-1. On node05: commit/stash the outstanding loss-function work already sitting
-   uncommitted (`GOAL.md`, `EXPERIMENTS.log`, `STATE.md`, `analysis/*.md`,
-   `add_retrieval_context.py`, new dataset, `new_dataset_format.png`) — don't
-   start branching on a dirty tree.
-2. Branch `ra/grpo-live` off `ra/autoresearch-loop` tip — inherits async
-   rollout + context-injection dataset support, drops nothing.
-3. `config.py`: add the `GRPO_*` env vars above + import-time asserts
-   (`LOSS_TYPE ∈ {sdft, grpo}`, group-alignment invariant).
-4. `trainer.py` `_build_env`/`produce`: call `vllm_generate` **G times per
-   prompt** when `LOSS_TYPE=grpo` (existing `ThreadPoolExecutor`, just more
-   requests in flight); stamp group index `g`; embed `pass_value` in the
-   rollout payload for every rollout (promote from log-only to reward).
-5. `trainer.py` rollout slicing: group-aligned rank slices
-   (`rollout_data[r*L:(r+1)*L]`, `L` now counts **groups**, not samples).
-6. `chunked_head.py`: new `make_grpo_processor` — attached (non-detached)
-   logp gather, ratio vs old logp, DAPO token-level clipped surrogate ×
-   precomputed advantage, GPG degenerate-group rescale, truncation mask.
-7. `trainer.py` `_train_sample`: branch on `LOSS_TYPE`; `grpo` path **skips
-   the teacher-logprob request entirely** when `GRPO_KL_COEF==0` — removes
-   one full-vocab forward per sample, frees the 120b teacher's GPU(s).
-8. `trainer.py` `_step_tail`: add the six `grpo/*` wandb metrics.
-9. Unit test first (cheapest bug catch, no cluster needed): toy logits,
-   `GRPO_OLD_LOGPS=detached` ⇒ gradient must equal plain policy-gradient
-   exactly (spec's gradient-identity check). Do this before touching GPUs.
-10. Cluster smoke: 2 trainers, G=8, GA=16, ~50–100 steps on
-    `subset_k400_subset_with_context.jsonl` — no NaN, sane
-    reward/entropy/length curves, weight-sync + IS metrics present, pass
-    rate moves off its initial value.
+Deviated from the original plan in two ways per direct instruction: **no
+LoRA** support for grpo (`TRAIN_MODE=lora` raises at config time), and
+**async rollout is required, not optional** (`ASYNC_ROLLOUT=1` enforced at
+config time) — group-atomic streaming (below), not the sync `produce()` path.
+
+1. ~~Commit/stash node05's outstanding loss-function docs~~ DONE — committed
+   as `c65648a` (E045 full 10-epoch trajectory recovered from eval_results
+   and added to the historical record: peak 0.7433@ep5, settled 0.72–0.73
+   through ep10, no late collapse).
+2. ~~Branch `ra/grpo-live` off `ra/autoresearch-loop`~~ DONE.
+3. ~~`config.py`: `GRPO_*` contract + import-time asserts~~ DONE — v1 fences
+   (fail fast, not silent): `TRAIN_MODE=full` only, `ASYNC_ROLLOUT=1` only,
+   `GRPO_ADV=mean` only, `GRPO_KL_COEF=0` only, `GRPO_FILTER_GROUPS=0` only.
+4. ~~Rollout: G completions/prompt~~ DONE, but **not** via `produce()`/`_build_env`
+   G-times-per-item as originally sketched — instead a dedicated group-atomic
+   async producer (see below), since async was upgraded from "nice to have"
+   to "required."
+5. ~~Rank slicing: group-aligned~~ DONE, via reuse of the *existing*
+   `_pull_microbatch` unchanged (it broadcasts opaque queue items — pushing
+   `list[dict]` groups instead of single dicts as the queue item made this a
+   zero-line change).
+6. ~~`chunked_head.py`: `make_grpo_processor`~~ DONE, plus extracted
+   `grpo_loss_from_logp` (pure function, no MCore dependency) specifically so
+   the gradient-identity check is unit-testable off-cluster.
+7. ~~`_train_sample` grpo branch~~ DONE as a parallel `_train_sample_grpo`
+   (not a branch inside `_train_sample`) — keeps the sdft path byte-identical,
+   smaller diff than threading conditionals through the existing function.
+8. ~~`_step_tail` grpo metrics~~ DONE for free — `_step_tail` already
+   generically aggregates and logs whatever keys `make_grpo_processor`
+   returns; only grad-clip (`GRPO_GRAD_CLIP`) and logprob-server-sync gating
+   (`USE_LOGPROB_SERVER`) needed explicit edits.
+9. ~~Unit test~~ DONE — 4 tests in `megatron_trainer/test_grpo_loss.py`, run
+   inside the nemo container (CPU-only, no GPU): gradient-identity
+   (detached mode exactly matches plain PG, max_diff=0.00e+00), clip/IS
+   engagement at large ratio, degenerate-group advantage math, truncation
+   masking. **All pass.**
+10. Cluster smoke test: **running now** (`grpo_smoke_test_1`, 2 trainers,
+    G=8, GA=16, `subset_k400_subset_with_context.jsonl`, wandb project
+    `sdft-grpo-smoke`). Watching for: no crash, `grpo/*` metrics present and
+    finite, `grpo/frac_reward_zero_std` sane, pass rate moves.
+
+New pieces not in the original numbered plan, needed once async became
+mandatory:
+- `_produce_streaming_grpo` + `_push_group` (trainer.py): the producer's
+  unit of overlap is the **group**, not the individual rollout — G envs for
+  one prompt run concurrently (nested thread pool) and are pushed to the
+  queue together only once all G finish, since the advantage needs every
+  member's reward first. Async-across-groups, sync-within-a-group.
+- `env.finish_reason` capture (`env/base.py`, `rag_env.py`,
+  `api_adapter_env.py`) — needed for DAPO Overlong Filtering
+  (`GRPO_MASK_TRUNCATED`), didn't exist before (finish_reason was discarded).
+- Custom `LambdaLR` (linear warmup, then constant, no decay) for
+  `GRPO_LR`/`GRPO_LR_WARMUP_STEPS` — different shape than the existing
+  cosine-with-warmup scheduler, so it's a separate branch, not a reuse.
+- `step_unit`/`steps_per_epoch` redefinition for grpo: one epoch = one pass
+  over **unique prompts** (`len(dataset)`), each expanded ×G — not one pass
+  over `GRAD_ACCUM_STEPS`-sized batches of unique prompts like sdft.
+- `train_full.sh`: added the 13 `GRPO_*` vars to `OPTIONAL_ENVS` passthrough
+  (container launch script didn't forward them at all before).
 
 ## Experiment plan (first entries, `autoresearch/EXPERIMENTS.log`)
 
@@ -131,10 +173,15 @@ re-verified as of writing this plan).
 
 ## Operational risks / notes
 
-- **GPU reservation**: all 8 GPUs on rh-h100-05 show `IN_USE` under
-  `ronny-romeo` (manual reservation, ~73h remaining) but 0% actual
-  utilization observed. Need to confirm this is stale before reserving —
-  will surface to you rather than silently launch on someone else's hold.
+- **GPU reservation**: re-checked directly via `nvidia-smi` (not the
+  reservation-tracker alias, unavailable over non-interactive ssh) —
+  0% util, ~4MiB used, zero compute processes on all 8 GPUs. Node is
+  actually free; proceeding on your explicit instruction to run this now.
+- **Wasted GPU in v1**: `train_full.sh` always starts a `logprob_server`
+  process and allocates it a GPU, even though GRPO with `GRPO_KL_COEF=0`
+  never calls it (`USE_LOGPROB_SERVER=False` skips it Python-side). Left
+  as-is for v1 (correctness over GPU efficiency); reclaiming that GPU for
+  more vLLM capacity is a fast-follow, not done yet.
 - **Compute cost**: G=8 → 8× rollouts/prompt vs the old 1×. Generation is the
   new bottleneck, not the teacher forward (which we're dropping via
   `GRPO_KL_COEF=0`). This roughly cancels — teacher GPU capacity can likely
@@ -162,10 +209,14 @@ re-verified as of writing this plan).
 
 ## Next steps
 
-1. You review this plan.
-2. I formalize `autoresearch/GOAL.md` / `STATE.md` / `EXPERIMENTS.log` on
-   node05 for this phase (per the `autoresearch` skill), confirming exact
-   last E-number and current git/GPU state.
-3. Implement steps 1–10 above.
-4. Start the smoke test, then the first real GRPO run, then continue the
-   loop autonomously.
+1. Smoke test result → if healthy, launch the first real GRPO run
+   (full-length, `subset_k400_subset_with_context.jsonl`, G=8, GA=32 or
+   larger for a real gradient-noise-per-step budget) and log it as the first
+   `autoresearch/EXPERIMENTS.log` entry for this phase.
+2. Formalize `autoresearch/GOAL.md`/`STATE.md` for the GRPO phase on node05
+   (per the `autoresearch` skill) — supersedes the SDFT-phase framing,
+   keeps the SDFT history as background/baseline.
+3. Continue the autoresearch loop autonomously: iterate on `GRPO_FILTER_GROUPS`,
+   `GRPO_ADV=zscore`, `GRPO_KL_COEF>0` (not yet implemented — would need the
+   K3++ reference-KL path built) as needed based on what the health metrics
+   show.
