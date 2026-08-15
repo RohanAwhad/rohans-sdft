@@ -268,11 +268,15 @@ def make_grpo_processor(
         config=None,
     ):
         hidden_c = hidden_states[prompt_len - 1 : prompt_len + C - 1, 0]  # (C, H)
+        z, _ = output_layer(hidden_c, weight=output_weight)  # (C, V) bf16 — ONE GEMM,
+        # matching make_kl_processor: many small (row_chunk, H)@(H, V) GEMMs
+        # in a loop are far less GPU-efficient than one (C, H)@(H, V) GEMM.
+        # Only the fp32 upcast + logsumexp (the actual memory-heavy part) is
+        # chunked below, bounding peak fp32 memory to (row_chunk, V).
 
         logp_chunks = []
         for r in range(0, C, row_chunk):
-            z, _ = output_layer(hidden_c[r : r + row_chunk], weight=output_weight)  # (r, V) bf16
-            zf = z.float()
+            zf = z[r : r + row_chunk].float()
             d = torch.logsumexp(zf, dim=-1)
             logp = zf - d.unsqueeze(1)
             sel = torch.clamp(token_ids[r : r + row_chunk], 0, zf.size(-1) - 1)
