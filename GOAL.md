@@ -71,7 +71,12 @@ OUTPUT_DIR=/mnt/nvme5n1/rawhad/analyze_deepresearch_ckpts/sdft_gptoss_20b_run_N 
 TRAIN_DATA_PATH=/workspace/data/analyze_research/subset_k400_subset.jsonl \
 bash megatron_trainer/train_full.sh 0 4 2 2>&1 | tee logs/analyze_deepresearch_run_N.log
 ```
-Write the launch script to `/tmp/launch_run_N.sh`, then: `tmux send-keys -t sdft_megatron_bridge:2.0 "bash /tmp/launch_run_N.sh" Enter`
+Write the launch script to `/tmp/launch_run_N.sh`, then launch in tmux:
+```bash
+# Create the session if it doesn't exist, then send the command
+tmux has-session -t sdft_megatron_bridge 2>/dev/null || tmux new-session -d -s sdft_megatron_bridge
+tmux send-keys -t sdft_megatron_bridge "bash /tmp/launch_run_N.sh" Enter
+```
 
 ### How to monitor a run
 ```bash

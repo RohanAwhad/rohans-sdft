@@ -371,3 +371,31 @@
 6. **Analysis:** JSD trajectory comparable to reverse-KL (E036: 0.6338->0.6768->0.7092->0.7235->0.6768). At ep5, JSD (0.7092) is between E036 ep4 (0.7235) and ep5 (0.6768). signal_mean slightly better than reverse-KL (~-0.8 vs ~-0.9) but not dramatically different. Killed before epoch 10 to shift focus to async rollout long runs.
 7. **Conclusion:** INCONCLUSIVE (killed early). JSD shows comparable trajectory to reverse-KL at 5 epochs. signal_mean slightly improved but not enough to confirm the mass-covering hypothesis. Would need 10+ epochs to fully evaluate.
 8. **New questions:** Would JSD break through with more epochs? Shift focus to async rollout long runs on promising configs (E036) to test if longer training breaks the plateau.
+
+
+---
+
+## #E045 [RUNNING]
+
+1. **Motivation:** All loss-function axes exhausted (IS aggregation, SFT anchor, JSD). 25+ experiments plateau at 0.69-0.73. New axis: inject retrieved context into the student's training prompt. A retriever at localhost:9090 provides domain-relevant chunks per question. If the student's bottleneck is missing knowledge (not loss geometry), context injection provides the missing signal that no loss modification can.
+2. **Hypothesis (M8):** The 0.73 plateau is caused by insufficient domain knowledge in the training prompt, not loss geometry. Injecting retrieved context into the last human message (format: `Context:\n{chunks}\n\nQuestion:\n{original_question}`) provides factual grounding that breaks the plateau.
+3. **Prediction:** Peak > 0.74 by epoch 5. Sustained above 0.74 through epoch 10. Falsified if: peak <= 0.73 (context injection doesn't help) OR peak > 0.74 but collapses below 0.73 by epoch 10 (context helps early but doesn't sustain).
+4. **Design:** Locked config (LR=2e-5, cosine, IS_CAP=5.0, 120b teacher, temp=1.2, online_feedback) + ASYNC_ROLLOUT=1 + context-injected k400 dataset (`subset_k400_subset_with_context.jsonl`, 400 examples preprocessed with retriever k=5). 10 epochs, 12 steps/epoch = 120 total steps.
+5. **Results (partial, through ep5):** ep1=0.7235, ep2=0.7056, ep3=0.7289, ep4=0.7235, ep5=**0.7433**. Epochs 6-10 pending (training at step 84/120, epoch 8 in progress).
+6. **Analysis (partial):** FIRST RUN TO CROSS BASELINE 0.7415. Epoch 5 = 0.7433 (+0.18pp above baseline). The trajectory is radically different from all prior runs: ep1 starts at 0.7235 (vs typical 0.60-0.68 for locked config without context). No early-epoch dip. Sustained 0.70-0.74 range across all 5 epochs. The context injection appears to provide a knowledge floor that prevents the typical early-epoch stumbling. However, 0.7433 is within noise floor (±1.5pp SE, need +3pp = 0.7715 for significance). Must see epochs 6-10 to determine if this is a real breakthrough or noise.
+7. **Conclusion (partial):** WEAKLY SUPPORTED. First baseline crossing ever. But within noise floor. Need epochs 6-10 to confirm sustainability.
+8. **New questions:** Does accuracy sustain above 0.74 through epoch 10? Is the context injection effect additive with other configs (E034 config: enriched, IS_CAP=2.0, temp=0.7)? Would combined dataset + context injection push higher?
+
+
+---
+
+## #E046 [PLANNED]
+
+1. **Motivation:** E045 (gpt-oss-20b full FT + context) crossed baseline at ep5 (0.7433) but zigzagged back to 0.72. LoRA on gpt-oss-20b failed (GQA dim mismatch in vLLM adapter loader). Pivoting to Qwen3-8B (student) + Qwen3-32B (teacher) — LoRA was validated on Qwen3-8B in v0.3.0. Smaller student + LoRA = faster iteration, implicit regularization, and higher LR (3e-4). Different model family tests whether the context injection + distillation approach generalizes beyond gpt-oss.
+2. **Hypothesis (M9):** LoRA on Qwen3-8B with Qwen3-32B teacher + context injection achieves competitive accuracy. LoRA's rank-32 bottleneck acts as implicit regularization against k400 overfitting. Higher LR (3e-4) enables faster convergence.
+3. **Prediction:** Need Qwen3-8B baseline first. Expect peak accuracy above baseline within 5 epochs. Less zigzag than E045 (consecutive epoch delta < 1.5pp). Falsified if: peak <= baseline after 10 epochs OR training destabilizes (loss spikes).
+4. **Design:** MODEL_NAME=Qwen/Qwen3-8B, TEACHER_MODEL_PATH=Qwen/Qwen3-32B, TRAIN_MODE=lora, LORA_DIM=32, LORA_ALPHA=32, LR=3e-4, constant, IS_CAP=5.0, temp=1.2, online_feedback, ASYNC_ROLLOUT=1, context-injected k400 dataset. 10 epochs. GPU layout: 0 2 1 (1 vLLM, 2 trainers, 1 logprob).
+5. **Results:** (pending — waiting for Qwen3-32B download)
+6. **Analysis:** (pending)
+7. **Conclusion:** (pending)
+8. **New questions:** (pending)
