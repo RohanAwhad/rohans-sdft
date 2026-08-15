@@ -192,7 +192,7 @@ Same frozen base + adapter in-place update via the existing NCCL group (adapter 
 2. **Phase A — bridge LoRA training**: replace full-weight FSDP trainer with `finetune()` + `LoRA` config (recipe base, custom dataset/collator → SDFT JSONL); enable `also_save_hf_checkpoint`.
 3. **Phase B — vLLM hot-swap**: add `--enable-lora --max-lora-rank` to `start_vllm.sh` (or `start_vllm_patched.py`); new `push_lora()` in `vllm_utils.py` (save → load_inplace → optional pause/resume barrier); rollout `model="sdft-policy"`.
 4. **Phase C — teacher adapter sync**: logprob server loads frozen base + adapter; NCCL sync filtered to adapter params; EMA on adapter params.
-5. **Phase D — validation**: 0.6B smoke → 8B parity run (loss curve vs full-weight baseline), sync-time + rollout-downtime measurements, `verify_adapter.py` gate.
+5. **Phase D — validation**: 0.6B smoke → 8B parity run (loss curve vs full-weight baseline), sync-time + rollout-downtime measurements, `verify_adapter.py` gate (our one-time gate script, since removed in commit 0af7aab; result in `devlogs.md`).
 
 ## Sources
 

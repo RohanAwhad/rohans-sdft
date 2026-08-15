@@ -183,7 +183,10 @@ are preallocated from it; memory scales linearly — don't oversize).
    logprob server; verify loss decreases, adapter pushes succeed each step,
    rollout uses the pushed adapter (log `model` in requests).
 2. **`verify_adapter.py` gate (one-time)**: exported adapter logit-parity vs
-   the Megatron-side merged weights (GQA split sanity for Qwen3-8B).
+   the Megatron-side merged weights (GQA split sanity for Qwen3-8B). Result:
+   top-20 agreement 0.9727, PASS (threshold 0.95). The script was removed
+   after the one-time check (commit 0af7aab) — result retained in `devlogs.md`.
+   To re-run: `git show 0af7aab^:megatron_trainer/verify_adapter.py > /tmp/verify_adapter.py`.
 3. **Parity run (8B)**: `TRAIN_MODE=full` vs `TRAIN_MODE=lora` on identical
    SDFT data + seeds — loss curves, `pass_rate`, completion lengths.
 4. **Metrics**: sync payload size (16 GB → MBs), per-step sync wall time,
