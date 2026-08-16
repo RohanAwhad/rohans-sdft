@@ -357,6 +357,31 @@ re-verified as of writing this plan).
   then, the on-disk copy isn't needed). Also manually cleaned up E047's
   already-existing non-`SAVE_EVERY` step dirs (kept step_0/5/10).
 
+## Parallel implementation found: PR #24 (`ra/grpo-impl`)
+
+Discovered a second, independent GRPO implementation on GitHub PR #24
+(branch `ra/grpo-impl`, based on `ra/grpo` — the shared design-spec commit
+both branches forked from, NOT a merge of my `ra/grpo-live` work).
+Delegated a full comparison (see `EXPERIMENTS.log` for the summary).
+**Verdict: cherry-pick, don't merge** — deep structural conflicts in
+`trainer.py`/`chunked_head.py`, PR24 has zero LoRA support (would crash
+via `fsdp_model.finish_grad_sync()` with no None-guard if merged naively),
+and its rollout generation is hardcoded serialized (`max_workers=1`) —
+would be far too slow at our G=8 concurrent-generation scale. But it
+surfaced real gaps in my implementation:
+- **Fixed immediately**: `gpg_rescale` was computed per-rank-local, which
+  with `groups_per_step=1` (our actual config) made it a permanent no-op
+  (1.0, or 10000x of an already-zero degenerate loss) — never doing the
+  intended cross-rank compensation. Now all-reduced globally across ranks
+  before computing the rescale factor (`trainer.py`, commit `7da66ac`).
+  This may materially explain the flat/no-progress accuracy trend so far,
+  since ~60% of steps were effectively contributing near-zero net signal.
+- **Candidates for follow-up** (not yet ported): `GRPO_FILTER_GROUPS`
+  dynamic resampling of degenerate groups (directly targets the same
+  ~60% rate), K3++ reference KL (complete/tested in PR24, stubbed here),
+  reflector `reward_only` fast-path (64 vs 2048 max_tokens — cheap win on
+  the generation-bound bottleneck).
+
 ## Open questions carried into this phase
 
 1. Does GRPO beat the 0.73 reverse-KL ceiling on **plain** data too, or does
