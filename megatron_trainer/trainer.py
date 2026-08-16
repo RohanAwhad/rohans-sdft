@@ -21,6 +21,7 @@ Launch: torchrun --nproc_per_node=N -m megatron_trainer.trainer
 import concurrent.futures
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -777,6 +778,15 @@ def _step_tail(
             )
         adapter_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
         push_lora_adapter(model, adapter_dir, rank=rank)
+        if rank == 0 and optimizer_step % SAVE_EVERY != 0:
+            # push_lora_adapter always writes adapter_dir to disk (vLLM's
+            # hot-swap loads the new adapter from a local path) — but vLLM
+            # has already loaded the weights into GPU memory by this point,
+            # so the on-disk copy is only needed for SAVE_EVERY-cadence
+            # "real" checkpoints. Delete the rest: every optimizer step
+            # otherwise leaves behind a full checkpoint dir (disk pressure,
+            # and auto_eval_poller.sh would try to eval every single one).
+            shutil.rmtree(adapter_dir, ignore_errors=True)
     else:
         if not TEACHER_MODEL_PATH and USE_LOGPROB_SERVER:
             sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
