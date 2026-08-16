@@ -119,6 +119,10 @@ from megatron_trainer.vllm_utils import (
 # producer to version-stamp generations (policy_version).
 _OPTIMIZER_STEP: int = 0
 
+# Transient (non-SAVE_EVERY) LoRA adapter dir awaiting deletion — see the
+# TRAIN_MODE == "lora" branch of _step_tail for why deletion is delayed.
+_PENDING_DELETE_DIR: str | None = None
+
 # End-of-data signal: the producer pushes this as its very last queue item.
 # The done signal travels through the queue itself — immune to the
 # check-flag-then-block race a separate Event has (producer can set the event
@@ -778,15 +782,29 @@ def _step_tail(
             )
         adapter_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
         push_lora_adapter(model, adapter_dir, rank=rank)
-        if rank == 0 and optimizer_step % SAVE_EVERY != 0:
+        if rank == 0:
             # push_lora_adapter always writes adapter_dir to disk (vLLM's
-            # hot-swap loads the new adapter from a local path) — but vLLM
-            # has already loaded the weights into GPU memory by this point,
-            # so the on-disk copy is only needed for SAVE_EVERY-cadence
-            # "real" checkpoints. Delete the rest: every optimizer step
-            # otherwise leaves behind a full checkpoint dir (disk pressure,
-            # and auto_eval_poller.sh would try to eval every single one).
-            shutil.rmtree(adapter_dir, ignore_errors=True)
+            # hot-swap loads the new adapter from a local path). The on-disk
+            # copy is only needed long-term for SAVE_EVERY-cadence "real"
+            # checkpoints — every other optimizer step's dir is transient
+            # (disk pressure, and auto_eval_poller.sh would try to eval every
+            # single one) and gets deleted.
+            #
+            # BUT: vLLM's HTTP response confirms the load request was
+            # accepted, not that the file is done being read (safetensors
+            # loads can be mmap-backed and page in lazily) — deleting the
+            # just-pushed dir immediately risks a use-after-free crash in
+            # the engine. Observed in practice: every crash in a string of
+            # ~7 back-to-back failed attempts happened immediately after
+            # optimizer_step=1, the first step this deletion path ever runs.
+            # Fix: delay deletion by one step. load_inplace=True replaces
+            # the adapter in the same GPU slot, so once the FOLLOWING push
+            # succeeds, vLLM has provably moved past the previous file.
+            global _PENDING_DELETE_DIR
+            stale_dir = _PENDING_DELETE_DIR
+            _PENDING_DELETE_DIR = adapter_dir if optimizer_step % SAVE_EVERY != 0 else None
+            if stale_dir is not None:
+                shutil.rmtree(stale_dir, ignore_errors=True)
     else:
         if not TEACHER_MODEL_PATH and USE_LOGPROB_SERVER:
             sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
