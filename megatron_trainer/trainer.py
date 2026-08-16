@@ -119,9 +119,14 @@ from megatron_trainer.vllm_utils import (
 # producer to version-stamp generations (policy_version).
 _OPTIMIZER_STEP: int = 0
 
-# Transient (non-SAVE_EVERY) LoRA adapter dir awaiting deletion — see the
+# Transient (non-SAVE_EVERY) LoRA adapter dirs awaiting deletion — see the
 # TRAIN_MODE == "lora" branch of _step_tail for why deletion is delayed.
-_PENDING_DELETE_DIR: str | None = None
+# Margin of 3 is comfortably above vLLM's --max-cpu-loras=2 (train_full.sh):
+# a 1-step delay still crashed the engine (observed twice, reproducibly, ~8s
+# after the first real rmtree each time) — the CPU-side LRU adapter cache
+# apparently keeps more than just the immediately-previous generation alive.
+_PENDING_DELETE_DIRS: deque[str] = deque()
+_DELETE_DELAY_STEPS = 3
 
 # End-of-data signal: the producer pushes this as its very last queue item.
 # The done signal travels through the queue itself — immune to the
@@ -791,20 +796,18 @@ def _step_tail(
             # single one) and gets deleted.
             #
             # BUT: vLLM's HTTP response confirms the load request was
-            # accepted, not that the file is done being read (safetensors
-            # loads can be mmap-backed and page in lazily) — deleting the
-            # just-pushed dir immediately risks a use-after-free crash in
-            # the engine. Observed in practice: every crash in a string of
-            # ~7 back-to-back failed attempts happened immediately after
-            # optimizer_step=1, the first step this deletion path ever runs.
-            # Fix: delay deletion by one step. load_inplace=True replaces
-            # the adapter in the same GPU slot, so once the FOLLOWING push
-            # succeeds, vLLM has provably moved past the previous file.
-            global _PENDING_DELETE_DIR
-            stale_dir = _PENDING_DELETE_DIR
-            _PENDING_DELETE_DIR = adapter_dir if optimizer_step % SAVE_EVERY != 0 else None
-            if stale_dir is not None:
-                shutil.rmtree(stale_dir, ignore_errors=True)
+            # accepted, not that every internal reference to the old file is
+            # gone (safetensors loads can be mmap-backed and page in lazily;
+            # --max-cpu-loras=2 also means vLLM's LRU cache can hold more
+            # than just the immediately-previous adapter generation).
+            # Deleting too early risks a use-after-free crash in the engine.
+            # Keep a rolling window of the last _DELETE_DELAY_STEPS transient
+            # dirs alive and only delete once a dir falls out of that window
+            # (i.e. that many subsequent pushes have succeeded since).
+            if optimizer_step % SAVE_EVERY != 0:
+                _PENDING_DELETE_DIRS.append(adapter_dir)
+            while len(_PENDING_DELETE_DIRS) > _DELETE_DELAY_STEPS:
+                shutil.rmtree(_PENDING_DELETE_DIRS.popleft(), ignore_errors=True)
     else:
         if not TEACHER_MODEL_PATH and USE_LOGPROB_SERVER:
             sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
