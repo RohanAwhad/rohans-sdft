@@ -1158,7 +1158,24 @@ def train() -> None:
 
                 num_groups_local = len(groups_for_step)
                 num_nondeg_local = sum(1 for g in groups_for_step if not g[0]["is_degenerate"])
-                gpg_rescale = num_groups_local / max(num_nondeg_local, 1e-4)
+                # GPG rescale must reflect the whole step's population of
+                # groups across all ranks, not just this rank's local slice.
+                # With the common config (groups_per_step=1, i.e. world_size
+                # groups/step, 1/rank), a per-rank-local count can only ever
+                # be 0/1 or 1/1 -- making the rescale a no-op (1.0, or a
+                # no-op 10000x of an already-zero degenerate loss) instead of
+                # the intended cross-rank compensation (up-weight surviving
+                # non-degenerate groups' gradient by however many degenerate
+                # groups were dropped this step, so the effective per-step
+                # gradient magnitude doesn't shrink as the degenerate rate
+                # rises). All-reduce the local counts to get the true step-
+                # wide totals before computing the rescale factor.
+                counts = torch.tensor(
+                    [float(num_groups_local), float(num_nondeg_local)], device=device,
+                )
+                dist.all_reduce(counts)
+                num_groups_global, num_nondeg_global = counts[0].item(), counts[1].item()
+                gpg_rescale = num_groups_global / max(num_nondeg_global, 1e-4)
                 if rank == 0:
                     policy_lags = [_OPTIMIZER_STEP - g[0]["policy_version"] for g in groups_for_step]
 
@@ -1187,7 +1204,7 @@ def train() -> None:
                     reflector_fallback_count += sum(m["fallback"] for m in step_metas)
                     table_meta = step_metas[-1]["table"] if step_metas else None
                     accum_metrics.setdefault("grpo/frac_reward_zero_std", []).append(
-                        1.0 - (num_nondeg_local / max(num_groups_local, 1))
+                        1.0 - (num_nondeg_global / max(num_groups_global, 1))
                     )
                 else:
                     full_pass_rate = None
