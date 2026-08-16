@@ -321,9 +321,30 @@ re-verified as of writing this plan).
   `VLLM_SEED`-equivalent knob there), not a loading-correctness issue.
   `auto_eval_poller.sh` simplified to remove the whole merge/podman step
   (`merge_lora_for_eval.py` is now unused by the poller — still valid as a
-  standalone tool, just not on this hot path). Benefit beyond avoiding the
+  standalone tool, just not on this hot path).   Benefit beyond avoiding the
   42GB copies: one less heavy podman subprocess per eval cycle, which may
   also reduce the residual contention risk noted above.
+- **Data-integrity bug found+fixed: crash+restart silently overwrites
+  earlier checkpoints under the same step number.** No checkpoint-resume
+  exists, so every retry-loop restart reuses the same `OUTPUT_DIR` and
+  starts a fresh LoRA from step 0 — meaning attempt N's step_5 silently
+  overwrites attempt (N-1)'s step_5 on disk. Confirmed happening in
+  practice: attempt 4's step_5 checkpoint mtime was ~3.4 hours newer than
+  attempt 3's already-cached eval result for the same `step_5` path — the
+  poller would have kept reporting attempt 3's stale accuracy for what is
+  now a completely different (attempt 4) set of weights, indefinitely,
+  since its only check was "does run_1.json exist." Fixed:
+  `auto_eval_poller.sh` now compares mtimes (`ckpt_dir -nt out_path`) and
+  deletes+re-evaluates when the checkpoint is newer than its cached
+  result (same for `.eval_failed` markers). **Caveat this doesn't fix**:
+  the accuracy trend reported for steps 0-10 so far is all from attempt
+  3's single uninterrupted run (verified clean), but any *future* step
+  number that gets revisited across a restart will only ever have ONE
+  (the latest) eval result — there's no way to recover a full trajectory
+  across multiple restarts without real checkpoint-resume. Proper fix
+  (distinct per-attempt output namespace, or actual resume) still
+  deferred — this mtime check only prevents *silently trusting stale
+  data*, it doesn't reconstruct the lost history.
 - **`SAVE_EVERY` was silently ignored for LoRA mode**: `push_lora_adapter`
   (called every optimizer step, unconditionally, to hot-swap the adapter
   into vLLM) internally calls `save_hf_adapter_checkpoint` on every step
