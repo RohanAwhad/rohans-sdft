@@ -272,6 +272,25 @@ re-verified as of writing this plan).
   from scratch (no `TRAINER_SEED` set, so each attempt sees a different
   shuffle — not true resumption). Proper checkpoint-resume is the real fix,
   deferred until eval signal from short runs justifies the added scope.
+- **Likely major contributing factor found: `auto_eval_poller.sh` was
+  stuck in an infinite re-eval loop, hammering GPU 7 continuously during
+  E047's crash windows.** The poller blindly echoed "DONE" after
+  `eval_with_retrieval.py` regardless of exit code, and never marked
+  failed checkpoints — so `sdft_gptoss_20b_run_44_long/epoch_46` (a
+  checkpoint that fails to load, unrelated root cause) was being
+  re-evaluated on **every single 5-minute scan cycle**, back-to-back with
+  almost no idle gap, for the entire time E047's attempt-5 retry loop was
+  crashing repeatedly within 1-2 steps each try (much worse than attempt
+  4's 5 good steps). Podman GPU isolation is device-level only — shared
+  host CPU (tokenization/scheduling), PCIe, and NVMe bandwidth between the
+  poller's continuous eval workload (GPU 7) and the training vLLM instance
+  (GPU 0) is a plausible mechanism for the throughput collapses observed.
+  Fixed: `auto_eval_poller.sh` now checks the eval command's exit status
+  and writes a `$ckpt_dir/.eval_failed` marker on failure (merge failure
+  or eval failure), skipped on future scans — no more infinite retries.
+  Poller paused (not restarted) to test this hypothesis cleanly: watching
+  whether E047's current retry-loop attempt achieves multi-step stability
+  now that the confound is removed, before restarting the (fixed) poller.
 
 ## Open questions carried into this phase
 
