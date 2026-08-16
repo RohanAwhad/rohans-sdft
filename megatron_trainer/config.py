@@ -1,4 +1,4 @@
-"""SDFT training configuration (Megatron Bridge version). All overridable via environment variables."""
+"""SDFT/GRPO training configuration. All values are environment-overridable."""
 
 import os
 
@@ -40,6 +40,10 @@ GPU_TRAINER = int(os.environ.get("GPU_TRAINER", "1"))
 GPU_LOGPROB_SERVER = int(os.environ.get("GPU_LOGPROB_SERVER", "2"))
 
 # Training hyperparams
+LOSS_TYPE = os.environ.get("LOSS_TYPE", "sdft")
+if LOSS_TYPE not in ("sdft", "grpo"):
+    raise ValueError(f"LOSS_TYPE must be 'sdft' or 'grpo', got {LOSS_TYPE!r}")
+
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-5"))
 # LR schedule: "constant" (fixed LEARNING_RATE) or "cosine" (linear warmup of
 # min(10% of total optimizer steps, 100), then cosine decay to 0)
@@ -88,6 +92,62 @@ GEN_TOP_P = float(os.environ.get("GEN_TOP_P", "1.0"))
 IS_WEIGHTING = os.environ.get("IS_WEIGHTING", "1") == "1"
 IS_CAP = float(os.environ.get("IS_CAP", "5.0"))
 
+# GRPO objective (used only when LOSS_TYPE=grpo).
+GRPO_GROUPS = int(os.environ.get("GRPO_GROUPS", "8"))
+GRPO_ADV = os.environ.get("GRPO_ADV", "mean")
+GRPO_CLIP_LOW = float(os.environ.get("GRPO_CLIP_LOW", "0.2"))
+GRPO_CLIP_HIGH = float(os.environ.get("GRPO_CLIP_HIGH", "0.28"))
+GRPO_OLD_LOGPS = os.environ.get("GRPO_OLD_LOGPS", "vllm")
+GRPO_IS_C_MAX = float(os.environ.get("GRPO_IS_C_MAX", "3.0"))
+GRPO_IS_MODE = os.environ.get("GRPO_IS_MODE", "truncate")
+GRPO_KL_COEF = float(os.environ.get("GRPO_KL_COEF", "0.0"))
+GRPO_KL_REF = os.environ.get("GRPO_KL_REF", "ema_teacher")
+GRPO_FILTER_GROUPS = os.environ.get("GRPO_FILTER_GROUPS", "0") == "1"
+GRPO_MAX_GEN_BATCHES = int(os.environ.get("GRPO_MAX_GEN_BATCHES", "10"))
+GRPO_LR = float(os.environ.get("GRPO_LR", "1e-6"))
+GRPO_LR_WARMUP_STEPS = int(os.environ.get("GRPO_LR_WARMUP_STEPS", "15"))
+GRPO_GRAD_CLIP = float(os.environ.get("GRPO_GRAD_CLIP", "0.2"))
+GRPO_MASK_TRUNCATED = os.environ.get("GRPO_MASK_TRUNCATED", "1") == "1"
+
+if LOSS_TYPE == "grpo":
+    if GRPO_GROUPS < 2:
+        raise ValueError(f"GRPO_GROUPS must be >= 2, got {GRPO_GROUPS}")
+    if GRPO_ADV not in ("mean", "zscore", "median"):
+        raise ValueError(
+            f"GRPO_ADV must be 'mean', 'zscore', or 'median', got {GRPO_ADV!r}"
+        )
+    if GRPO_CLIP_LOW < 0 or GRPO_CLIP_HIGH < 0:
+        raise ValueError("GRPO_CLIP_LOW and GRPO_CLIP_HIGH must be >= 0")
+    if GRPO_OLD_LOGPS not in ("vllm", "detached"):
+        raise ValueError(
+            f"GRPO_OLD_LOGPS must be 'vllm' or 'detached', got {GRPO_OLD_LOGPS!r}"
+        )
+    if GRPO_IS_C_MAX < 1:
+        raise ValueError(f"GRPO_IS_C_MAX must be >= 1, got {GRPO_IS_C_MAX}")
+    if GRPO_IS_MODE not in ("truncate", "mask"):
+        raise ValueError(
+            f"GRPO_IS_MODE must be 'truncate' or 'mask', got {GRPO_IS_MODE!r}"
+        )
+    if GRPO_KL_COEF < 0:
+        raise ValueError(f"GRPO_KL_COEF must be >= 0, got {GRPO_KL_COEF}")
+    if GRPO_KL_REF != "ema_teacher":
+        raise ValueError(
+            f"GRPO_KL_REF must be 'ema_teacher', got {GRPO_KL_REF!r}; "
+            "set TEACHER_MODEL_PATH for a frozen reference"
+        )
+    if GRPO_MAX_GEN_BATCHES < 1:
+        raise ValueError(
+            f"GRPO_MAX_GEN_BATCHES must be >= 1, got {GRPO_MAX_GEN_BATCHES}"
+        )
+    if GRPO_LR <= 0:
+        raise ValueError(f"GRPO_LR must be > 0, got {GRPO_LR}")
+    if GRPO_LR_WARMUP_STEPS < 0:
+        raise ValueError(
+            f"GRPO_LR_WARMUP_STEPS must be >= 0, got {GRPO_LR_WARMUP_STEPS}"
+        )
+    if GRPO_GRAD_CLIP <= 0:
+        raise ValueError(f"GRPO_GRAD_CLIP must be > 0, got {GRPO_GRAD_CLIP}")
+
 if STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS > MAX_TOTAL_LEN:
     raise ValueError(
         "STUDENT_MAX_PROMPT_LEN + GEN_MAX_NEW_TOKENS must be <= MAX_TOTAL_LEN "
@@ -135,6 +195,17 @@ MAX_ADAPTER_TURNS = int(os.environ.get("MAX_ADAPTER_TURNS", "5"))
 REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")
 REFLECTOR_REGION = os.environ.get("REFLECTOR_REGION", "us-east5")
 REFLECTOR_PROJECT_ID = os.environ.get("REFLECTOR_PROJECT_ID", "")
+
+if LOSS_TYPE == "grpo" and ENV_TYPE == "rag":
+    if HINDSIGHT_FIELD != "online_feedback":
+        raise ValueError(
+            "LOSS_TYPE=grpo with ENV_TYPE=rag requires "
+            "HINDSIGHT_FIELD=online_feedback so every rollout has a binary reward"
+        )
+    if not REFLECTOR_PROJECT_ID:
+        raise ValueError(
+            "LOSS_TYPE=grpo with ENV_TYPE=rag requires REFLECTOR_PROJECT_ID"
+        )
 
 # Wandb
 WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "sdft-online")

@@ -761,3 +761,37 @@ Separate teacher: `TEACHER_MODEL_PATH` env var → logprob server loads a differ
 
 ### Remaining
 - OLS runs: fix last-message-is-tool hint placement; OLS 10/31 empty-golden examples now auto-dropped by filter (may need TEACHER_MAX_PROMPT_LEN bump).
+
+## 2026-08-15 - GRPO loss and trainer path
+
+### Contract and implementation
+- Added `LOSS_TYPE=grpo`; `sdft` remains the default and retains its existing loss path.
+- A prompt produces a whole group of `GRPO_GROUPS` rollouts. Reward, finish reason, rollout log-probs, group id, advantage, and policy version stay together through sync/async rank assignment.
+- Async rollout-batch ids are separate from policy versions, preventing seed/group-id reuse when generation gets ahead of optimizer updates.
+- Added mean, z-score, and median/MAD advantages; overlong masking; bounded missing-reward and degenerate-group resampling; global GPG rescaling; DAPO token normalization; asymmetric PPO clipping; sequence TIS; and optional special-token-masked K3++ reference KL.
+- Added an analytic selected-token log-prob backward so GRPO keeps one LM-head call without retaining a full fp32 softmax graph.
+- `GRPO_KL_COEF=0` skips teacher requests/setup. Positive beta reuses the plain-prompt EMA/frozen logprob-server reference.
+- Added `data/grpo_smoke.jsonl` and 12 CPU numeric/dataflow tests, including an SDFT `ChunkedRowKL` regression.
+
+### Node-12 commands and effective smoke config
+- Host: `rh-h100-12` (`ai-innovation-h100-12-preserve`); isolated staging: `/mnt/nvme0n1/rawhad/grpo_impl_test`.
+- Launch shape: `bash megatron_trainer/train_full.sh 0 2 1` with container `grpo-math-smoke-10` (vLLM GPU 0, trainer GPUs 1/2, idle beta-zero logprob GPU 3).
+- Effective config: `Qwen/Qwen3-8B`, `LOSS_TYPE=grpo`, `G=8`, `GRAD_ACCUM_STEPS=16`, `GRPO_ADV=mean`, vLLM old log-probs, beta 0, filter off, max 10 repair batches, LR `1e-6`, warmup 4, grad clip `0.2`, generation length 512, temperature 1, trainer/vLLM seeds 42, and 16 smoke prompts.
+- Reward service: `ENV_TYPE=rag`, `HINDSIGHT_FIELD=online_feedback`, `claude-haiku-4-5@20251001`, `us-east5`, project `itpc-gcp-ai-eng-claude`.
+- Unit command: NeMo 26.06 CPU container with `python -m unittest -v megatron_trainer.test_grpo`.
+
+### Evidence
+- The final unit run passed all 12 group-math, gradient, clipping/IS, K3++, one-head-call, and SDFT regression tests (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/grpo_unit_tests.log:34-50`).
+- Two trainer ranks started with one whole G=8 group per rank, and the GRPO LR/warmup configuration was active (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2225-2239`).
+- Beta zero skipped logprob-server setup after the vLLM NCCL engine initialized (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2243-2247`).
+- Missing grader outputs exercised bounded slot repair while valid rollouts were retained (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2262-2270`, `/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2292-2294`).
+- Step 1 had finite non-zero loss `-0.8739`, finite non-zero grad norm `5.6569`, pass rate `0.875`, global zero-std fraction `0.5`, and GPG rescale `2.0` (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2271`). Weights then synchronized to vLLM, with `teacher=0.0s` (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2272-2276`).
+- Step 2 had finite non-zero loss `-0.3744`, finite non-zero grad norm `0.7679`, and pass rate `1.0` (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2295`). Weight sync completed again, with `teacher=0.0s` (`/mnt/nvme0n1/rawhad/grpo_impl_test/logs/trainer.log:2296-2298`).
+- The exact smoke interval `trainer.log:2224-2300` contains no NaN, OOM, traceback, collective-mismatch, or deadlock entry. The run was deliberately stopped after two completed updates, not treated as a full training/eval run.
+
+### Conclusions and gotchas
+- Mechanical end-to-end GRPO is working on node 12: grouped generation/reward, distributed backward, optimizer updates, and post-step vLLM sync all completed twice.
+- Pass rate moved `0.875 -> 1.0`, but these are two different training minibatches with no held-out eval; this is not evidence of model-quality improvement.
+- `REFLECTOR_PROJECT_ID` must be `itpc-gcp-ai-eng-claude`; an empty project fails resolution, and ADC quota project `redhat-ai-analysis` is not reliable for this publisher endpoint.
+- Sonnet grading was quota-limited. Haiku was usable, but missing/invalid responses still occurred, so slot repair is necessary. GRPO reward calls are currently serialized for reliable smoke behavior.
+- The beta-zero trainer does no teacher forward/setup, but `train_full.sh` still launches an idle logprob process/GPU. Removing that allocation is a launcher optimization, not required for loss correctness.

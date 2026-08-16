@@ -34,11 +34,15 @@ from datasets import load_dataset
 from loguru import logger
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
+from transformers import (
+    AutoTokenizer,
+    get_constant_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
+)
 
 import wandb
 from megatron_trainer.collator import SDFTCollator
-from megatron_trainer.chunked_head import make_kl_processor
+from megatron_trainer.chunked_head import make_grpo_processor, make_kl_processor
 from megatron_trainer.config import (
     ASYNC_ROLLOUT,
     BATCH_SIZE,
@@ -46,12 +50,27 @@ from megatron_trainer.config import (
     ENV_TYPE,
     GEN_MAX_NEW_TOKENS,
     GRAD_ACCUM_STEPS,
+    GRPO_ADV,
+    GRPO_CLIP_HIGH,
+    GRPO_CLIP_LOW,
+    GRPO_FILTER_GROUPS,
+    GRPO_GRAD_CLIP,
+    GRPO_GROUPS,
+    GRPO_IS_C_MAX,
+    GRPO_IS_MODE,
+    GRPO_KL_COEF,
+    GRPO_LR,
+    GRPO_LR_WARMUP_STEPS,
+    GRPO_MASK_TRUNCATED,
+    GRPO_MAX_GEN_BATCHES,
+    GRPO_OLD_LOGPS,
     HF_MODEL_PATH,
     HINDSIGHT_FIELD,
     IS_CAP,
     IS_WEIGHTING,
     LEARNING_RATE,
     LR_SCHEDULER,
+    LOSS_TYPE,
     MAX_GRAD_NORM,
     MAX_TOTAL_LEN,
     MODEL_NAME,
@@ -73,6 +92,14 @@ from megatron_trainer.config import (
     WANDB_NAME,
 )
 from megatron_trainer.env import ApiAdapterEnv, RagEnv
+from megatron_trainer.grpo import (
+    grpo_async_queue_order,
+    grpo_kl_special_token_ids,
+    grpo_rollouts_per_prompt,
+    grpo_seed_offset,
+    prepare_grpo_group,
+    stamp_grpo_loss_scales,
+)
 from megatron_trainer.model_utils import (
     cleanup,
     init_distributed_trainer,
@@ -108,7 +135,13 @@ _ROLLOUT_SENTINEL = object()
 # ---------------------------------------------------------------------------
 
 
-def _build_env(item: dict, success_cache: dict[str, str], tokenizer, vllm_idx: int):
+def _build_env(
+    item: dict,
+    success_cache: dict[str, str],
+    tokenizer,
+    vllm_idx: int,
+    seed_offset: int = 0,
+):
     """Build a rollout env for one dataset item (vLLM round-robins instances)."""
     url = VLLM_BASE_URLS[vllm_idx % len(VLLM_BASE_URLS)]
     if ENV_TYPE == "rag":
@@ -123,6 +156,8 @@ def _build_env(item: dict, success_cache: dict[str, str], tokenizer, vllm_idx: i
             tokenizer=tokenizer,
             use_reflector=use_reflector,
             golden_chunk=item["golden_chunks"][0],
+            seed_offset=seed_offset,
+            reward_only=LOSS_TYPE == "grpo",
         )
     return ApiAdapterEnv(
         prompt_text=item["prompt_texts"][0],
@@ -131,6 +166,7 @@ def _build_env(item: dict, success_cache: dict[str, str], tokenizer, vllm_idx: i
         golden_answer=item["golden_answers"][0],
         tokenizer=tokenizer,
         success_cache=success_cache,
+        seed_offset=seed_offset,
     )
 
 
@@ -180,26 +216,31 @@ def _aggregate_pass_rate(metas: list[dict]) -> float | None:
     return sum(vals) / len(vals)
 
 
-def produce(items: list[dict], success_cache: dict[str, str], policy_version: int, tokenizer):
-    """Rank-0 rollout for one batch of items.
-
-    Builds envs, runs them, updates success_cache (api_adapter), and returns
-    (rollout_data, metas, batch_meta). rollout_data is the broadcast payload;
-    metas/batch_meta feed the wandb logging.
-    """
-    envs = [_build_env(item, success_cache, tokenizer, i) for i, item in enumerate(items)]
-
-    with ThreadPoolExecutor(max_workers=min(32, len(envs))) as executor:
-        list(executor.map(lambda e: e.run(), envs))
-
+def _update_success_cache(envs: list, success_cache: dict[str, str]) -> None:
     if ENV_TYPE == "api_adapter":
-        # Cache successful adapter responses
         for env in envs:
             if env.episode_result and env.completion_text:
                 parsed_verdict, parsed_feedback = env.parse_adapter_response(env.completion_text)
                 if parsed_verdict:
                     cached_text = f"Verdict: {parsed_verdict}\nFeedback: {parsed_feedback}"
                     success_cache[env.raw_question] = cached_text
+
+
+def _run_envs(envs: list, *, max_workers: int = 32) -> None:
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(envs))) as executor:
+        list(executor.map(lambda env: env.run(), envs))
+
+
+def _produce_sdft(
+    items: list[dict],
+    success_cache: dict[str, str],
+    policy_version: int,
+    tokenizer,
+):
+    """Existing one-completion-per-prompt SDFT rollout path."""
+    envs = [_build_env(item, success_cache, tokenizer, i) for i, item in enumerate(items)]
+    _run_envs(envs)
+    _update_success_cache(envs, success_cache)
 
     rollout_data = [
         {
@@ -218,6 +259,162 @@ def produce(items: list[dict], success_cache: dict[str, str], policy_version: in
         "table": metas[-1]["table"],
     }
     return rollout_data, metas, batch_meta
+
+
+def _grpo_payload(env, policy_version: int, tokenizer) -> dict:
+    if env.completion_text is None:
+        raise ValueError("GRPO env returned no completion_text")
+    meta = _sample_meta(env)
+    completion_ids = tokenizer.encode(env.completion_text, add_special_tokens=False)
+    return {
+        "prompt_text": env.prompt_text,
+        "completion_text": env.completion_text,
+        "completion_log_probs": env.completion_log_probs,
+        "finish_reason": env.finish_reason,
+        "privileged_information_prompt": env.privileged_information_prompt,
+        "policy_version": policy_version,
+        "reward": meta["pass_value"],
+        "active_token_count": min(len(completion_ids), GEN_MAX_NEW_TOKENS),
+        "_meta": meta,
+    }
+
+
+def _produce_grpo(
+    items: list[dict],
+    success_cache: dict[str, str],
+    policy_version: int,
+    tokenizer,
+    world_size: int,
+    rollout_batch: int,
+):
+    """Generate, score, and normalize complete prompt-local GRPO groups."""
+    generated_per_prompt = grpo_rollouts_per_prompt(GRPO_GROUPS, GRPO_ADV)
+    pending = {slot: item for slot, item in enumerate(items)}
+    accepted: dict[int, list[dict]] = {}
+    collected: dict[int, dict[int, dict]] = {slot: {} for slot in pending}
+    pending_reasons: dict[int, str] = {}
+
+    for attempt in range(GRPO_MAX_GEN_BATCHES):
+        if not pending:
+            break
+        envs: list = []
+        group_envs: dict[int, dict[int, object]] = {}
+        for slot, item in pending.items():
+            group_envs[slot] = {}
+            for group_index in range(generated_per_prompt):
+                if group_index in collected[slot]:
+                    continue
+                seed_offset = grpo_seed_offset(
+                    rollout_batch=rollout_batch,
+                    attempt=attempt,
+                    prompt_slot=slot,
+                    group_index=group_index,
+                    prompts_per_step=len(items),
+                    rollouts_per_prompt=generated_per_prompt,
+                    max_gen_batches=GRPO_MAX_GEN_BATCHES,
+                )
+                env = _build_env(
+                    item,
+                    success_cache,
+                    tokenizer,
+                    len(envs),
+                    seed_offset=seed_offset,
+                )
+                envs.append(env)
+                group_envs[slot][group_index] = env
+
+        _run_envs(envs, max_workers=1)
+        _update_success_cache(envs, success_cache)
+
+        next_pending: dict[int, dict] = {}
+        for slot, item in pending.items():
+            for group_index, env in group_envs[slot].items():
+                payload = _grpo_payload(env, policy_version, tokenizer)
+                if payload["reward"] is None:
+                    logger.info(
+                        f"GRPO retry: prompt_slot={slot} group_index={group_index} "
+                        f"attempt={attempt + 1} has no reward"
+                    )
+                elif payload["active_token_count"] == 0:
+                    logger.info(
+                        f"GRPO retry: prompt_slot={slot} group_index={group_index} "
+                        f"attempt={attempt + 1} has an empty completion"
+                    )
+                else:
+                    collected[slot][group_index] = payload
+            if len(collected[slot]) != generated_per_prompt:
+                next_pending[slot] = item
+                pending_reasons[slot] = "missing reward or empty completion"
+                continue
+            payloads = [
+                collected[slot][group_index]
+                for group_index in range(generated_per_prompt)
+            ]
+            group = prepare_grpo_group(
+                payloads,
+                group_id=rollout_batch * len(items) + slot,
+                advantage_type=GRPO_ADV,
+                mask_truncated=GRPO_MASK_TRUNCATED,
+            )
+            if len(group) != GRPO_GROUPS:
+                raise ValueError(
+                    f"Prepared GRPO group has {len(group)} rollouts, "
+                    f"expected {GRPO_GROUPS}"
+                )
+            if GRPO_FILTER_GROUPS and group[0]["group_degenerate"]:
+                next_pending[slot] = item
+                pending_reasons[slot] = "degenerate rewards"
+                collected[slot].clear()
+            else:
+                accepted[slot] = group
+                collected.pop(slot)
+                pending_reasons.pop(slot, None)
+        pending = next_pending
+
+    if pending:
+        reasons = ", ".join(
+            f"{reason}: {sum(value == reason for value in pending_reasons.values())}"
+            for reason in sorted(set(pending_reasons.values()))
+        )
+        raise RuntimeError(
+            f"GRPO could not produce {len(pending)} complete groups after "
+            f"{GRPO_MAX_GEN_BATCHES} batches ({reasons})"
+        )
+
+    rollout_data = [item for slot in sorted(accepted) for item in accepted[slot]]
+    stamp_grpo_loss_scales(
+        rollout_data,
+        world_size=world_size,
+        group_size=GRPO_GROUPS,
+    )
+    metas = [item["_meta"] for item in rollout_data]
+    batch_meta = {
+        "full_pass_rate": _aggregate_pass_rate(metas),
+        "fallback_delta": sum(meta["fallback"] for meta in metas),
+        "table": metas[-1]["table"],
+    }
+    return rollout_data, metas, batch_meta
+
+
+def produce(
+    items: list[dict],
+    success_cache: dict[str, str],
+    policy_version: int,
+    tokenizer,
+    world_size: int = 1,
+    rollout_batch: int | None = None,
+):
+    """Rank-0 rollout for one optimizer-step input batch."""
+    if LOSS_TYPE == "grpo":
+        return _produce_grpo(
+            items,
+            success_cache,
+            policy_version,
+            tokenizer,
+            world_size,
+            policy_version if rollout_batch is None else rollout_batch,
+        )
+    return _produce_sdft(items, success_cache, policy_version, tokenizer)
 
 
 def _push_sample(rollout_queue: queue.Queue, env, policy_version: int, success_cache: dict[str, str]) -> None:
@@ -246,12 +443,38 @@ def _produce_streaming(
     gen_times: deque,
     tokenizer,
     steps_per_epoch: int,
+    world_size: int,
 ) -> None:
     """Streaming producer: N_ASYNC envs in flight, per-sample push on
     completion — completion order, not dataset order (the reordering is the
     feature). Submits exactly steps_per_epoch * GRAD_ACCUM_STEPS samples (the
     same count the sync path trains), drains in-flight work, then pushes the
     end-of-data sentinel."""
+    if LOSS_TYPE == "grpo":
+        prompts_per_step = GRAD_ACCUM_STEPS // GRPO_GROUPS
+        rollout_batch_start = _OPTIMIZER_STEP
+        for batch_index in range(steps_per_epoch):
+            items = [next(data_iter) for _ in range(prompts_per_step)]
+            policy_version = _OPTIMIZER_STEP
+            t_start = time.monotonic()
+            rollout_data, _, _ = produce(
+                items,
+                success_cache,
+                policy_version,
+                tokenizer,
+                world_size=world_size,
+                rollout_batch=rollout_batch_start + batch_index,
+            )
+            for payload in grpo_async_queue_order(
+                rollout_data,
+                world_size=world_size,
+                group_size=GRPO_GROUPS,
+            ):
+                rollout_queue.put(payload)
+            gen_times.append(time.monotonic() - t_start)
+        rollout_queue.put(_ROLLOUT_SENTINEL)
+        return
+
     executor = ThreadPoolExecutor(max_workers=N_ASYNC)
     window: dict = {}
     sentinel = object()
@@ -298,10 +521,7 @@ def _train_sample(
     vocab_size: int,
     device: torch.device,
 ) -> dict | None:
-    """One sample: teacher log-probs → student forward → reverse-KL backward.
-
-    Returns per-sample results (None when the completion is empty — skipped).
-    """
+    """Train one completion with the configured SDFT or GRPO objective."""
     completion_ids: list[int] = tokenizer.encode(
         item_data["completion_text"], add_special_tokens=False,
     )
@@ -310,10 +530,12 @@ def _train_sample(
         return None
     completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
-    # Rollout (vLLM) log-probs for importance sampling; NaN marks
-    # never-sampled tokens (excluded from the IS weight).
+    # Rollout log-probs; NaN marks deterministic inserted/template tokens.
     rollout_log_probs = None
-    if IS_WEIGHTING:
+    needs_rollout_logps = (
+        IS_WEIGHTING if LOSS_TYPE == "sdft" else GRPO_OLD_LOGPS == "vllm"
+    )
+    if needs_rollout_logps:
         lp_list = item_data.get("completion_log_probs")
         if lp_list:
             lp_list = lp_list[: len(completion_ids)]
@@ -335,23 +557,6 @@ def _train_sample(
                 )
                 rollout_log_probs = torch.cat([rollout_log_probs, pad])
 
-    # Teacher log-probs via TCP (each rank independently)
-    t0 = time.monotonic()
-    cond_ids: list[int] = tokenizer.encode(
-        item_data["privileged_information_prompt"],
-        add_special_tokens=False, truncation=True, max_length=TEACHER_MAX_PROMPT_LEN,
-    )
-    teacher_log_probs = request_teacher_log_probs_tcp(
-        token_ids=cond_ids + completion_ids,
-        prompt_len=len(cond_ids),
-        vocab_size=vocab_size,
-        device=device,
-    )  # (C, V)
-    t_teacher = time.monotonic() - t0
-
-    # Student forward + chunked reverse-KL loss via MCore
-    # output_processor hook (head GEMM on local vocab shard only)
-    t0 = time.monotonic()
     prompt_enc = tokenizer(
         item_data["prompt_text"],
         add_special_tokens=False,
@@ -367,33 +572,92 @@ def _train_sample(
         input_ids.size(1), device=device, dtype=torch.long
     ).unsqueeze(0)
 
-    kl_processor = make_kl_processor(
-        prompt_len=prompt_len,
-        completion_ids=completion_ids,
-        teacher_log_probs=teacher_log_probs,
-        eos_token_id=tokenizer.eos_token_id,
-        device=device,
-        rollout_log_probs=rollout_log_probs,
-        is_weighting=IS_WEIGHTING,
-        is_cap=IS_CAP,
-    )
+    # SDFT always uses privileged teacher log-probs. GRPO requests a plain-
+    # prompt reference only when its KL coefficient is non-zero.
+    t0 = time.monotonic()
+    reference_log_probs = None
+    if LOSS_TYPE == "sdft":
+        cond_ids: list[int] = tokenizer.encode(
+            item_data["privileged_information_prompt"],
+            add_special_tokens=False,
+            truncation=True,
+            max_length=TEACHER_MAX_PROMPT_LEN,
+        )
+        reference_log_probs = request_teacher_log_probs_tcp(
+            token_ids=cond_ids + completion_ids,
+            prompt_len=len(cond_ids),
+            vocab_size=vocab_size,
+            device=device,
+        )
+    elif GRPO_KL_COEF > 0:
+        reference_log_probs = request_teacher_log_probs_tcp(
+            token_ids=prompt_ids.tolist() + completion_ids,
+            prompt_len=prompt_len,
+            vocab_size=vocab_size,
+            device=device,
+        )
+    t_teacher = time.monotonic() - t0
+
+    if LOSS_TYPE == "sdft":
+        loss_processor = make_kl_processor(
+            prompt_len=prompt_len,
+            completion_ids=completion_ids,
+            teacher_log_probs=reference_log_probs,
+            eos_token_id=tokenizer.eos_token_id,
+            device=device,
+            rollout_log_probs=rollout_log_probs,
+            is_weighting=IS_WEIGHTING,
+            is_cap=IS_CAP,
+        )
+    else:
+        loss_processor = make_grpo_processor(
+            prompt_len=prompt_len,
+            completion_ids=completion_ids,
+            advantage=item_data["advantage"],
+            loss_scale=item_data["grpo_loss_scale"],
+            rollout_log_probs=rollout_log_probs,
+            old_logps_type=GRPO_OLD_LOGPS,
+            clip_low=GRPO_CLIP_LOW,
+            clip_high=GRPO_CLIP_HIGH,
+            is_c_max=GRPO_IS_C_MAX,
+            is_mode=GRPO_IS_MODE,
+            reference_log_probs=reference_log_probs,
+            kl_coef=GRPO_KL_COEF,
+            special_token_ids=grpo_kl_special_token_ids(tokenizer),
+            device=device,
+        )
+
+    t0 = time.monotonic()
     loss, step_metrics = model(
         input_ids=input_ids,
         position_ids=position_ids,
         attention_mask=None,
-        output_processor=kl_processor,
+        output_processor=loss_processor,
     )
     t_student = time.monotonic() - t0
 
-    # Reverse-KL loss backward
+    if LOSS_TYPE == "grpo" and not torch.isfinite(loss).item():
+        raise FloatingPointError(
+            f"Non-finite GRPO loss at micro_step={micro_step}: {loss.item()}"
+        )
+
     t0 = time.monotonic()
-    # no_sync on non-final micro-steps (skip allreduce)
     is_final = (micro_step == local_accum_steps - 1)
     ctx = nullcontext() if is_final else fsdp_model.no_sync()
     with ctx:
-        scaled_loss = loss / local_accum_steps
+        scaled_loss = loss / local_accum_steps if LOSS_TYPE == "sdft" else loss
         scaled_loss.backward()
     t_loss_bwd = time.monotonic() - t0
+
+    if LOSS_TYPE == "grpo":
+        step_metrics.update(
+            {
+                "grpo/mean_length": len(completion_ids),
+                "grpo/frac_reward_zero_std": item_data["frac_reward_zero_std"],
+                "grpo/adv_mean_std": item_data["group_advantage_std"],
+                "grpo/gpg_rescale": item_data["gpg_rescale"],
+            }
+        )
 
     return {
         "loss": loss.item(),
@@ -411,19 +675,21 @@ def _pull_microbatch(
     rollout_queue: queue.Queue,
     device: torch.device,
 ) -> tuple[list[dict], bool]:
-    """Collective microbatch pull: rank 0 pops world_size samples (blocking),
-    broadcasts them. Returns (microbatch, epoch_done) on all ranks. The
-    producer's end-of-data sentinel is the only epoch-done signal."""
+    """Pop and broadcast one sample/rank (SDFT) or one group/rank (GRPO)."""
+    samples_per_rank = GRPO_GROUPS if LOSS_TYPE == "grpo" else 1
+    microbatch_size = world_size * samples_per_rank
     if rank == 0:
         first = rollout_queue.get()
         if first is _ROLLOUT_SENTINEL:
-            microbatch = [None] * world_size
+            microbatch = [None] * microbatch_size
             epoch_done = True
         else:
-            microbatch = [first] + [rollout_queue.get() for _ in range(world_size - 1)]
+            microbatch = [first] + [
+                rollout_queue.get() for _ in range(microbatch_size - 1)
+            ]
             epoch_done = False
     else:
-        microbatch = [None] * world_size
+        microbatch = [None] * microbatch_size
         epoch_done = False
     done_tensor = torch.tensor([1 if epoch_done else 0], dtype=torch.int, device=device)
     dist.broadcast(done_tensor, src=0)
@@ -475,7 +741,12 @@ def _step_tail(
 
     t0 = time.monotonic()
     fsdp_model.finish_grad_sync()
-    grad_norm = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+    max_grad_norm = GRPO_GRAD_CLIP if LOSS_TYPE == "grpo" else MAX_GRAD_NORM
+    grad_norm = clip_grad_norm_(model.parameters(), max_grad_norm)
+    if LOSS_TYPE == "grpo" and not torch.isfinite(grad_norm).item():
+        raise FloatingPointError(
+            f"Non-finite GRPO gradient norm before optimizer step: {grad_norm.item()}"
+        )
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
@@ -495,7 +766,11 @@ def _step_tail(
     if rank == 0:
         total_loss = agg_tensor[0].item()
         total_samples = max(agg_tensor[1].item(), 1)
-        avg_loss = total_loss / total_samples
+        avg_loss = (
+            total_loss / dist.get_world_size()
+            if LOSS_TYPE == "grpo"
+            else total_loss / total_samples
+        )
         global_grad_norm = agg_tensor[2].item() ** 0.5
         avg_comp_len = accum_comp_len_sum / max(accum_samples, 1)
 
@@ -504,10 +779,17 @@ def _step_tail(
             "train/completion_length": avg_comp_len,
             "train/grad_norm": global_grad_norm,
             "train/epoch": epoch,
-            "train/lr": scheduler.get_last_lr()[0] if scheduler is not None else LEARNING_RATE,
+            "train/lr": (
+                scheduler.get_last_lr()[0]
+                if scheduler is not None
+                else (GRPO_LR if LOSS_TYPE == "grpo" else LEARNING_RATE)
+            ),
         }
         if full_pass_rate is not None:
-            key = "reflector/pass_rate" if ENV_TYPE == "rag" else "episode/pass_rate"
+            if LOSS_TYPE == "grpo":
+                key = "grpo/pass_rate"
+            else:
+                key = "reflector/pass_rate" if ENV_TYPE == "rag" else "episode/pass_rate"
             log_dict[key] = full_pass_rate
         for k, vals in accum_metrics.items():
             log_dict[k] = sum(vals) / len(vals)
@@ -528,6 +810,8 @@ def _step_tail(
 
         wandb.log(log_dict, step=optimizer_step)
         metrics_str = " ".join(f"{k}={sum(vals) / len(vals):.4f}" for k, vals in sorted(accum_metrics.items()))
+        if LOSS_TYPE == "grpo" and full_pass_rate is not None:
+            metrics_str = f"grpo/pass_rate={full_pass_rate:.4f} {metrics_str}"
         lag_str = ""
         if policy_lags:
             lag_str = f" lag_mean={sum(policy_lags) / len(policy_lags):.1f} lag_max={max(policy_lags)}"
@@ -539,7 +823,8 @@ def _step_tail(
     # ---- Sync weights + checkpoint (all ranks — FSDP export/gather
     #      passes are collectives) ----
     t0 = time.monotonic()
-    if not TEACHER_MODEL_PATH:
+    needs_logprob_server = LOSS_TYPE == "sdft" or GRPO_KL_COEF > 0
+    if needs_logprob_server and not TEACHER_MODEL_PATH:
         sync_weights_to_logprob_server(model, logprob_comm, rank=rank)
     sync_weights_to_vllm(model, device, vllm_group, rank=rank)
     t_weight_sync = time.monotonic() - t0
@@ -589,7 +874,7 @@ def train() -> None:
     log_level = os.environ.get("LOGGING_LEVEL", "DEBUG")
     logger.add("logs/trainer.log", level=log_level)
 
-    logger.info("=== SDFT Megatron Trainer Starting ===")
+    logger.info(f"=== {LOSS_TYPE.upper()} Megatron Trainer Starting ===")
 
     # ---- Initialize torch.distributed via torchrun ----
     local_rank = init_distributed_trainer()
@@ -597,14 +882,24 @@ def train() -> None:
     world_size = dist.get_world_size()
     device = torch.device(f"cuda:{local_rank}")
 
-    assert GRAD_ACCUM_STEPS % world_size == 0, (
-        f"GRAD_ACCUM_STEPS ({GRAD_ACCUM_STEPS}) must be divisible by "
-        f"num_trainers ({world_size})"
-    )
+    if LOSS_TYPE == "grpo":
+        assert GRAD_ACCUM_STEPS % (world_size * GRPO_GROUPS) == 0, (
+            f"GRAD_ACCUM_STEPS ({GRAD_ACCUM_STEPS}) must be divisible by "
+            f"num_trainers * GRPO_GROUPS ({world_size} * {GRPO_GROUPS})"
+        )
+    else:
+        assert GRAD_ACCUM_STEPS % world_size == 0, (
+            f"GRAD_ACCUM_STEPS ({GRAD_ACCUM_STEPS}) must be divisible by "
+            f"num_trainers ({world_size})"
+        )
     local_accum_steps = GRAD_ACCUM_STEPS // world_size
+    local_group_steps = (
+        local_accum_steps // GRPO_GROUPS if LOSS_TYPE == "grpo" else local_accum_steps
+    )
 
     logger.info(f"FSDP: rank={rank}/{world_size}, local_rank={local_rank}, "
-                f"local_accum_steps={local_accum_steps}")
+                f"local_accum_steps={local_accum_steps} "
+                f"local_group_steps={local_group_steps}")
 
     # ---- Model + tokenizer ----
     # Two tokenizer instances: the Rust tokenizers library is NOT thread-safe
@@ -644,8 +939,14 @@ def train() -> None:
     logger.add("logs/trainer.log", level=log_level)
 
     # ---- Optimizer (FSDP: torch AdamW) ----
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=0.01)
-    logger.info(f"torch AdamW optimizer ready. LR={LEARNING_RATE}")
+    active_learning_rate = GRPO_LR if LOSS_TYPE == "grpo" else LEARNING_RATE
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=active_learning_rate,
+        betas=(0.9, 0.95),
+        weight_decay=0.01,
+    )
+    logger.info(f"torch AdamW optimizer ready. LR={active_learning_rate}")
 
     # ---- Dataset (all ranks load, only rank 0 iterates) ----
     logger.info(f"Loading dataset: {TRAIN_DATA_PATH}")
@@ -659,14 +960,32 @@ def train() -> None:
     dataloader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True,
     )
-    steps_per_epoch = len(dataset) // GRAD_ACCUM_STEPS
-    logger.info(f"Dataset: {len(dataset)} examples, {steps_per_epoch} steps/epoch")
+    prompts_per_step = (
+        GRAD_ACCUM_STEPS // GRPO_GROUPS
+        if LOSS_TYPE == "grpo"
+        else GRAD_ACCUM_STEPS
+    )
+    steps_per_epoch = len(dataset) // prompts_per_step
+    logger.info(
+        f"Dataset: {len(dataset)} examples, {steps_per_epoch} steps/epoch, "
+        f"prompts_per_step={prompts_per_step}"
+    )
 
     # ---- LR scheduler (total steps known only after dataset load) ----
     total_train_steps = steps_per_epoch * NUM_EPOCHS
     warmup_steps = 0
     scheduler = None
-    if LR_SCHEDULER == "cosine":
+    if LOSS_TYPE == "grpo":
+        warmup_steps = min(GRPO_LR_WARMUP_STEPS, total_train_steps)
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+        )
+        logger.info(
+            f"LR scheduler: GRPO constant, warmup={warmup_steps} over "
+            f"{total_train_steps} optimizer steps"
+        )
+    elif LR_SCHEDULER == "cosine":
         warmup_steps = min(int(0.1 * total_train_steps), 100)
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
@@ -695,10 +1014,10 @@ def train() -> None:
                 "teacher_model": TEACHER_MODEL_PATH,
                 "env_type": ENV_TYPE,
                 "backend": "fsdp",
-                "learning_rate": LEARNING_RATE,
-                "lr_scheduler": LR_SCHEDULER,
+                "learning_rate": active_learning_rate,
+                "lr_scheduler": "constant_with_warmup" if LOSS_TYPE == "grpo" else LR_SCHEDULER,
                 "warmup_steps": warmup_steps,
-                "max_grad_norm": MAX_GRAD_NORM,
+                "max_grad_norm": GRPO_GRAD_CLIP if LOSS_TYPE == "grpo" else MAX_GRAD_NORM,
                 "ema_alpha": EMA_ALPHA,
                 "batch_size": BATCH_SIZE,
                 "grad_accum_steps": GRAD_ACCUM_STEPS,
@@ -716,7 +1035,17 @@ def train() -> None:
                 "is_cap": IS_CAP,
                 "async_rollout": ASYNC_ROLLOUT,
                 "n_async": N_ASYNC,
-                "loss": "reverse_kl",
+                "loss": "reverse_kl" if LOSS_TYPE == "sdft" else "grpo",
+                "grpo_groups": GRPO_GROUPS if LOSS_TYPE == "grpo" else None,
+                "grpo_adv": GRPO_ADV if LOSS_TYPE == "grpo" else None,
+                "grpo_clip_low": GRPO_CLIP_LOW if LOSS_TYPE == "grpo" else None,
+                "grpo_clip_high": GRPO_CLIP_HIGH if LOSS_TYPE == "grpo" else None,
+                "grpo_old_logps": GRPO_OLD_LOGPS if LOSS_TYPE == "grpo" else None,
+                "grpo_is_c_max": GRPO_IS_C_MAX if LOSS_TYPE == "grpo" else None,
+                "grpo_is_mode": GRPO_IS_MODE if LOSS_TYPE == "grpo" else None,
+                "grpo_kl_coef": GRPO_KL_COEF if LOSS_TYPE == "grpo" else None,
+                "grpo_filter_groups": GRPO_FILTER_GROUPS if LOSS_TYPE == "grpo" else None,
+                "grpo_mask_truncated": GRPO_MASK_TRUNCATED if LOSS_TYPE == "grpo" else None,
                 "dataset": TRAIN_DATA_PATH,
                 "hindsight_field": HINDSIGHT_FIELD,
             },
@@ -728,14 +1057,18 @@ def train() -> None:
         vllm_group = init_vllm_weight_engine(device)
         logger.info("vLLM weight engine ready.")
 
-        logger.info("Waiting for logprob server...")
-        wait_for_logprob_server()
-        # External frozen teacher (TEACHER_MODEL_PATH set): no NCCL weight sync —
-        # the teacher keeps its downloaded weights.
-        if not TEACHER_MODEL_PATH:
-            logger.info("Initializing logprob weight transfer engine...")
-            logprob_comm = init_logprob_weight_engine(device)
-            logger.info("Logprob weight engine ready.")
+        needs_logprob_server = LOSS_TYPE == "sdft" or GRPO_KL_COEF > 0
+        if needs_logprob_server:
+            logger.info("Waiting for logprob server...")
+            wait_for_logprob_server()
+            # External frozen teacher (TEACHER_MODEL_PATH set): no NCCL
+            # weight sync; the teacher keeps its downloaded weights.
+            if not TEACHER_MODEL_PATH:
+                logger.info("Initializing logprob weight transfer engine...")
+                logprob_comm = init_logprob_weight_engine(device)
+                logger.info("Logprob weight engine ready.")
+        else:
+            logger.info("GRPO KL disabled; skipping logprob server setup.")
 
     # Barrier: all ranks wait for rank 0 to finish setup
     dist.barrier()
@@ -758,11 +1091,24 @@ def train() -> None:
 
         if ASYNC_ROLLOUT and rank == 0:
             threading.excepthook = _crash_hard_on_thread_error
-            rollout_queue = queue.Queue(maxsize=N_ASYNC + world_size + 1)
+            rollout_queue = queue.Queue(
+                maxsize=max(
+                    N_ASYNC + world_size + 1,
+                    GRAD_ACCUM_STEPS + 1 if LOSS_TYPE == "grpo" else 0,
+                )
+            )
             gen_times = deque()
             producer_thread = threading.Thread(
                 target=_produce_streaming,
-                args=(rollout_queue, data_iter, success_cache, gen_times, producer_tokenizer, steps_per_epoch),
+                args=(
+                    rollout_queue,
+                    data_iter,
+                    success_cache,
+                    gen_times,
+                    producer_tokenizer,
+                    steps_per_epoch,
+                    world_size,
+                ),
                 name="rollout-producer",
                 daemon=False,
             )
@@ -788,7 +1134,8 @@ def train() -> None:
                 t_loss_bwd_sum: float = 0.0
 
                 epoch_done = False
-                for micro in range(local_accum_steps):
+                accum_micro_step = 0
+                for _group_step in range(local_group_steps):
                     t0 = time.monotonic()
                     microbatch, done = _pull_microbatch(
                         rank, world_size, rollout_queue, device,
@@ -799,26 +1146,43 @@ def train() -> None:
                     t_producer_wait += time.monotonic() - t0
                     if rank == 0:
                         t_generation += _drain_gen_times(gen_times)
-                    item_data = microbatch[rank]
-                    if rank == 0:
-                        step_metas.append(item_data["_meta"])
-                        policy_lags.append(_OPTIMIZER_STEP - item_data["policy_version"])
-                    result = _train_sample(
-                        item_data, micro, local_accum_steps, fsdp_model, model,
-                        tokenizer, vocab_size, device,
-                    )
-                    if result is None:
-                        continue
-                    accum_loss_sum += result["loss"]
-                    accum_samples += 1
-                    accum_comp_len_sum += result["comp_len"]
-                    epoch_loss_sum += result["loss"]
-                    epoch_samples += 1
-                    for k, v in result["metrics"].items():
-                        accum_metrics.setdefault(k, []).append(v)
-                    t_teacher_sum += result["t_teacher"]
-                    t_student_sum += result["t_student"]
-                    t_loss_bwd_sum += result["t_loss_bwd"]
+                        meta_items = (
+                            microbatch if LOSS_TYPE == "grpo" else [microbatch[0]]
+                        )
+                        for queued_item in meta_items:
+                            step_metas.append(queued_item["_meta"])
+                            policy_lags.append(
+                                _OPTIMIZER_STEP - queued_item["policy_version"]
+                            )
+                    if LOSS_TYPE == "grpo":
+                        first = rank * GRPO_GROUPS
+                        rank_items = microbatch[first : first + GRPO_GROUPS]
+                    else:
+                        rank_items = [microbatch[rank]]
+                    for item_data in rank_items:
+                        result = _train_sample(
+                            item_data,
+                            accum_micro_step,
+                            local_accum_steps,
+                            fsdp_model,
+                            model,
+                            tokenizer,
+                            vocab_size,
+                            device,
+                        )
+                        accum_micro_step += 1
+                        if result is None:
+                            continue
+                        accum_loss_sum += result["loss"]
+                        accum_samples += 1
+                        accum_comp_len_sum += result["comp_len"]
+                        epoch_loss_sum += result["loss"]
+                        epoch_samples += 1
+                        for k, v in result["metrics"].items():
+                            accum_metrics.setdefault(k, []).append(v)
+                        t_teacher_sum += result["t_teacher"]
+                        t_student_sum += result["t_student"]
+                        t_loss_bwd_sum += result["t_loss_bwd"]
 
                 if epoch_done:
                     break
@@ -849,9 +1213,13 @@ def train() -> None:
                 # ---- Rank 0: rollout + build broadcast data ----
                 t_gen_start = time.monotonic()
                 if rank == 0:
-                    items = [next(data_iter) for _ in range(GRAD_ACCUM_STEPS)]
+                    items = [next(data_iter) for _ in range(prompts_per_step)]
                     rollout_data, metas, batch_meta = produce(
-                        items, success_cache, _OPTIMIZER_STEP, producer_tokenizer,
+                        items,
+                        success_cache,
+                        _OPTIMIZER_STEP,
+                        producer_tokenizer,
+                        world_size=world_size,
                     )
                 else:
                     rollout_data = [None] * GRAD_ACCUM_STEPS
@@ -914,7 +1282,11 @@ def train() -> None:
                 )
 
         # ---- Epoch summary ----
-        avg_epoch_loss = epoch_loss_sum / max(epoch_samples, 1)
+        avg_epoch_loss = (
+            epoch_loss_sum / max(steps_per_epoch, 1)
+            if LOSS_TYPE == "grpo"
+            else epoch_loss_sum / max(epoch_samples, 1)
+        )
         logger.info(
             f"Epoch {epoch + 1}/{NUM_EPOCHS} done. "
             f"avg_loss={avg_epoch_loss:.4f} samples={epoch_samples}"

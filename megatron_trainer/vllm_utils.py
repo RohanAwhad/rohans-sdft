@@ -48,6 +48,7 @@ def vllm_generate(
     max_tokens: int = GEN_MAX_NEW_TOKENS,
     temperature: float = GEN_TEMPERATURE,
     top_p: float = GEN_TOP_P,
+    seed_offset: int = 0,
 ) -> tuple[str, str, list[float] | None]:
     """Generate a completion via vLLM's OpenAI-compatible API.
 
@@ -68,7 +69,11 @@ def vllm_generate(
             "top_p": top_p,
             "logprobs": 1,
             "skip_special_tokens": False,
-            **({"seed": VLLM_SEED} if VLLM_SEED is not None else {}),
+            **(
+                {"seed": VLLM_SEED + seed_offset}
+                if VLLM_SEED is not None
+                else {}
+            ),
         },
         timeout=180,
     )

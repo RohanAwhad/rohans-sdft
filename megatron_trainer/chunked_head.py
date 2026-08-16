@@ -1,4 +1,4 @@
-"""Chunked reverse-KL loss via Megatron-Core's GPTModel output_processor hook.
+"""Chunked SDFT and GRPO losses via Megatron-Core's output_processor hook.
 
 Each rank computes its own full-vocab reverse-KL loss (its data is its own —
 cross-rank vocab coupling is impossible with per-rank data slices). The LM
@@ -110,6 +110,30 @@ class ChunkedRowKL(torch.autograd.Function):
         return g, None, None
 
 
+class ChunkedSelectedLogp(torch.autograd.Function):
+    """Selected-token log-probs without retaining a full fp32 softmax graph."""
+
+    @staticmethod
+    def forward(ctx, z, token_ids):
+        _, vocab_size = z.shape
+        selected_ids = torch.clamp(token_ids, 0, vocab_size - 1)
+        zf = z.float()
+        denominator = torch.logsumexp(zf, dim=-1)
+        row_ids = torch.arange(z.size(0), device=z.device)
+        selected_logp = zf[row_ids, selected_ids] - denominator
+        ctx.save_for_backward(z, selected_ids, denominator)
+        return selected_logp
+
+    @staticmethod
+    def backward(ctx, grad_selected):
+        z, selected_ids, denominator = ctx.saved_tensors
+        probabilities = torch.exp(z.float() - denominator.unsqueeze(1))
+        gradient = -probabilities * grad_selected.unsqueeze(1)
+        row_ids = torch.arange(z.size(0), device=z.device)
+        gradient[row_ids, selected_ids] += grad_selected
+        return gradient, None
+
+
 def make_kl_processor(
     prompt_len: int,
     completion_ids: list[int],
@@ -198,6 +222,211 @@ def make_kl_processor(
                     metrics["sdpo/eos_logp_mean"] = policy_logp[eos_mask].mean().item()
                     metrics["sdpo/eos_logratio_mean"] = signal[eos_mask].mean().item()
 
+        return loss, metrics
+
+    return processor
+
+
+def compute_grpo_loss_from_logps(
+    policy_logp: torch.Tensor,
+    old_logp: torch.Tensor,
+    *,
+    advantage: float,
+    clip_low: float,
+    clip_high: float,
+    is_c_max: float,
+    is_mode: str,
+    ref_logp: torch.Tensor | None = None,
+    kl_coef: float = 0.0,
+    special_token_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """DAPO per-token surrogate before group/token normalization.
+
+    NaN old log-probs mark deterministic inserted tokens. Their old policy is
+    the detached current policy, so their PPO ratio is one without dropping
+    the formatting token from the policy-gradient objective.
+    """
+    if policy_logp.shape != old_logp.shape:
+        raise ValueError(
+            f"policy_logp shape {policy_logp.shape} != old_logp shape {old_logp.shape}"
+        )
+    valid_old = ~torch.isnan(old_logp)
+    effective_old = torch.where(valid_old, old_logp, policy_logp.detach())
+    log_ratio = policy_logp - effective_old
+    ratio = torch.exp(log_ratio)
+    clipped_ratio = ratio.clamp(min=1.0 - clip_low, max=1.0 + clip_high)
+    advantage_t = torch.as_tensor(
+        advantage, dtype=torch.float32, device=policy_logp.device,
+    )
+    unclipped = ratio * advantage_t
+    clipped = clipped_ratio * advantage_t
+    pg_loss = -torch.minimum(unclipped, clipped)
+    clipped_region = unclipped > clipped
+
+    valid_diff = log_ratio.detach()[valid_old]
+    if valid_diff.numel() == 0:
+        sequence_ratio = torch.ones(
+            (), dtype=torch.float32, device=policy_logp.device,
+        )
+        sampling_logp_diff = torch.zeros_like(sequence_ratio)
+    else:
+        sequence_ratio = torch.exp(valid_diff.mean())
+        sampling_logp_diff = valid_diff.abs().mean()
+    if is_mode == "truncate":
+        is_weight = sequence_ratio.clamp(max=is_c_max)
+    elif is_mode == "mask":
+        is_weight = torch.where(
+            sequence_ratio > is_c_max,
+            torch.zeros_like(sequence_ratio),
+            sequence_ratio,
+        )
+    else:
+        raise ValueError(f"Unknown GRPO IS mode: {is_mode!r}")
+
+    per_token_loss = pg_loss
+    if kl_coef > 0:
+        if ref_logp is None:
+            raise ValueError("GRPO KL requires reference token log-probs")
+        if ref_logp.shape != policy_logp.shape:
+            raise ValueError(
+                f"ref_logp shape {ref_logp.shape} != policy_logp shape "
+                f"{policy_logp.shape}"
+            )
+        ref_ratio_log = (ref_logp - policy_logp).clamp(min=-20.0, max=20.0)
+        k3 = torch.exp(ref_ratio_log) - ref_ratio_log - 1.0
+        k3_pp = k3 * ratio
+        if special_token_mask is not None:
+            k3_pp = k3_pp.masked_fill(special_token_mask, 0.0)
+        per_token_loss = per_token_loss + kl_coef * k3_pp
+        if special_token_mask is None:
+            active_kl = k3_pp
+        else:
+            active_kl = k3_pp[~special_token_mask]
+        mean_kl = (
+            active_kl.mean()
+            if active_kl.numel()
+            else torch.zeros((), dtype=torch.float32, device=policy_logp.device)
+        )
+    else:
+        mean_kl = torch.zeros((), dtype=torch.float32, device=policy_logp.device)
+
+    per_token_loss = per_token_loss * is_weight
+    metrics = {
+        "grpo/clip_frac": clipped_region.float().mean().detach(),
+        "grpo/entropy": (-policy_logp.mean()).detach(),
+        "grpo/sampling_logp_diff": sampling_logp_diff.detach(),
+        "grpo/is_ratio": sequence_ratio.detach(),
+        "grpo/is_clip_frac": (sequence_ratio > is_c_max).float().detach(),
+        "grpo/kl": mean_kl.detach(),
+    }
+    return per_token_loss.mean(), metrics
+
+
+def make_grpo_processor(
+    prompt_len: int,
+    completion_ids: list[int],
+    *,
+    advantage: float,
+    loss_scale: float,
+    rollout_log_probs: torch.Tensor | None,
+    old_logps_type: str,
+    clip_low: float,
+    clip_high: float,
+    is_c_max: float,
+    is_mode: str,
+    reference_log_probs: torch.Tensor | None,
+    kl_coef: float,
+    special_token_ids: set[int],
+    device: torch.device,
+    row_chunk: int = ROW_CHUNK,
+):
+    """Build the one-head-call DAPO GRPO output processor for one rollout."""
+    completion_count = len(completion_ids)
+    token_ids = torch.tensor(completion_ids, device=device, dtype=torch.long)
+
+    if old_logps_type == "vllm":
+        if rollout_log_probs is None:
+            raise ValueError("GRPO_OLD_LOGPS=vllm requires rollout token log-probs")
+        if rollout_log_probs.size(0) != completion_count:
+            raise ValueError(
+                f"rollout_log_probs length {rollout_log_probs.size(0)} != "
+                f"completion length {completion_count}"
+            )
+    elif old_logps_type != "detached":
+        raise ValueError(f"Unknown GRPO old-logp source: {old_logps_type!r}")
+
+    if reference_log_probs is not None and reference_log_probs.size(0) != completion_count:
+        raise ValueError(
+            f"reference_log_probs rows {reference_log_probs.size(0)} != "
+            f"completion length {completion_count}"
+        )
+
+    def processor(
+        hidden_states,
+        output_layer,
+        output_weight=None,
+        labels=None,
+        loss_mask=None,
+        input_ids=None,
+        position_ids=None,
+        attention_mask=None,
+        decoder_input=None,
+        inference_context=None,
+        packed_seq_params=None,
+        runtime_gather_output=None,
+        context=None,
+        compute_language_model_loss=None,
+        scale_logits=None,
+        config=None,
+    ):
+        hidden_c = hidden_states[
+            prompt_len - 1 : prompt_len + completion_count - 1, 0
+        ]
+        logits, _ = output_layer(hidden_c, weight=output_weight)
+
+        policy_parts: list[torch.Tensor] = []
+        ref_parts: list[torch.Tensor] = []
+        for row in range(0, completion_count, row_chunk):
+            row_logits = logits[row : row + row_chunk]
+            row_ids = token_ids[row : row + row_chunk]
+            policy_parts.append(ChunkedSelectedLogp.apply(row_logits, row_ids))
+            if reference_log_probs is not None:
+                ref_rows = reference_log_probs[row : row + row_chunk]
+                ref_parts.append(
+                    ref_rows.gather(1, row_ids.unsqueeze(1)).squeeze(1).float()
+                )
+        policy_logp = torch.cat(policy_parts)
+        if old_logps_type == "detached":
+            old_logp = policy_logp.detach()
+        else:
+            old_logp = rollout_log_probs
+        ref_logp = torch.cat(ref_parts) if ref_parts else None
+        special_mask = torch.zeros(
+            completion_count, dtype=torch.bool, device=token_ids.device,
+        )
+        for special_id in special_token_ids:
+            special_mask |= token_ids == special_id
+
+        mean_loss, tensor_metrics = compute_grpo_loss_from_logps(
+            policy_logp,
+            old_logp,
+            advantage=advantage,
+            clip_low=clip_low,
+            clip_high=clip_high,
+            is_c_max=is_c_max,
+            is_mode=is_mode,
+            ref_logp=ref_logp,
+            kl_coef=kl_coef,
+            special_token_mask=special_mask,
+        )
+        loss = mean_loss * loss_scale
+        metrics = {key: value.item() for key, value in tensor_metrics.items()}
+        metrics.update(
+            {
+                "grpo/advantage": advantage,
+                "grpo/policy_loss": mean_loss.detach().item(),
+            }
+        )
         return loss, metrics
 
     return processor
