@@ -143,6 +143,7 @@ GRPO_OLD_LOGPS = os.environ.get("GRPO_OLD_LOGPS", "vllm")  # vllm | detached
 GRPO_IS_C_MAX = float(os.environ.get("GRPO_IS_C_MAX", "3.0"))  # sequence-level TIS clamp
 GRPO_KL_COEF = float(os.environ.get("GRPO_KL_COEF", "0.0"))  # beta; 0 = no reference forward
 GRPO_FILTER_GROUPS = os.environ.get("GRPO_FILTER_GROUPS", "0") == "1"  # DAPO dynamic sampling
+GRPO_MAX_GEN_BATCHES = int(os.environ.get("GRPO_MAX_GEN_BATCHES", "10"))  # resample cap (verl convention)
 GRPO_LR = float(os.environ.get("GRPO_LR", "1e-6"))
 GRPO_LR_WARMUP_STEPS = int(os.environ.get("GRPO_LR_WARMUP_STEPS", "15"))  # linear warmup, then constant
 GRPO_GRAD_CLIP = float(os.environ.get("GRPO_GRAD_CLIP", "0.2"))
@@ -188,8 +189,8 @@ if LOSS_TYPE == "grpo":
         raise NotImplementedError(
             "GRPO_KL_COEF > 0 (reference KL against an anchor) not implemented yet"
         )
-    if GRPO_FILTER_GROUPS:
-        raise NotImplementedError("GRPO_FILTER_GROUPS=1 (dynamic sampling) not implemented yet")
+    if GRPO_MAX_GEN_BATCHES < 1:
+        raise ValueError(f"GRPO_MAX_GEN_BATCHES must be >= 1, got {GRPO_MAX_GEN_BATCHES}")
 
 # vLLM server
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))

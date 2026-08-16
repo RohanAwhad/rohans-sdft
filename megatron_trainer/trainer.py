@@ -50,6 +50,7 @@ from megatron_trainer.config import (
     GRPO_ADV,
     GRPO_CLIP_HIGH,
     GRPO_CLIP_LOW,
+    GRPO_FILTER_GROUPS,
     GRPO_GRAD_CLIP,
     GRPO_GROUPS,
     GRPO_IS_C_MAX,
@@ -57,6 +58,7 @@ from megatron_trainer.config import (
     GRPO_LR,
     GRPO_LR_WARMUP_STEPS,
     GRPO_MASK_TRUNCATED,
+    GRPO_MAX_GEN_BATCHES,
     GRPO_OLD_LOGPS,
     HF_MODEL_PATH,
     HINDSIGHT_FIELD,
@@ -373,22 +375,54 @@ def _produce_streaming_grpo(
     and are pushed to the queue together only once all finish (group-atomic —
     see _push_group). Submits exactly steps_per_epoch * (GRAD_ACCUM_STEPS //
     group_size) groups (the same count the training loop consumes), drains
-    in-flight work, then pushes the end-of-data sentinel."""
+    in-flight work, then pushes the end-of-data sentinel.
+
+    GRPO_FILTER_GROUPS=1 (DAPO dynamic sampling): a group with zero reward
+    variance (all-pass or all-fail — `_push_group`'s exact degeneracy
+    definition) contributes no advantage signal at all. Instead of accepting
+    that as a wasted step, resample a fresh prompt and regenerate, up to
+    GRPO_MAX_GEN_BATCHES total attempts, before giving up and accepting
+    whatever the last attempt produced. `data_iter` is shared across
+    `n_groups_async` concurrent worker threads once resampling can trigger
+    extra `next()` calls from inside `run_group` (not just the producer
+    loop below) — `data_lock` serializes all access to it."""
     n_groups_async = max(1, N_ASYNC // group_size)
     executor = ThreadPoolExecutor(max_workers=n_groups_async)
     window: dict = {}
     sentinel = object()
     submit_limit = steps_per_epoch * (GRAD_ACCUM_STEPS // group_size)
     submitted = 0
+    data_lock = threading.Lock()
 
-    def run_group(item: dict) -> list:
+    def next_item():
+        with data_lock:
+            return next(data_iter, sentinel)
+
+    def _is_degenerate(envs: list) -> bool:
+        rewards = [m["pass_value"] if m["pass_value"] is not None else 0.0 for m in (_sample_meta(e) for e in envs)]
+        return len(set(rewards)) == 1
+
+    def _run_once(item: dict) -> list:
         envs = [_build_env(item, success_cache, tokenizer, g) for g in range(group_size)]
         with ThreadPoolExecutor(max_workers=group_size) as inner:
             list(inner.map(lambda e: e.run(), envs))
         return envs
 
+    def run_group(item: dict) -> list:
+        envs = _run_once(item)
+        if not GRPO_FILTER_GROUPS:
+            return envs
+        attempts = 1
+        while _is_degenerate(envs) and attempts < GRPO_MAX_GEN_BATCHES:
+            fresh_item = next_item()
+            if fresh_item is sentinel:
+                break  # epoch data exhausted mid-resample; accept what we have
+            envs = _run_once(fresh_item)
+            attempts += 1
+        return envs
+
     while submitted < submit_limit:
-        item = next(data_iter, sentinel)
+        item = next_item()
         if item is sentinel:
             break
         t_start = time.monotonic()
