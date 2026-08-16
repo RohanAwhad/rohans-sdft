@@ -603,3 +603,50 @@ directly.
    artifact? Needs a direct diff of eval configs before trusting absolute
    accuracy numbers from this harness path (relative deltas across E047's
    own checkpoints are less affected either way).
+
+11. **Accuracy trend so far (steps 0-10, noisy, no positive signal yet):**
+    step_0=0.6553, step_1=0.6535, step_2=0.6535, step_3=0.6463,
+    step_4=0.6284, step_5=0.6463, step_10=0.6463 (native-LoRA re-run of
+    step_10: 0.6715, ~2.5pp higher — see below). Flat-to-slightly-declining
+    over the first 10 steps; not yet distinguishable from noise given the
+    eval's own run-to-run variance (see next point) and the tiny amount of
+    training so far (10 steps, LR=1e-5, ~60% degenerate-group rate meaning
+    many of those steps contributed near-zero gradient). Too early to call
+    — need many more steps before drawing conclusions either way.
+12. **Native LoRA eval support added** (avoids merging every checkpoint):
+    `eval_with_retrieval.py` (separate repo, `eshwarprasadS/maas-
+    knowledge-eval`) now detects `adapter_config.json`, loads the base
+    model via vLLM with `enable_lora=True` + `max_lora_rank` (from the
+    adapter's `r` field), and hot-attaches the adapter via `LoRARequest`
+    at generate time — no full-checkpoint merge, no extra ~42GB copy per
+    eval. vLLM 0.25.1 has native "fused MoE LoRA" support, handling our
+    `target_parameters`-based fused-expert adapter format directly.
+    Validated on step_10: native gives **0.6715** vs the merge-based
+    **0.6463** for the identical checkpoint — a 2.5pp gap, plausibly
+    sampling/judge noise (`temperature=0.7`, no fixed seed in this eval
+    script) rather than a correctness bug, but flagging: **absolute
+    accuracy numbers from this harness have at least ~2.5pp run-to-run
+    noise on top of the previously-known ~1.5pp McNemar paired SE** — the
+    true noise floor for *unpaired* single-run comparisons (i.e. comparing
+    two different checkpoints, each eval'd once) is probably closer to
+    3-4pp combined. Don't over-read single-run deltas smaller than that.
+    `auto_eval_poller.sh` simplified accordingly (merge/podman step
+    removed — also one less heavy subprocess per eval cycle, may help the
+    residual contention risk below). File changes deployed to node05 but
+    not committed to that repo (not mine to push to without asking).
+13. **Refined poller-contention finding**: after fixing the infinite-retry
+    bug and confirming 11 clean steps with the poller off, restarted the
+    fixed poller — it ran one real eval and training crashed ~6 min into
+    that eval's window (attempt 3→4 in the retry loop, recovered
+    automatically within 10s). So the infinite-retry bug was the
+    *dominant* contributor to instability, but a single *legitimate* eval
+    can still occasionally cause enough host-level contention to trip the
+    600s timeout. Accepting this residual risk for now (retry loop
+    recovers automatically); proper fix (process/CPU isolation, or
+    scheduling eval around active training) is a deferred follow-up.
+14. **`SAVE_EVERY` fixed for LoRA mode**: was silently saving a full
+    checkpoint dir at *every* optimizer step regardless of `SAVE_EVERY`
+    (a side effect of `push_lora_adapter`'s hot-swap needing an on-disk
+    adapter to load into vLLM). Fixed in `trainer.py`: delete the
+    transient per-step dir after a successful push when the step isn't a
+    `SAVE_EVERY` multiple. Cleaned up E047's existing non-multiple dirs.

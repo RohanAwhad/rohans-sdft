@@ -291,6 +291,50 @@ re-verified as of writing this plan).
   Poller paused (not restarted) to test this hypothesis cleanly: watching
   whether E047's current retry-loop attempt achieves multi-step stability
   now that the confound is removed, before restarting the (fixed) poller.
+  **Confirmed, then refined**: pausing the poller took the training run from
+  crashing every 1-2 steps to 11 consecutive clean steps. Restarted the
+  fixed poller — it ran one real (legitimate, non-buggy) eval on GPU 7
+  and training crashed again ~6 min into that eval's execution window
+  (attempt 3 → attempt 4 in the retry loop). So the infinite-retry bug was
+  the *dominant* contributor, but not the *only* one: even a single
+  legitimate eval on GPU 7 can still occasionally push a training step's
+  generation over the 600s timeout via host-level contention. Accepting
+  this residual risk for now — the bounded auto-restart loop recovers
+  automatically (attempt 4 launched within 10s of the crash, no manual
+  intervention needed). A cleaner fix (CPU affinity/cgroups isolation
+  between the poller and training processes, or scheduling eval to avoid
+  active training windows) is a further follow-up, not blocking.
+- **Native LoRA support added to `eval_with_retrieval.py`** (separate repo,
+  `eshwarprasadS/maas-knowledge-eval` — file changes deployed to node05,
+  not committed/pushed there without explicit go-ahead per repo-ownership
+  policy). Uses vLLM's own `enable_lora=True` + `LoRARequest` instead of
+  merging into a full checkpoint first: detects `adapter_config.json`,
+  loads the base model (`base_model_name_or_path` from the adapter config)
+  with `max_lora_rank` read from the adapter's `r` field, hot-attaches the
+  adapter via `LoRARequest` at `generate()` time. Confirmed vLLM 0.25.1
+  has native "fused MoE LoRA" support — handles our `target_parameters`-
+  based fused-expert adapter format (the same PR #23 layout fix, re-saved
+  to disk by `save_hf_adapter_checkpoint`) with no extra conversion needed.
+  Validated end-to-end on step_10: **0.6715** (native) vs **0.6463**
+  (merge-based, same checkpoint) — a 2.5pp gap, plausibly sampling/judge
+  noise given `temperature=0.7` with no fixed seed in the eval script (no
+  `VLLM_SEED`-equivalent knob there), not a loading-correctness issue.
+  `auto_eval_poller.sh` simplified to remove the whole merge/podman step
+  (`merge_lora_for_eval.py` is now unused by the poller — still valid as a
+  standalone tool, just not on this hot path). Benefit beyond avoiding the
+  42GB copies: one less heavy podman subprocess per eval cycle, which may
+  also reduce the residual contention risk noted above.
+- **`SAVE_EVERY` was silently ignored for LoRA mode**: `push_lora_adapter`
+  (called every optimizer step, unconditionally, to hot-swap the adapter
+  into vLLM) internally calls `save_hf_adapter_checkpoint` on every step
+  regardless of `SAVE_EVERY`, since vLLM's hot-swap endpoint loads from a
+  local disk path — the separate `SAVE_EVERY`-gated save at the same path
+  was actually redundant for LoRA (meaningful only for the full-FT branch,
+  which has no other disk write). Fixed in `trainer.py`: delete the
+  per-step adapter dir right after a successful push when the step isn't
+  a `SAVE_EVERY` multiple (vLLM already has the weights in GPU memory by
+  then, the on-disk copy isn't needed). Also manually cleaned up E047's
+  already-existing non-`SAVE_EVERY` step dirs (kept step_0/5/10).
 
 ## Open questions carried into this phase
 
