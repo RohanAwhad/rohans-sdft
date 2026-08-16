@@ -10,6 +10,7 @@ Handles:
 
 import os
 import socket
+from datetime import timedelta
 from typing import Iterator
 
 import torch
@@ -38,10 +39,19 @@ def init_distributed_trainer() -> int:
     local_rank = int(os.environ["LOCAL_RANK"])
     os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    # Default NCCL collective timeout (600s) is too tight for GRPO: the
+    # _pull_microbatch broadcast waits on the SLOWEST rank's rollout group,
+    # and vLLM generation throughput can occasionally stall for minutes
+    # under sustained concurrent load (observed, not yet root-caused — see
+    # plan_grpo.md) without being permanently dead. A hard kill at 600s
+    # loses the whole run's progress; widen the margin so slow-but-alive
+    # generation gets a chance to finish instead.
+    nccl_timeout_sec = int(os.environ.get("NCCL_TIMEOUT_SEC", "1800"))
+    dist.init_process_group(backend="nccl", timeout=timedelta(seconds=nccl_timeout_sec))
     logger.info(
         f"torch.distributed initialized (trainer DDP, "
-        f"rank={dist.get_rank()}, world_size={dist.get_world_size()}, local_rank={local_rank})"
+        f"rank={dist.get_rank()}, world_size={dist.get_world_size()}, local_rank={local_rank}, "
+        f"nccl_timeout_sec={nccl_timeout_sec})"
     )
     return local_rank
 
