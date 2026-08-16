@@ -748,6 +748,35 @@ directly.
     the FIRST time gradients have actually been non-degenerate for a
     sustained run — prior steps-0-10 data (recorded in #11 above) came
     from underpowered (gpg-bugged) gradients on a since-superseded
-    LoRA init. Continuing to monitor for real signal to emerge with more
+    LoRA init.     Continuing to monitor for real signal to emerge with more
     steps; NCCL_TIMEOUT_SEC=1800 mitigation and reflector verdict-only
     fast-path remain available levers if/when needed.
+21. **`GRPO_FILTER_GROUPS` implemented and deployed** (`0a22bc5`,
+    `096c2c8`), replacing the `NotImplementedError` stub. Motivated by
+    quantifying #20's flat accuracy: pulled `frac_reward_zero_std` for
+    all 27 real steps of the stable run — averaged ~80% degenerate
+    (7/27 steps had ALL 5 groups degenerate = zero gradient that whole
+    step), far above the ~5.8% uniform-pass-rate estimate, consistent
+    with a bimodal per-prompt difficulty distribution (some prompts the
+    student always/never solves at G=8). This means ~80% of generation
+    compute across the whole 27-step run contributed no training signal
+    at all — a much stronger candidate explanation for the flat
+    trajectory than "just needs more steps." Implementation: a degenerate
+    group (`_push_group`'s exact formula: `len(set(rewards)) == 1`)
+    triggers resampling a fresh prompt, up to `GRPO_MAX_GEN_BATCHES=10`
+    attempts, inside `_produce_streaming_grpo`'s `run_group` (thread-safe
+    `data_iter` access via a lock, since resampling now calls `next()`
+    from worker threads too, not just the producer loop). Verified via a
+    standalone mock-based logic test (cap enforcement, disabled-state
+    passthrough, cap=1 edge case) before deploying, given the risk of a
+    subtle threading/deadlock bug in the live run. Deployed by
+    interrupting the otherwise-healthy 28-step stable run from #20 —
+    judged worthwhile since that run's gradients, while finally
+    non-degenerate at the infrastructure level, were still ~80%
+    wasted at the data level; continuing it further without this fix
+    would not have been genuine progress toward beating baseline.
+    Expect: higher per-step generation cost (more resample rounds), but
+    much higher signal density per step. Watching `frac_reward_zero_std`
+    (should drop sharply, ideally near 0 outside rare cap-exhaustion
+    cases) and step timing (expected to increase) as the primary
+    validation signals, then eval accuracy trend over more steps.
