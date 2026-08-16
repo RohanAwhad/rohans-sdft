@@ -43,6 +43,22 @@ Correct Answer:
 Model's Response:
 {model_response}"""
 
+# GRPO's reward only consumes `verdict` -- the detailed feedback text is
+# generated and then discarded (see trainer.py's use_reflector comment).
+# Measured: 8.33s avg/call (up to 12.24s) at max_tokens=2048 vs 0.89s avg
+# here -- ~9x faster, purely from not generating unused tokens.
+VERDICT_ONLY_SYSTEM_PROMPT = """\
+You are a grader comparing a model's response against the correct answer.
+Output EXACTLY this JSON format and nothing else:
+
+```json
+{"verdict": "PASS"}
+```
+
+Rules:
+- verdict must be PASS or FAIL.
+- No other text outside the json block."""
+
 
 _client: AnthropicVertex | None = None
 
@@ -67,10 +83,17 @@ def _fallback_on_exhaustion(retry_state):
     retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError, ValueError)),
     retry_error_callback=_fallback_on_exhaustion,
 )
-def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
+def run(
+    question: str, golden_answer: str, model_response: str, verdict_only: bool = False,
+) -> dict[str, str]:
     """Reflect on model_response vs golden_answer.
 
     Returns: {"verdict": "PASS"|"FAIL", "feedback": "one line reason"}
+    When verdict_only=True, skips generating the detailed feedback text
+    (~9x faster per call) -- "feedback" is still present in the returned
+    dict (empty string) so existing callers that always read
+    reflector_result["feedback"] (e.g. RagEnv._build_privileged_prompt_from_feedback)
+    need no changes, even though that value is unused downstream for GRPO.
     """
     client = _get_client()
     user_content: str = REFLECTOR_USER_TEMPLATE.format(
@@ -78,10 +101,12 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
         golden_answer=golden_answer,
         model_response=model_response,
     )
+    system_prompt = VERDICT_ONLY_SYSTEM_PROMPT if verdict_only else REFLECTOR_SYSTEM_PROMPT
+    max_tokens = 64 if verdict_only else 2048
     response = client.messages.create(
         model=REFLECTOR_MODEL,
-        max_tokens=2048,
-        system=REFLECTOR_SYSTEM_PROMPT,
+        max_tokens=max_tokens,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
     raw: str = response.content[0].text.strip()
@@ -93,7 +118,8 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
             parsed = parsed[0]
         else:
             raise ValueError(f"Reflector returned unexpected JSON list: {raw[:200]}")
-    if not isinstance(parsed, dict) or "verdict" not in parsed or "feedback" not in parsed:
+    if not isinstance(parsed, dict) or "verdict" not in parsed:
         raise ValueError(f"Reflector returned unexpected JSON: {raw[:200]}")
+    parsed.setdefault("feedback", "")
     logger.debug(f"Reflector: {parsed['verdict']} — {parsed['feedback']}")
     return parsed

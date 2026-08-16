@@ -157,6 +157,7 @@ def _build_env(item: dict, success_cache: dict[str, str], tokenizer, vllm_idx: i
             normalized_messages=item["normalized_messages"][0],
             tokenizer=tokenizer,
             use_reflector=use_reflector,
+            reflector_verdict_only=(LOSS_TYPE == "grpo"),
             golden_chunk=item["golden_chunks"][0],
         )
     return ApiAdapterEnv(

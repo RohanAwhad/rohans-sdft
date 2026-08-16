@@ -41,6 +41,7 @@ class RagEnv(BaseEnv):
         tokenizer,
         use_reflector: bool = False,
         golden_chunk: str = "",
+        reflector_verdict_only: bool = False,
     ):
         self.prompt_text = prompt_text
         self.vllm_base_url = vllm_base_url
@@ -50,6 +51,7 @@ class RagEnv(BaseEnv):
         self.normalized_messages = normalized_messages
         self.tokenizer = tokenizer
         self.use_reflector = use_reflector
+        self.reflector_verdict_only = reflector_verdict_only
 
         # outputs (populated by run())
         self.completion_text: str | None = None
@@ -67,6 +69,7 @@ class RagEnv(BaseEnv):
         if self.use_reflector:
             self.reflector_result = reflector.run(
                 self.raw_question, self.golden_answer, self.completion_text,
+                verdict_only=self.reflector_verdict_only,
             )
             if self.reflector_result is not None:
                 self._build_privileged_prompt_from_feedback()
