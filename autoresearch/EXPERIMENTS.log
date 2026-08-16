@@ -574,10 +574,29 @@ directly.
    launch so the campaign stays productive unattended, accepting that each
    restart trains a fresh LoRA init (no resumption, no `TRAINER_SEED`).
    Launched, awaiting first real checkpoint + poller eval.
-9. **Follow-up (deferred, tracked separately):** (a) root-cause the vLLM
-   throughput collapse — needs vLLM-side profiling/config sweep, not done
-   yet; (b) build proper checkpoint-resume (adapter + optimizer + scheduler
-   + step counter) once eval signal from short runs justifies the scope.
+9. **Hypothesis confirmed**: `auto_eval_poller.sh` had an infinite re-eval
+   bug (blindly echoed "DONE" regardless of `eval_with_retrieval.py`'s exit
+   code, never marked failures) — `run_44_long/epoch_46` (unrelated,
+   fails to load) was being re-evaluated on **every 5-min scan cycle**
+   back-to-back, continuously loading/hammering GPU 7 for the entire
+   window E047's retry loop was crashing within 1-2 steps each try. Killed
+   the poller at ~00:40 UTC; **the exact same training config immediately
+   went from crashing every 1-2 steps to 6 consecutive clean steps**
+   (steps 1-6, all 286-524s, comfortable margin under the 600s timeout) —
+   strong causal evidence podman's device-level-only GPU isolation let the
+   poller's continuous eval load (GPU 7, shared host CPU/PCIe/NVMe) starve
+   the training vLLM instance (GPU 0). Fixed the poller (exit-code check +
+   `.eval_failed` marker, no more infinite retries) and will restart it
+   once more clean steps confirm this wasn't partly coincidental.
+   Degenerate-group rate across both runs now ~60% (6/10 steps) — high
+   enough to prioritize `GRPO_FILTER_GROUPS` as a near-term follow-up.
+10. **Follow-up (deferred, tracked separately):** (a) even with the poller
+   bug fixed, watch whether its *normal* (non-buggy) periodic eval activity
+   still causes occasional interference — may need to pin the poller to
+   not run *during* active training steps, or accept brief slowdowns;
+   (b) build proper checkpoint-resume (adapter + optimizer + scheduler +
+   step counter) so restarts don't lose progress; (c) `GRPO_FILTER_GROUPS`
+   given the consistently high (~60%) degenerate-group rate.
 8. **New questions:** Why does step_0 (merged, untrained) score 0.6553 vs
    the 0.7415 baseline under the same `poll_eval.sh`/`eval_with_retrieval.py`
    harness — different eval set version, generation config, or merge
