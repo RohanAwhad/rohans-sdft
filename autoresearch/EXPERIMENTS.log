@@ -717,12 +717,37 @@ directly.
     generally-low aggregate decode throughput (~130-190 tok/s healthy,
     dipping to ~24-32 tok/s) and the NCCL-timeout stalls in #17, but
     unconfirmed magnitude — flagged as a follow-up, not yet actioned.
-19. **Reflector cost confirmed avoidable but not yet fixed**: direct
-    timing test (isolated, same model/creds) shows the reflector call
-    costs 8.33s avg (up to 12.24s) at the current `max_tokens=2048`
+19. **Reflector cost confirmed avoidable, now implemented**: direct timing
+    test (isolated, same model/creds) shows the reflector call costs
+    8.33s avg (up to 12.24s) at the current `max_tokens=2048`
     detailed-feedback setting, vs 0.89s avg with a verdict-only
     `max_tokens=64` variant — a ~9.4x speedup on that call. GRPO only
     consumes `verdict` (`trainer.py:138-140` already notes the feedback
-    text is unused for GRPO); this is a confirmed zero-downside win
-    (~7s/step, modest but real) not yet implemented — deferred pending a
-    stable run to test it against.
+    text is unused for GRPO). Implemented in `reflector.py`
+    (`verdict_only` param, `c5361a8`), wired through `RagEnv` and
+    `trainer.py`'s `_build_env` (`verdict_only=(LOSS_TYPE=="grpo")`).
+    Staged (committed+pulled to node05) but deliberately not deployed
+    into the currently-stable run yet — see #20.
+20. **MAJOR MILESTONE: crash-loop resolved, first stable multi-step GRPO
+    trajectory.** With all three fixes combined (gpg_rescale global
+    all-reduce, 3-step checkpoint-delete delay, 1800s NCCL timeout),
+    launched a fresh attempt at 17:16:47 UTC — **still running with zero
+    crashes 95+ minutes later, reached opt_step=11** (vs the previous
+    best of 5 steps before a crash). Loss/grad_norm values are now
+    visibly non-degenerate and varied (0.95, 1.16, 0.20 — not the earlier
+    flat-zero pattern), `grpo/gpg_rescale` shows real varying values
+    (2.5, 5.0), consistent with the gpg fix finally letting gradient
+    signal flow correctly. This is the first genuinely healthy,
+    uninterrupted GRPO training trajectory of the whole campaign.
+    Per-step accuracy so far (steps 0-9, via the poller catching each
+    transient checkpoint before its 3-step-delayed cleanup — an
+    unplanned bonus of dense eval coverage): 0.6463, 0.632, 0.6373,
+    0.6517, 0.6463, 0.6589, 0.6373, 0.6661, 0.6212, 0.6427 — still flat/
+    noisy in the 0.62-0.67 band, no clear trend yet. Expected at this
+    stage: only 11 steps at a conservative `GRPO_LR=1e-5`, and this is
+    the FIRST time gradients have actually been non-degenerate for a
+    sustained run — prior steps-0-10 data (recorded in #11 above) came
+    from underpowered (gpg-bugged) gradients on a since-superseded
+    LoRA init. Continuing to monitor for real signal to emerge with more
+    steps; NCCL_TIMEOUT_SEC=1800 mitigation and reflector verdict-only
+    fast-path remain available levers if/when needed.
