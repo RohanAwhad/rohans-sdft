@@ -650,3 +650,79 @@ directly.
     adapter to load into vLLM). Fixed in `trainer.py`: delete the
     transient per-step dir after a successful push when the step isn't a
     `SAVE_EVERY` multiple. Cleaned up E047's existing non-multiple dirs.
+15. **`gpg_rescale` bug found via PR #24 comparison, fixed**: computed
+    per-rank-local (`num_groups_local`/`num_nondeg_local`), which at our
+    actual config (`groups_per_step=1`) can only ever be `1/1=1.0`
+    (no-op) or `0/1->10000` (multiplying an already-zero degenerate
+    loss — still a no-op). The cross-rank compensation for degenerate
+    groups had been completely inert the whole campaign. Fixed:
+    all-reduce `[num_groups_local, num_nondeg_local]` across ranks before
+    computing the rescale (`trainer.py`, `7da66ac`). Post-fix,
+    `grpo/gpg_rescale` now shows varied real values (2.5, 5.0, 50000.0)
+    instead of being stuck at 1.0/10000.0 — confirmed working. All 4
+    unit tests re-verified passing. This may explain the flat/no-progress
+    trend through step 10 (~60% degenerate rate meant most steps'
+    survivor gradients were never actually boosted to compensate).
+16. **Checkpoint-deletion race condition — major crash-loop root cause,
+    found and fixed in two iterations.** After the gpg fix, ~7 consecutive
+    retry-loop attempts crashed with vLLM `"EngineCore encountered an
+    issue"` (500 errors on `/v1/completions`) — always immediately after
+    `opt_step=1`, the first step where `trainer.py`'s SAVE_EVERY cleanup
+    (`shutil.rmtree` on the just-pushed LoRA adapter dir) fires. Root
+    cause: the code assumed vLLM's `/v1/load_lora_adapter` HTTP response
+    returning success means the adapter file is fully done being read,
+    but safetensors/mmap-based loads can page in lazily, and
+    `--max-cpu-loras=2` means vLLM's LRU adapter cache can hold more than
+    the immediately-previous generation — deleting the file out from
+    under a still-referenced mmap crashes the engine.
+    - **Iteration 1** (`0c17fe1`): delay deletion by 1 step (only delete
+      the previous transient dir once the *next* push succeeds).
+      Insufficient — two separate attempts each reached `opt_step=2` for
+      the first time ever, then crashed ~8s later, exactly when the
+      first real `rmtree` fired under the new logic (just shifted the
+      bug by one step).
+    - **Iteration 2** (`6beda94`): widened to a 3-slot FIFO delay
+      (comfortably above `max_cpu_loras=2`) — only delete once a dir
+      falls 3 pushes out of date. **Confirmed working**: one attempt
+      cleanly passed steps 1-5 (including step 4, the first real delete
+      point under this logic) with zero delete-related crashes before
+      eventually hitting an unrelated NCCL timeout (see #17). The
+      original crash-the-instant-you-delete-anything pattern is gone.
+17. **Separate, pre-existing issue surfaced once #16 was fixed: vLLM
+    generation throughput stalls severe enough to blow the 600s NCCL
+    collective timeout.** This is the same unfixed "vLLM throughput
+    collapse under sustained load" issue from point 7/#9 above — not new,
+    but now the dominant blocker since the delete-race no longer masks
+    it. Confirmed via `Watchdog caught collective operation timeout:
+    WorkNCCL(..., Timeout(ms)=600000) ran for 600042 milliseconds` on all
+    4 non-rank-0 trainers simultaneously, at varying points across 4
+    separate attempts (before step 1, after step 2, after step 3, after
+    step 5) — no fixed threshold, consistent with the probabilistic
+    framing already on record. **Mitigation deployed** (not a root-cause
+    fix): `model_utils.py`'s `init_distributed_trainer()` now passes an
+    explicit `timeout=timedelta(seconds=1800)` to `dist.init_process_group`
+    (was implicitly defaulting to 600s), overridable via `NCCL_TIMEOUT_SEC`.
+    Gives stalled-but-recovering generation 3x the runway before the whole
+    run is hard-killed. Root cause (vLLM scheduler defaults,
+    `--enforce-eager`, MoE-routing-under-concurrency, or CPU-bound request
+    loop) still not isolated — deferred.
+18. **Also found (not yet ported/fixed): missing tuned MoE kernel config**
+    for `E=32,N=2880,device_name=NVIDIA_H100_80GB_HBM3` — both the
+    training vLLM (0.20.2) and eval vLLM (0.25.1) instances log
+    `"Using default MoE config. Performance might be sub-optimal!"` at
+    startup, plus live Triton JIT compilation during inference (not
+    warmup) for the fused-MoE and fused-MoE-LoRA kernels. vLLM ships an
+    official tuning script (`benchmarks/kernels/benchmark_moe.py`) for
+    exactly this gap; not yet run. Plausible contributor to both the
+    generally-low aggregate decode throughput (~130-190 tok/s healthy,
+    dipping to ~24-32 tok/s) and the NCCL-timeout stalls in #17, but
+    unconfirmed magnitude — flagged as a follow-up, not yet actioned.
+19. **Reflector cost confirmed avoidable but not yet fixed**: direct
+    timing test (isolated, same model/creds) shows the reflector call
+    costs 8.33s avg (up to 12.24s) at the current `max_tokens=2048`
+    detailed-feedback setting, vs 0.89s avg with a verdict-only
+    `max_tokens=64` variant — a ~9.4x speedup on that call. GRPO only
+    consumes `verdict` (`trainer.py:138-140` already notes the feedback
+    text is unused for GRPO); this is a confirmed zero-downside win
+    (~7s/step, modest but real) not yet implemented — deferred pending a
+    stable run to test it against.

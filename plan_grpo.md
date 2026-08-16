@@ -357,6 +357,51 @@ re-verified as of writing this plan).
   then, the on-disk copy isn't needed). Also manually cleaned up E047's
   already-existing non-`SAVE_EVERY` step dirs (kept step_0/5/10).
 
+## Session update: gpg_rescale fix + checkpoint-delete race + NCCL timeout
+
+Three bugs found and fixed in sequence, each unblocking the next:
+
+1. **`gpg_rescale` global fix** (`7da66ac`, see PR #24 section below) — the
+   degenerate-group compensation was a permanent no-op at our
+   `groups_per_step=1` config. Fixed via cross-rank all-reduce. Confirmed
+   post-fix: `grpo/gpg_rescale` now shows varied real values (2.5, 5.0,
+   50000.0) instead of stuck 1.0/10000.0.
+2. **Checkpoint-deletion race** (`0c17fe1` then `6beda94`) — the dominant
+   crash-loop cause after the gpg fix. `trainer.py`'s SAVE_EVERY cleanup
+   deleted the just-pushed LoRA adapter dir immediately after vLLM's
+   `/v1/load_lora_adapter` returned success, but vLLM's response doesn't
+   guarantee the file is done being read (mmap-based safetensors loading,
+   plus `--max-cpu-loras=2` meaning the LRU cache can hold more than one
+   prior generation) — crashed the vLLM engine (`EngineCore encountered an
+   issue`) every single time, always right after `opt_step=1` (the first
+   step the delete path ever ran). A 1-step delay fix just shifted the
+   crash to `opt_step=2`; a 3-step FIFO delay (comfortably above
+   `max_cpu_loras=2`) confirmed fixed it — one attempt cleanly passed
+   steps 1-5 with zero delete-related crashes.
+3. **NCCL 600s collective timeout** (`566983c`) — surfaced as the new
+   dominant blocker once #2 stopped masking it. This is the same
+   previously-documented "vLLM generation throughput can collapse under
+   sustained load" issue (see "Separate, unfixed issue" note below) —
+   when a stall is severe enough, all 4 non-rank-0 trainers hit
+   `Watchdog caught collective operation timeout ran for 600042ms` at
+   `_pull_microbatch`'s broadcast, killing the whole run. Mitigated (not
+   root-caused) by widening `init_distributed_trainer`'s
+   `dist.init_process_group` timeout from the implicit 600s default to
+   1800s (`NCCL_TIMEOUT_SEC` env var). Root cause of the underlying vLLM
+   stall is still open — candidates unchanged: `--enforce-eager` (no CUDA
+   graphs), missing tuned MoE kernel config for
+   `E=32,N=2880,device_name=NVIDIA_H100_80GB_HBM3` (confirmed present via
+   `"Using default MoE config"` warning on both vLLM instances, official
+   vLLM tuning script `benchmark_moe.py` not yet run), `processed_logprobs`
+   sampler mode (required for IS-weighting correctness, code-comment-
+   documented as a "slow path", not yet root-caused).
+
+Also confirmed (not yet implemented): reflector reward-only fast-path —
+direct timing test shows `max_tokens=2048` (current, detailed feedback,
+unused by GRPO) costs 8.33s avg/call vs 0.89s avg with `max_tokens=64`
+verdict-only — a safe, zero-downside ~7s/step win once training is stable
+enough to be worth touching again.
+
 ## Parallel implementation found: PR #24 (`ra/grpo-impl`)
 
 Discovered a second, independent GRPO implementation on GitHub PR #24
