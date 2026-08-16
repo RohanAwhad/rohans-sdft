@@ -780,3 +780,22 @@ directly.
     (should drop sharply, ideally near 0 outside rare cap-exhaustion
     cases) and step timing (expected to increase) as the primary
     validation signals, then eval accuracy trend over more steps.
+22. **Predicted cost materialized immediately: NCCL timeout hit again,
+    now at the widened 1800s threshold** (`Watchdog caught collective
+    operation timeout... Timeout(ms)=1800000) ran for 1800098
+    milliseconds`) — resampling toward `GRPO_MAX_GEN_BATCHES=10` made
+    step 1's generation legitimately exceed even the widened margin, on
+    both of the first two attempts after deploying `GRPO_FILTER_GROUPS`.
+    Also found+fixed a real oversight: `NCCL_TIMEOUT_SEC` was never
+    actually added to `train_full.sh`'s `OPTIONAL_ENVS` passthrough list
+    (`566983c` added the override mechanism in `model_utils.py` but
+    never wired it through the container launch) — so the container was
+    silently always using the 1800s default regardless of the env var,
+    even though the earlier "confirm nccl fix active" check showing
+    `nccl_timeout_sec=1800` looked like confirmation, it just happened
+    to match the default. Fixed (`e763530`) and bumped to
+    `NCCL_TIMEOUT_SEC=5400` (90 min) in `launch_run_47.sh` — large
+    margin given resampling's variable, potentially-compounding cost
+    across 5 concurrent groups. Relaunched; watching whether 5400s is
+    now sufficient or whether `GRPO_MAX_GEN_BATCHES` itself needs
+    reducing from 10 to bound worst-case cost more directly.
