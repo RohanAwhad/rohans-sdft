@@ -102,6 +102,7 @@ class ApiAdapterEnv(BaseEnv):
         api_model: str = API_MODEL,
         max_adapter_turns: int = MAX_ADAPTER_TURNS,
         success_cache: dict[str, str] | None = None,
+        seed_offset: int = 0,
     ):
         self.prompt_text = prompt_text
         self.vllm_base_url = vllm_base_url
@@ -111,6 +112,7 @@ class ApiAdapterEnv(BaseEnv):
         self.api_model = api_model
         self.max_adapter_turns = max_adapter_turns
         self.success_cache = success_cache
+        self.seed_offset = seed_offset
 
         # state (populated during rollout)
         self.adapter_history: list[dict] = []
@@ -122,6 +124,7 @@ class ApiAdapterEnv(BaseEnv):
         # outputs (populated by run())
         self.completion_text: str | None = None
         self.completion_log_probs: list[float | None] | None = None
+        self.finish_reason: str | None = None
         self.privileged_information_prompt: str | None = None
         self.episode_result: bool | None = None
         self.verdict: bool = False
@@ -203,11 +206,15 @@ class ApiAdapterEnv(BaseEnv):
 
         # Phase 1: thinking-budgeted generation
         text, finish_reason, logprobs = vllm_generate(
-            prompt_text, base_url=self.vllm_base_url, max_tokens=THINKING_BUDGET,
+            prompt_text,
+            base_url=self.vllm_base_url,
+            max_tokens=THINKING_BUDGET,
+            seed_offset=self.seed_offset,
         )
 
         if finish_reason != "length":
             self._rollout_segments.append((text, logprobs))
+            self.finish_reason = finish_reason
             return text
 
         # Phase 2: force-close thinking, generate the actual answer
@@ -218,11 +225,13 @@ class ApiAdapterEnv(BaseEnv):
             inserted = ".\n</think>\n\n"
 
         continued_prompt = prompt_text + truncated_thinking
-        answer_text, _, answer_logprobs = vllm_generate(
+        answer_text, answer_finish_reason, answer_logprobs = vllm_generate(
             continued_prompt,
             base_url=self.vllm_base_url,
             max_tokens=GEN_MAX_NEW_TOKENS - THINKING_BUDGET,
+            seed_offset=self.seed_offset,
         )
+        self.finish_reason = answer_finish_reason
         self._rollout_segments.append((text.rstrip(), logprobs))
         if inserted:
             self._rollout_segments.append((inserted, None))

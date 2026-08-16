@@ -33,6 +33,13 @@ Rules:
   relevant parts where useful.
 - No other text outside the json block."""
 
+REFLECTOR_REWARD_SYSTEM_PROMPT = """\
+You are a grader comparing a model response against the correct answer.
+Return exactly one JSON object and no markdown:
+{"verdict": "PASS", "feedback": ""}
+Use verdict PASS only when the response is correct; otherwise use FAIL.
+Keep feedback empty."""
+
 REFLECTOR_USER_TEMPLATE = """\
 Question:
 {question}
@@ -67,10 +74,16 @@ def _fallback_on_exhaustion(retry_state):
     retry=retry_if_exception_type((anthropic.APIError, anthropic.APIConnectionError, json.JSONDecodeError, ValueError)),
     retry_error_callback=_fallback_on_exhaustion,
 )
-def run(question: str, golden_answer: str, model_response: str) -> dict[str, str]:
+def run(
+    question: str,
+    golden_answer: str,
+    model_response: str,
+    *,
+    reward_only: bool = False,
+) -> dict[str, str] | None:
     """Reflect on model_response vs golden_answer.
 
-    Returns: {"verdict": "PASS"|"FAIL", "feedback": "one line reason"}
+    Returns a verdict payload, or None after the existing retry budget.
     """
     client = _get_client()
     user_content: str = REFLECTOR_USER_TEMPLATE.format(
@@ -80,8 +93,12 @@ def run(question: str, golden_answer: str, model_response: str) -> dict[str, str
     )
     response = client.messages.create(
         model=REFLECTOR_MODEL,
-        max_tokens=2048,
-        system=REFLECTOR_SYSTEM_PROMPT,
+        max_tokens=64 if reward_only else 2048,
+        system=(
+            REFLECTOR_REWARD_SYSTEM_PROMPT
+            if reward_only
+            else REFLECTOR_SYSTEM_PROMPT
+        ),
         messages=[{"role": "user", "content": user_content}],
     )
     raw: str = response.content[0].text.strip()

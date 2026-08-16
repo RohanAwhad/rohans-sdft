@@ -52,7 +52,12 @@ export TMPDIR=${TMPDIR:-/mnt/nvme0n1/podman_tmp}
 VLLM_PORT=${VLLM_PORT:-8001}
 OUTPUT_DIR=${OUTPUT_DIR:-"/workspace/output_megatron"}
 
-echo "=== SDFT DDP Full Training ==="
+if [ "${LOSS_TYPE:-sdft}" = "grpo" ]; then
+    TRAINING_LABEL="GRPO"
+else
+    TRAINING_LABEL="SDFT"
+fi
+echo "=== $TRAINING_LABEL DDP Full Training ==="
 echo "GPUs: vLLM=$NUM_VLLM_GPUS GPUs (ports=$VLLM_PORTS_LIST), Trainers=$TRAINER_GPUS, Logprob=$GPU_LOGPROB"
 echo "NUM_TRAINERS=$NUM_TRAINERS, NUM_VLLM_GPUS=$NUM_VLLM_GPUS, Model=$MODEL_NAME"
 
@@ -102,6 +107,22 @@ TMPDIR=/mnt/nvme0n1/podman_tmp podman run --rm \
     -e OUTPUT_DIR="$OUTPUT_DIR" \
     -e NUM_EPOCHS="${NUM_EPOCHS:-10}" \
     -e GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-32}" \
+    -e LOSS_TYPE="${LOSS_TYPE:-sdft}" \
+    -e GRPO_GROUPS="${GRPO_GROUPS:-8}" \
+    -e GRPO_ADV="${GRPO_ADV:-mean}" \
+    -e GRPO_CLIP_LOW="${GRPO_CLIP_LOW:-0.2}" \
+    -e GRPO_CLIP_HIGH="${GRPO_CLIP_HIGH:-0.28}" \
+    -e GRPO_OLD_LOGPS="${GRPO_OLD_LOGPS:-vllm}" \
+    -e GRPO_IS_C_MAX="${GRPO_IS_C_MAX:-3.0}" \
+    -e GRPO_IS_MODE="${GRPO_IS_MODE:-truncate}" \
+    -e GRPO_KL_COEF="${GRPO_KL_COEF:-0.0}" \
+    -e GRPO_KL_REF="${GRPO_KL_REF:-ema_teacher}" \
+    -e GRPO_FILTER_GROUPS="${GRPO_FILTER_GROUPS:-0}" \
+    -e GRPO_MAX_GEN_BATCHES="${GRPO_MAX_GEN_BATCHES:-10}" \
+    -e GRPO_LR="${GRPO_LR:-1e-6}" \
+    -e GRPO_LR_WARMUP_STEPS="${GRPO_LR_WARMUP_STEPS:-15}" \
+    -e GRPO_GRAD_CLIP="${GRPO_GRAD_CLIP:-0.2}" \
+    -e GRPO_MASK_TRUNCATED="${GRPO_MASK_TRUNCATED:-1}" \
     -e SAVE_EVERY="${SAVE_EVERY:-200}" \
     -e VLLM_SERVER_DEV_MODE=1 \
     -e VLLM_USE_V1="${VLLM_USE_V1:-0}" \

@@ -1,0 +1,16 @@
+{"prompt":[{"from":"human","value":"Solve carefully and give the final integer. What is the remainder when 7^222 is divided by 1000?"}],"user_response":{"from":"human","value":"49"}}
+{"prompt":[{"from":"human","value":"Solve carefully and give the final integer. What is the remainder when 17^75 is divided by 101?"}],"user_response":{"from":"human","value":"100"}}
+{"prompt":[{"from":"human","value":"How many distinct arrangements are there of all the letters in MISSISSIPPI? Give the final integer."}],"user_response":{"from":"human","value":"34650"}}
+{"prompt":[{"from":"human","value":"How many positive integers from 1 through 1000 have exactly six positive divisors? Give the final integer."}],"user_response":{"from":"human","value":"110"}}
+{"prompt":[{"from":"human","value":"A fair coin is tossed until three consecutive heads first appear. What is the expected number of tosses? Give the final integer."}],"user_response":{"from":"human","value":"14"}}
+{"prompt":[{"from":"human","value":"How many onto functions are there from a five-element labeled set to a three-element labeled set? Give the final integer."}],"user_response":{"from":"human","value":"150"}}
+{"prompt":[{"from":"human","value":"How many trailing zeroes are in the decimal representation of 1000 factorial? Give the final integer."}],"user_response":{"from":"human","value":"249"}}
+{"prompt":[{"from":"human","value":"How many incongruent solutions does x squared congruent to 1 modulo 120 have? Give the final integer."}],"user_response":{"from":"human","value":"16"}}
+{"prompt":[{"from":"human","value":"How many diagonals does a convex 20-gon have? Give the final integer."}],"user_response":{"from":"human","value":"170"}}
+{"prompt":[{"from":"human","value":"How many derangements are there of six labeled objects? Give the final integer."}],"user_response":{"from":"human","value":"265"}}
+{"prompt":[{"from":"human","value":"Compute the sum of gcd(k, 12) over all integers k from 1 through 12. Give the final integer."}],"user_response":{"from":"human","value":"40"}}
+{"prompt":[{"from":"human","value":"How many binary strings of length 12 contain no two consecutive ones? Give the final integer."}],"user_response":{"from":"human","value":"377"}}
+{"prompt":[{"from":"human","value":"How many ordered triples of integers (x, y, z) satisfy x+y+z=20 with 2 <= x,y,z <= 10? Give the final integer."}],"user_response":{"from":"human","value":"57"}}
+{"prompt":[{"from":"human","value":"How many shortest lattice paths go from (0,0) to (7,7), moving only one unit right or one unit up? Give the final integer."}],"user_response":{"from":"human","value":"3432"}}
+{"prompt":[{"from":"human","value":"In how many ways can eight labeled objects be partitioned into exactly three nonempty unlabeled groups? Give the final integer."}],"user_response":{"from":"human","value":"966"}}
+{"prompt":[{"from":"human","value":"Compute the sum of gcd(k, 60) over all integers k from 1 through 60. Give the final integer."}],"user_response":{"from":"human","value":"360"}}

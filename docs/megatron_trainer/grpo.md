@@ -119,11 +119,10 @@ loss_group    = (Σ_{i,t} ℓ[i,t]·mask[i,t]) / Σ_{i,t} mask[i,t]    # DAPO to
   samples G+1, centers on median, scales by MAD, drops the median rollout
   from backward (MC-GRPO).
 - **Selected-token gather**: unlike `ChunkedRowKL` (which returns detached
-  `policy_logp`, `chunked_head.py:96`), the GRPO processor keeps
-  `logp_θ[t]` attached — the loss is a scalar over gathered tokens, so
-  backward is a plain (not analytic) autograd path. Memory profile is
-  dominated by the same `(C, V)` head output as today; chunked processing
-  keeps the fp32 conversion bounded per chunk.
+  `policy_logp`, `chunked_head.py:96`), GRPO uses an analytic autograd function
+  for the selected-token log-prob. Forward saves the compact softmax state;
+  backward reconstructs `(softmax - one_hot)` in row chunks. This avoids
+  retaining the full fp32 softmax graph while preserving the exact gradient.
 - **GPG rescale (always on)**: `loss *= num_groups / max(num_nondegenerate_groups, eps)`
   where degenerate = all-same reward (TRL #6681 `inverse_alpha`); log
   `frac_reward_zero_std` per step.

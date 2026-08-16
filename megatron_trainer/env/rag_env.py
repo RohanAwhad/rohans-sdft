@@ -41,6 +41,8 @@ class RagEnv(BaseEnv):
         tokenizer,
         use_reflector: bool = False,
         golden_chunk: str = "",
+        seed_offset: int = 0,
+        reward_only: bool = False,
     ):
         self.prompt_text = prompt_text
         self.vllm_base_url = vllm_base_url
@@ -50,21 +52,32 @@ class RagEnv(BaseEnv):
         self.normalized_messages = normalized_messages
         self.tokenizer = tokenizer
         self.use_reflector = use_reflector
+        self.seed_offset = seed_offset
+        self.reward_only = reward_only
 
         # outputs (populated by run())
         self.completion_text: str | None = None
         self.completion_log_probs: list[float] | None = None
+        self.finish_reason: str | None = None
         self.privileged_information_prompt: str | None = privileged_information_prompt
         self.reflector_result: dict[str, str] | None = None
 
     def run(self) -> None:
-        text, _, logprobs = vllm_generate(self.prompt_text, base_url=self.vllm_base_url)
+        text, finish_reason, logprobs = vllm_generate(
+            self.prompt_text,
+            base_url=self.vllm_base_url,
+            seed_offset=self.seed_offset,
+        )
         self.completion_text = text
         self.completion_log_probs = logprobs
+        self.finish_reason = finish_reason
 
         if self.use_reflector:
             self.reflector_result = reflector.run(
-                self.raw_question, self.golden_answer, self.completion_text,
+                self.raw_question,
+                self.golden_answer,
+                self.completion_text,
+                reward_only=self.reward_only,
             )
             if self.reflector_result is not None:
                 self._build_privileged_prompt_from_feedback()
