@@ -849,12 +849,16 @@ def _step_tail(
         sync_weights_to_vllm(model, device, vllm_group, rank=rank)
     t_weight_sync = time.monotonic() - t0
 
-    if optimizer_step % SAVE_EVERY == 0:
+    if optimizer_step % SAVE_EVERY == 0 and TRAIN_MODE != "lora":
+        # LoRA mode already saved this exact path inside push_lora_adapter
+        # above (before the vLLM push/pause/resume sequence) -- re-saving
+        # here would overwrite it a second time *after* vLLM has hot-swapped
+        # in the adapter and may still be reading the file (same
+        # mmap-lazy-load hazard as the transient-dir deletion race fixed
+        # earlier). Only the full-FT path needs an explicit save here since
+        # its weight-sync (sync_weights_to_vllm) doesn't write to disk.
         ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{optimizer_step}")
-        if TRAIN_MODE == "lora":
-            save_hf_adapter_checkpoint(model, ckpt_dir, rank=rank)
-        else:
-            save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
+        save_hf_checkpoint(model, ckpt_dir, tokenizer, rank=rank)
 
     # All ranks wait for rank 0 weight sync before next step
     t0 = time.monotonic()
