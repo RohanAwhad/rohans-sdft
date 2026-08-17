@@ -796,6 +796,22 @@ directly.
     to match the default. Fixed (`e763530`) and bumped to
     `NCCL_TIMEOUT_SEC=5400` (90 min) in `launch_run_47.sh` — large
     margin given resampling's variable, potentially-compounding cost
-    across 5 concurrent groups. Relaunched; watching whether 5400s is
+    across 5 concurrent groups.     Relaunched; watching whether 5400s is
     now sufficient or whether `GRPO_MAX_GEN_BATCHES` itself needs
     reducing from 10 to bound worst-case cost more directly.
+23. **`GRPO_FILTER_GROUPS` confirmed working as intended.** With
+    `NCCL_TIMEOUT_SEC=5400`, the run survived past step 1 for the first
+    time since deploying dynamic sampling. `frac_reward_zero_std`
+    trend across steps 1-4: 0.4, 0.2, 0.2, **0.0** — down from the
+    pre-fix ~0.8-1.0 average, confirming resampling is successfully
+    finding non-degenerate groups almost every time now.
+    `gpg_rescale=1.0` at step 4 (5/5 groups non-degenerate -> no
+    compensation needed) is the expected, healthy value. Cost: step
+    timing is now ~16-35 min/step (vs ~7-10 min/step before), a 2-4x
+    slowdown from resampling overhead — a reasonable tradeoff given
+    essentially 100% of steps now carry real gradient signal instead
+    of ~20%. Continuing to monitor for the accuracy trend to emerge
+    with this finally-dense signal; this is likely the most meaningful
+    test of the GRPO hypothesis so far given every prior real-step
+    accumulation was either infrastructure-crashed early or
+    signal-starved by the degenerate-group problem.
