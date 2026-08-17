@@ -51,6 +51,9 @@ REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "claude-sonnet-4-6@default")
 REFLECTOR_REGION = os.environ.get("REFLECTOR_REGION", "us-east5")
 REFLECTOR_PROJECT_ID = os.environ.get("REFLECTOR_PROJECT_ID", "")
 
+# Top-K reverse KL (0 = full vocab)
+TOPK_K = int(os.environ.get("TOPK_K", "0"))
+
 # Output
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
 SAVE_EVERY = int(os.environ.get("SAVE_EVERY", "200"))  # save checkpoint every N optimizer steps

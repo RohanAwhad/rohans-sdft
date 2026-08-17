@@ -43,6 +43,7 @@ from src.config import (
     SAVE_EVERY,
     STUDENT_MAX_PROMPT_LEN,
     TEACHER_MAX_PROMPT_LEN,
+    TOPK_K,
     TRAIN_DATA_PATH,
     VLLM_BASE_URL,
     WARMUP_STEPS,
@@ -55,6 +56,7 @@ from src.nccl_comm import (
     cleanup,
     init_nccl,
     request_teacher_log_probs,
+    request_teacher_log_probs_topk,
     send_command,
 )
 from src.vllm_utils import (
@@ -97,6 +99,13 @@ def train():
       f"GPU mem after load: {torch.cuda.memory_allocated(DEVICE) / 1e9:.2f} GB"
   )
 
+  if TOPK_K != 0:
+    assert 0 < TOPK_K < vocab_size, \
+        f"TOPK_K must be in [0, {vocab_size}), got {TOPK_K}"
+    logger.info(f"Top-K reverse KL enabled: k={TOPK_K}")
+  else:
+    logger.info("Top-K reverse KL disabled (full vocab)")
+
   dataset = load_dataset("json", data_files=TRAIN_DATA_PATH, split="train")
   collator = SDFTCollator(tokenizer=tokenizer, hindsight_field=HINDSIGHT_FIELD)
   dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, drop_last=True)
@@ -138,6 +147,7 @@ def train():
           "num_epochs": NUM_EPOCHS,
           "gen_max_new_tokens": GEN_MAX_NEW_TOKENS,
           "loss": "reverse_kl",
+          "topk_k": TOPK_K,
           "lr_scheduler": LR_SCHEDULER,
           "warmup_steps": warmup_steps if LR_SCHEDULER == "cosine" else 0,
           "total_optimizer_steps": total_steps,
@@ -220,34 +230,60 @@ def train():
             continue
           completion_ids = completion_ids[:GEN_MAX_NEW_TOKENS]
 
-          # Teacher log-probs via NCCL
-          start_teacher_lp_time = time.monotonic()
           cond_ids: list[int] = tokenizer.encode(
             env.privileged_information_prompt, add_special_tokens=False, truncation=True,
             max_length=TEACHER_MAX_PROMPT_LEN,
           )
-          teacher_log_probs = request_teacher_log_probs(
-            token_ids=cond_ids + completion_ids,
-            prompt_len=len(cond_ids),
-            vocab_size=vocab_size,
-            device=DEVICE,
-          )  # (C, V)
-          end_teacher_lp_time = time.monotonic()
-          logger.info(f"  Teacher LogProb Gen Time: {end_teacher_lp_time - start_teacher_lp_time:0.2f} secs")
 
-          # Student forward pass
-          start_stud_micro_step_time = time.monotonic()
-          student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)  # (C, V)
+          if TOPK_K > 0:
+            # Top-k: student forward first (need logits for top-k indices)
+            start_stud_micro_step_time = time.monotonic()
+            student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)
+            with torch.no_grad():
+              _, topk_indices = torch.topk(student_logits.detach(), TOPK_K, dim=-1)
 
-          # Reverse KL loss
-          loss, step_metrics = compute_kl(
-            student_logits, teacher_log_probs.detach(),
-            completion_ids, tokenizer.eos_token_id,
-          )
-          scaled_loss = loss / GRAD_ACCUM_STEPS
-          scaled_loss.backward()
-          end_stud_micro_step_time = time.monotonic()
-          logger.info(f"  Micro Step Time: {end_stud_micro_step_time - start_stud_micro_step_time:0.2f} secs")
+            start_teacher_lp_time = time.monotonic()
+            teacher_log_probs = request_teacher_log_probs_topk(
+              token_ids=cond_ids + completion_ids,
+              prompt_len=len(cond_ids),
+              topk_indices=topk_indices,
+              device=DEVICE,
+            )
+            end_teacher_lp_time = time.monotonic()
+            logger.info(f"  Teacher LogProb Gen Time: {end_teacher_lp_time - start_teacher_lp_time:0.2f} secs")
+
+            loss, step_metrics = compute_kl(
+              student_logits, teacher_log_probs.detach(),
+              completion_ids, tokenizer.eos_token_id,
+              topk_indices=topk_indices,
+            )
+            scaled_loss = loss / GRAD_ACCUM_STEPS
+            scaled_loss.backward()
+            end_stud_micro_step_time = time.monotonic()
+            logger.info(f"  Micro Step Time: {end_stud_micro_step_time - start_stud_micro_step_time:0.2f} secs")
+          else:
+            # Full-vocab: teacher first (overlap), then student (current behavior)
+            start_teacher_lp_time = time.monotonic()
+            teacher_log_probs = request_teacher_log_probs(
+              token_ids=cond_ids + completion_ids,
+              prompt_len=len(cond_ids),
+              vocab_size=vocab_size,
+              device=DEVICE,
+            )
+            end_teacher_lp_time = time.monotonic()
+            logger.info(f"  Teacher LogProb Gen Time: {end_teacher_lp_time - start_teacher_lp_time:0.2f} secs")
+
+            start_stud_micro_step_time = time.monotonic()
+            student_logits = forward_student(model, tokenizer, env.prompt_text, completion_ids, DEVICE)
+
+            loss, step_metrics = compute_kl(
+              student_logits, teacher_log_probs.detach(),
+              completion_ids, tokenizer.eos_token_id,
+            )
+            scaled_loss = loss / GRAD_ACCUM_STEPS
+            scaled_loss.backward()
+            end_stud_micro_step_time = time.monotonic()
+            logger.info(f"  Micro Step Time: {end_stud_micro_step_time - start_stud_micro_step_time:0.2f} secs")
 
           loss_val = loss.item()
           accum_loss_sum += loss_val

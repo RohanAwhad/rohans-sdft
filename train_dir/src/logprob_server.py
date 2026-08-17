@@ -17,9 +17,11 @@ from src.nccl_comm import (
     CMD_SHUTDOWN,
     CMD_SYNC_WEIGHTS,
     CMD_TEACHER_LOGPROBS,
+    CMD_TEACHER_LOGPROBS_TOPK,
     broadcast_weights_ema,
     cleanup,
     handle_teacher_log_probs,
+    handle_teacher_log_probs_topk,
     init_nccl,
     recv_command,
 )
@@ -55,6 +57,12 @@ def main() -> None:
             request_count += 1
             if request_count % 50 == 0:
                 logger.info(f"Served {request_count} logprob requests")
+
+        elif cmd == CMD_TEACHER_LOGPROBS_TOPK:
+            handle_teacher_log_probs_topk(model, DEVICE)
+            request_count += 1
+            if request_count % 50 == 0:
+                logger.info(f"Served {request_count} top-k logprob requests")
 
         elif cmd == CMD_SYNC_WEIGHTS:
             logger.info(f"Receiving weight sync (EMA alpha={EMA_ALPHA})...")

@@ -12,17 +12,23 @@ def compute_kl(
     teacher_log_probs: torch.Tensor,
     completion_ids: list[int],
     eos_token_id: int | None,
+    topk_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Chunked reverse KL(student || teacher) averaged over token positions.
 
     Processes KL_CHUNK tokens at a time to avoid materializing full (C, V)
     intermediates. Gradient flows through slice assignment into per_token_kl.
 
+    When topk_indices is provided, the KL sum is restricted to the k tokens
+    per position (by student logit magnitude). Non-top-k tokens are treated
+    as having zero probability.
+
     Args:
         student_logits:    (C, V) bfloat16, with gradient
-        teacher_log_probs: (C, V) bfloat16, detached (log-softmax)
+        teacher_log_probs: (C, V) or (C, k) bfloat16, detached (log-softmax)
         completion_ids:    token IDs of the completion (for signal metrics)
         eos_token_id:      EOS token ID
+        topk_indices:      (C, k) int64 or None for full-vocab
 
     Returns:
         (loss, metrics_dict)
@@ -36,21 +42,30 @@ def compute_kl(
     policy_logp = torch.zeros(C, device=device, dtype=torch.float32)
     critic_logp = torch.zeros(C, device=device, dtype=torch.float32)
 
+    use_topk = topk_indices is not None
+
     for i in range(0, C, KL_CHUNK):
         j = min(i + KL_CHUNK, C)
         s_chunk = student_logits[i:j].float()       # (chunk, V) — has grad
-        t_chunk = teacher_log_probs[i:j].float()     # (chunk, V) — detached
+        t_chunk = teacher_log_probs[i:j].float()     # (chunk, V) or (chunk, k)
 
-        s_log = F.log_softmax(s_chunk, dim=-1)
-        s_prob = s_log.exp()
-        # KL(p_s || p_t) = sum_v p_s(v) * (log p_s(v) - log p_t(v))
-        per_token_kl[i:j] = (s_prob * (s_log - t_chunk)).sum(dim=-1)
+        s_log = F.log_softmax(s_chunk, dim=-1)       # (chunk, V)
 
-        # Signal metrics at generated tokens (detached)
+        # Signal metrics at generated tokens (from full s_log, before top-k gather)
         chunk_ids = token_ids[i:j]
         idx = torch.arange(j - i, device=device)
         policy_logp[i:j] = s_log[idx, chunk_ids].detach()
-        critic_logp[i:j] = t_chunk[idx, chunk_ids]
+
+        if use_topk:
+            idx_chunk = topk_indices[i:j]            # (chunk, k)
+            s_log = s_log.gather(1, idx_chunk)       # (chunk, k)
+            critic_logp[i:j] = 0.0  # teacher logprob at sampled token unavailable in top-k mode
+        else:
+            critic_logp[i:j] = t_chunk[idx, chunk_ids]
+
+        s_prob = s_log.exp()
+        # KL(p_s || p_t) = sum_v p_s(v) * (log p_s(v) - log p_t(v))
+        per_token_kl[i:j] = (s_prob * (s_log - t_chunk)).sum(dim=-1)
 
     loss = per_token_kl.mean()
 
