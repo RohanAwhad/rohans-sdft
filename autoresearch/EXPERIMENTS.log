@@ -893,6 +893,23 @@ directly.
    occurrence so far, watching whether the fix holds across multiple
    SAVE_EVERY boundaries (steps 5, 10, 15...) before calling it
    confirmed.
-6. **Analysis:** _pending more steps._
-7. **Conclusion:** _pending._
-8. **New questions:** _pending._
+6. **Analysis:** Insufficient data — only 1 step observed before the
+   double-save bug was found and fixed (invalidating further comparison
+   against the pre-fix trajectory), and the campaign was halted shortly
+   after redeploying with that fix, before accumulating enough
+   post-fix steps to read a trend.
+7. **Conclusion:** INCONCLUSIVE — halted by explicit user instruction
+   ("scratch this, stop the run") before reaching a decidable number of
+   steps. First step showed no instability (healthy loss/grad_norm/
+   entropy), which at least rules out "1e-4 immediately destabilizes."
+   Whether it actually breaks the accuracy plateau is unanswered.
+8. **New questions:** If resumed: (a) does GRPO_LR=1e-4 show a trend
+   given 10-15+ clean steps, (b) is the double-save fix (#525151d)
+   sufficient on its own or was the step-5 crash coincidental with the
+   pre-existing vLLM stability issue, (c) would GRPO_KL_COEF>0 (unbuilt
+   — needs the K3++ reference-KL path from PR #24) provide a
+   distributional anchor that prevents whatever is holding accuracy
+   flat, (d) is the reflector's PASS/FAIL signal itself too noisy/coarse
+   a reward for this task regardless of gradient mechanics. See
+   `devlogs.md` (2026-08-17 entry) for the full session summary and
+   final stopped state.

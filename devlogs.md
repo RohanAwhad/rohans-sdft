@@ -1,5 +1,156 @@
 # Self-Distillation Dev Logs
 
+## 2026-08-17 - GRPO campaign (E047/E048): six infra bugs found+fixed, still no accuracy signal — halted by user
+
+### Goal (not achieved)
+Beat baseline accuracy 0.7415 (with thinking) on analyze_deepresearch for
+gpt-oss-20B via GRPO (reward = existing reflector PASS/FAIL verdict,
+`megatron_trainer/reflector.py::run`). Stretch target 0.7715 (+3pp McNemar
+threshold). Full context/design in `plan_grpo.md` and
+`autoresearch/EXPERIMENTS.log` (E047/E048 entries — this devlog is a
+condensed summary; those files have the full blow-by-blow).
+
+**Session ended with the user stopping everything ("scratch this, stop the
+run") after ~2 days of continuous infra debugging produced a stable
+training loop but zero measurable accuracy improvement.**
+
+### Starting state
+E047 (first real GRPO run) had been crash-looping for hours: the retry
+loop (bounded at 20 attempts, auto-restart) kept exhausting all 20
+attempts and giving up, with the training node sitting idle for ~6 hours
+at one point before the crash pattern was even noticed. Root-caused and
+fixed six distinct issues, in this order:
+
+1. **`gpg_rescale` was a permanent no-op** (`7da66ac`, found via comparing
+   against a parallel independent GRPO implementation, PR #24). Computed
+   per-rank-local; at the actual config (`groups_per_step=1`) this can
+   only ever be `1.0` or `10000×(already-zero)` — never doing the intended
+   cross-rank degenerate-group compensation. Fixed via `dist.all_reduce`
+   of `[num_groups_local, num_nondeg_local]` before computing the rescale.
+   Confirmed post-fix: real varying values (2.5, 5.0, 50000.0) instead of
+   stuck 1.0/10000.0.
+2. **Checkpoint-delete race crashed vLLM's engine, two iterations to fix**
+   (`0c17fe1`, `6beda94`). `trainer.py`'s SAVE_EVERY cleanup deleted the
+   just-pushed LoRA adapter directory immediately after vLLM's
+   `/v1/load_lora_adapter` returned success — but that response doesn't
+   guarantee the file is done being read (safetensors/mmap-backed loads
+   can page in lazily; `--max-cpu-loras=2` means vLLM's LRU cache can hold
+   more than the immediately-previous adapter generation). Every attempt
+   crashed with `"EngineCore encountered an issue"` immediately after
+   `opt_step=1`, the first step the delete path ever ran. A 1-step delay
+   just shifted the crash to `opt_step=2` (proving the mechanism, not
+   fixing it); a 3-slot FIFO delay (comfortably above `max_cpu_loras=2`)
+   finally worked — confirmed by a 28-step crash-free run.
+3. **NCCL collective timeout, also two iterations** (`566983c`, plus a
+   passthrough bug fixed in `e763530`). Default 600s timeout was killing
+   runs whenever vLLM generation throughput stalled for several minutes
+   (a separate, still-unroot-caused vLLM-under-load stability issue —
+   see "Deferred" below) even though generation eventually recovers.
+   Widened to 1800s via an explicit `timeout=` on
+   `dist.init_process_group` (`model_utils.py`). **Silent bug**: the
+   `NCCL_TIMEOUT_SEC` env var was never actually added to
+   `train_full.sh`'s container-launch passthrough list, so the override
+   was inert — confirmed active later, then had to bump again to 5400s
+   once `GRPO_FILTER_GROUPS` (below) made legitimate step-1 generation
+   time exceed even 1800s.
+4. **`GRPO_FILTER_GROUPS` implemented from scratch** (`0a22bc5`) —
+   previously a `NotImplementedError` stub. Motivated by hard evidence:
+   pulled `frac_reward_zero_std` across all 27 steps of the (by-then)
+   stable run and found it averaged **~80% degenerate** (7/27 steps had
+   ALL 5 groups degenerate = zero gradient that entire step), far above
+   the ~5.8% a uniform pass-rate would predict — consistent with a
+   bimodal per-prompt-difficulty distribution (some questions the model
+   always/never solves at G=8). Implementation: a degenerate group
+   (`_push_group`'s exact formula, `len(set(rewards))==1`) triggers
+   resampling a fresh prompt, up to `GRPO_MAX_GEN_BATCHES=10` attempts,
+   inside `_produce_streaming_grpo`; `data_iter` access serialized via a
+   lock since resampling now calls `next()` from worker threads too.
+   Verified control-flow correctness with a standalone mock test (cap
+   enforcement, disabled-state passthrough, cap=1 edge case) before
+   deploying. **Confirmed working**: degenerate rate dropped from ~80% to
+   ~0-20% post-deploy, at the cost of 2-4x longer step times
+   (resampling overhead) — directly caused issue #3's second timeout bump.
+5. **Redundant duplicate checkpoint save** (`525151d`) — found while
+   debugging a crash exactly 11s after `opt_step=5` (the first
+   `SAVE_EVERY` multiple reached post-filter_groups). `_step_tail`'s
+   `SAVE_EVERY`-cadence block called `save_hf_adapter_checkpoint` on the
+   *same* `step_N` path that `push_lora_adapter` had already saved
+   moments earlier — but *after* the vLLM hot-swap push completed,
+   overwriting a file vLLM might still be reading (same hazard class as
+   #2). Only the full-FT branch actually needs this save (its own
+   weight-sync path doesn't write to disk); removed it for LoRA mode.
+   Only one occurrence observed before the session ended — not fully
+   confirmed as reproducible, but clearly a genuine bug regardless.
+6. **Reflector reward-only fast-path implemented** (`c5361a8`, staged,
+   partially deployed). Direct isolated timing test: reflector call
+   costs 8.33s avg (up to 12.24s) at the existing `max_tokens=2048`
+   detailed-feedback setting vs 0.89s avg with a verdict-only
+   `max_tokens=64` variant (~9.4x faster) — GRPO only ever consumes
+   `verdict`, the feedback text was already dead weight
+   (`trainer.py:138-140`'s own comment said as much). `reflector.run()`
+   gained a `verdict_only` param; wired through `RagEnv` and
+   `_build_env` as `verdict_only=(LOSS_TYPE=="grpo")`.
+
+### Results: infra now solid, accuracy never moved
+With all six fixes in place, achieved multiple genuinely stable,
+crash-free multi-step trajectories (28 steps at `GRPO_LR=1e-5`, then 12
+more at the same LR with `GRPO_FILTER_GROUPS=1` eliminating the
+degenerate-group waste). **Accuracy stayed flat in the 0.62-0.67 band
+across every configuration tested — no run ever showed a positive trend,
+and every result sat well below the 0.7415 baseline**:
+- 28 steps @ `LR=1e-5`, pre-filter_groups: first/second-half means 0.6457
+  vs 0.6499 (steps 0-11 vs 12-23) — essentially flat.
+- 12 steps @ `LR=1e-5`, post-filter_groups (near-zero degenerate rate,
+  correctly functioning gradients): first/second-half means 0.6457 vs
+  0.6499 again — same flat pattern despite dense, healthy signal.
+- Escalated to `GRPO_LR=1e-4` (10x) as the next hypothesis — literature
+  value was an explicitly-documented untested guess for LoRA mode
+  (`plan_grpo.md`'s own design table), and observed raw `grad_norm`
+  values were frequently very large (300-800+) but got rescaled down to
+  `GRPO_GRAD_CLIP=0.2` regardless, implying a tiny effective per-step
+  update (~2e-6) at the old LR. First step at 1e-4 looked healthy (no
+  immediate instability: loss=0.05, grad_norm=6.4, entropy=0.48) — this
+  test (E048) was still in its first few steps when the session ended,
+  inconclusive.
+
+### Deferred / not root-caused
+- **vLLM generation throughput can collapse under sustained concurrent
+  load** (~190 tok/s down to 16-32 tok/s for minutes at a time, GPU KV
+  cache usage staying low the whole time — not a memory/capacity issue).
+  This is the underlying cause behind issue #3's NCCL timeouts.
+  Candidates identified but not tested: missing tuned MoE kernel config
+  for this exact model+GPU shape (`E=32,N=2880,device_name=
+  NVIDIA_H100_80GB_HBM3` — both training and eval vLLM instances log
+  `"Using default MoE config"`; vLLM ships an official tuning script,
+  `benchmarks/kernels/benchmark_moe.py`, never run — needs a free GPU
+  the campaign never had), `--enforce-eager` (disables CUDA graphs,
+  required for the weight-transfer dev-mode endpoints — unclear if a
+  CUDA-graph-compatible alternative exists), `processed_logprobs`
+  sampler mode (required for correct importance-sampling weights,
+  documented in-code as a measured "slow path" at ~20 tok/s single-stream,
+  never root-caused why).
+- **No checkpoint-resume capability** — every crash/restart starts a
+  fresh LoRA init (no `TRAINER_SEED` set), which is why the eval
+  accuracy trend had to be stitched together from whichever single
+  attempt survived longest each time, rather than one continuous
+  trajectory across the whole campaign.
+- E048 (`GRPO_LR=1e-4`) was cut short before reaching a conclusive number
+  of steps — genuinely unknown whether a higher LR would have broken the
+  plateau.
+- PR #24 (parallel independent GRPO implementation, `ra/grpo-impl`) still
+  has un-ported ideas: K3++ reference KL (complete there, stubbed here),
+  richer test patterns. Verdict from the earlier comparison remains
+  "cherry-pick, don't merge" (LoRA-incompatible, serialized rollout gen).
+
+### Final state (as of session end)
+All training/eval processes killed on rh-h100-05 (`podman kill
+sdft-megatron-train`, `pkill -f launch_run_47.sh`, `pkill -f
+auto_eval_poller.sh`, `pkill -f eval_with_retrieval.py`), all 8 GPUs
+confirmed idle (0% util, ~4MiB used each). All code changes committed to
+`ra/grpo-live` and pushed (final commit `52b727b`+ fixes through
+`525151d`) and synced to node05 (fast-forward, clean). No experiments
+currently running; campaign paused pending further direction.
+
 ## 2026-08-15 - Issue #22: gpt-oss MoE LoRA export layout fix (v0.3.0)
 
 - **Repro (node 12, rh-h100-12)**: `TRAIN_MODE=lora` + `MODEL_NAME=unsloth/gpt-oss-20b-BF16`
