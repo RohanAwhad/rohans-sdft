@@ -812,6 +812,66 @@ directly.
     essentially 100% of steps now carry real gradient signal instead
     of ~20%. Continuing to monitor for the accuracy trend to emerge
     with this finally-dense signal; this is likely the most meaningful
-    test of the GRPO hypothesis so far given every prior real-step
+    test of the GRPO hypothesis so far given every     prior real-step
     accumulation was either infrastructure-crashed early or
     signal-starved by the degenerate-group problem.
+24. **Result: still flat.** 12 steps completed with zero crashes,
+    `frac_reward_zero_std` staying low (~0.2) throughout — the
+    healthiest, most signal-dense trajectory of the whole campaign.
+    Accuracy (steps 0-12, this attempt only): 0.6481, 0.6302, 0.6391,
+    0.6409, 0.6625, 0.6535, 0.6463, 0.6481, 0.6589, 0.6463, 0.6535,
+    0.6481, 0.6481. First-half mean (steps 0-5) = 0.6457, second-half
+    mean (steps 6-12) = 0.6499 — a +0.4pp difference, well within the
+    ~2.5-4pp noise floor. Effectively no trend, despite finally having
+    both correct gradient math (gpg_rescale) AND dense per-step signal
+    (near-zero degenerate rate). Noted: raw (pre-clip) `grad_norm` is
+    frequently very large (371, 519, 818 at steps 10/2/12) but
+    `GRPO_GRAD_CLIP=0.2` rescales every applied update down to that
+    same small norm regardless — combined with `GRPO_LR=1e-5`, the
+    actual per-step parameter movement is `~LR * 0.2 = 2e-6` in the
+    clipped direction, tiny for a rank-32 LoRA adapter. `plan_grpo.md`'s
+    own design table already flagged this LR as "a guess, unvalidated
+    for GRPO+LoRA" (LoRA's smaller effective param space is expected to
+    tolerate higher LR than full-FT's 1e-6 literature default).
+
+---
+
+## #E048 [RUNNING]
+
+1. **Motivation:** E047 reached 12 steps of genuinely healthy GRPO
+   training (post gpg_rescale + GRPO_FILTER_GROUPS fixes: correct
+   cross-rank advantage compensation, near-zero degenerate groups) and
+   showed zero accuracy trend (first/second-half means 0.6457/0.6499,
+   within noise). `GRPO_LR=1e-5` was documented from the start as an
+   untested guess for LoRA mode (full-FT GRPO literature default is
+   1e-6; LoRA's much smaller effective parameter count is expected to
+   tolerate substantially higher LR). Combined with `GRPO_GRAD_CLIP=0.2`
+   rescaling every applied update to that same small norm regardless of
+   the raw gradient's magnitude, the effective per-step update at
+   LR=1e-5 is tiny (~2e-6 in the clipped direction) — plausibly too
+   small to move a LoRA adapter's behavior in any accuracy-visible way
+   within an affordable number of steps.
+2. **Hypothesis:** `GRPO_LR=1e-5` is too conservative for LoRA-mode
+   GRPO. A 10x higher LR (1e-4) will produce a clearly visible change in
+   the accuracy trajectory within ~10-15 steps — either genuine upward
+   movement (confirming LR was the bottleneck) or visible instability
+   (confirming 1e-4 overshoots, informing a smaller step-up next).
+3. **Prediction:** Within 10-15 steps at `GRPO_LR=1e-4`: either (a)
+   accuracy trend breaks out of the 0.63-0.66 band with a sustained
+   upward direction, or (b) clear instability signals (loss
+   divergence/spikes beyond the already-observed range, entropy
+   collapsing toward 0, or grad_norm/loss becoming non-finite).
+   Falsified if: still flat at 0.63-0.66 after 10-15 steps with no
+   instability either (would suggest LR isn't the binding constraint at
+   all — reward/task signal itself, not step size, is the bottleneck).
+4. **Design:** Same as E047's now-stable config (`LOSS_TYPE=grpo`,
+   `TRAIN_MODE=lora`, `GRPO_FILTER_GROUPS=1`, `GRPO_MAX_GEN_BATCHES=10`,
+   `NCCL_TIMEOUT_SEC=5400`, all other infra fixes) but `GRPO_LR=1e-4`
+   (was `1e-5`). Continuing the same `run_47_grpo_lora` output naming
+   (LoRA has no resume capability regardless, so this is a fresh init
+   either way — not worth a new run number for a single hyperparameter
+   change on the same infra).
+5. **Results:** _pending, just launched._
+6. **Analysis:** _pending._
+7. **Conclusion:** _pending._
+8. **New questions:** _pending._
