@@ -871,7 +871,28 @@ directly.
    (LoRA has no resume capability regardless, so this is a fresh init
    either way — not worth a new run number for a single hyperparameter
    change on the same infra).
-5. **Results:** _pending, just launched._
-6. **Analysis:** _pending._
+5. **Results:** _in progress._ First step (opt_step=1, loss=0.0500,
+   grad_norm=6.39, entropy=0.4847) showed no immediate instability —
+   healthy values, not exploded/collapsed. Attempt 1 then reached
+   opt_step=5 (loss=0.0515, grad_norm=1.24, entropy=1.07, still
+   healthy) before crashing 11s later with the same "EngineCore
+   encountered an issue" signature as the original delete-race bug.
+   **New bug found+fixed**: step 5 is the first `SAVE_EVERY` multiple
+   reached under this run — found a genuine, pre-existing redundant
+   double-save: `_step_tail`'s `SAVE_EVERY`-cadence block called
+   `save_hf_adapter_checkpoint` on the exact same `step_N` path that
+   `push_lora_adapter` had already saved moments earlier, but *after*
+   the vLLM hot-swap push completed — overwriting a file vLLM might
+   still be reading (same mmap-lazy-load hazard as the transient-delete
+   race). Fixed (`525151d`): removed the redundant lora-mode save (only
+   the full-FT branch needs it, since its own weight-sync path doesn't
+   write to disk). This pathway existed before this session and was
+   apparently never hit at exactly the wrong moment until now — could
+   be timing-sensitive (more plausible now given GRPO_FILTER_GROUPS
+   changes the gap between pushes) or could be pure chance; only one
+   occurrence so far, watching whether the fix holds across multiple
+   SAVE_EVERY boundaries (steps 5, 10, 15...) before calling it
+   confirmed.
+6. **Analysis:** _pending more steps._
 7. **Conclusion:** _pending._
 8. **New questions:** _pending._
